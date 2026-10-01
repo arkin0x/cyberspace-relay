@@ -51,6 +51,12 @@ type Config struct {
 	// always delete what they published here, even after leaving the region.
 	AlwaysAllowKinds []int `yaml:"always_allow_kinds"`
 
+	// GateReads makes the relay a speakeasy: reading (REQ, COUNT, live
+	// events) also requires NIP-42 AUTH as a pubkey inside the region, and
+	// every HTTP route except the websocket, NIP-11 and NIP-86 is closed.
+	// Default true.
+	GateReads *bool `yaml:"gate_reads"`
+
 	// CacheTTLSeconds keeps an admitted author's verdict this long.
 	// Default 600. A movement event published here always re-verifies.
 	CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
@@ -107,6 +113,10 @@ func ParseConfig(data []byte) (*Config, error) {
 	if c.UseLocalEvents == nil {
 		t := true
 		c.UseLocalEvents = &t
+	}
+	if c.GateReads == nil {
+		t := true
+		c.GateReads = &t
 	}
 	if c.MaxChainEvents <= 0 {
 		c.MaxChainEvents = 5000

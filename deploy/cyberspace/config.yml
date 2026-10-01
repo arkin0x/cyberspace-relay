@@ -88,12 +88,12 @@ resource_limits:
   heap_size_mb: 1024 # Go GC heap soft target in MB. Should be roughly half of memory_mb so the runtime has room for stacks, mmap'd LMDB, etc.
 
 auth:
-  required: false # If true, clients MUST authenticate (NIP-42) before they can read or write.
+  required: true # CYBERSPACE: speakeasy; clients MUST authenticate (NIP-42) to read or write
   # When required: true, this MUST be set to the externally-reachable URL clients
   # use to connect (e.g. wss://relay.yourdomain.com/). The string is signed into
   # the AUTH challenge and must match what the client sees, or the AUTH fails.
   # Leave empty if required: false.
-  relay_url: ""
+  relay_url: "" # CYBERSPACE: MUST be set to the public URL (e.g. wss://<host>); until then no AUTH can succeed, so nothing can be read or written
   # How strictly the AUTH `relay` tag is compared against relay_url.
   # Both modes canonicalize scheme + host (lowercase, strip default ports) and
   # ignore trailing slashes. They differ in path handling:

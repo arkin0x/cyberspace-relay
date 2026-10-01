@@ -2,7 +2,9 @@
 
 The region gate makes a relay accept events only from pubkeys whose
 [Cyberspace v2](https://github.com/arkin0x/cyberspace) movement chain places
-them inside the relay's region. Anyone can still read.
+them inside the relay's region. With `gate_reads: true` (the default) it is a
+**speakeasy**: reading is gated the same way, so only identities inside the
+region can see what is posted there.
 
 It is off unless `region.yml` exists in the data directory with
 `enabled: true`. Start from [`examples/region.example.yml`](examples/region.example.yml).
@@ -29,6 +31,27 @@ make it look up chains faster than those allow, and at most
 `max_concurrent_lookups` lookups (default 16) run at once; an event that
 cannot start one in time is refused with "try again", uncached. Expired
 verdicts are swept from the cache once it holds more than 4,096 authors.
+
+## The speakeasy (`gate_reads`)
+
+Reading needs to know who the reader is, so it requires NIP-42 AUTH. The gate
+demands it itself, whatever `auth.required` says; set `auth.required: true`
+anyway so writers are asked for AUTH up front, and set `auth.relay_url` to the
+public URL: AUTH events are checked against it, and while it is empty no AUTH
+can succeed, so nothing can be read or written.
+
+| Read path | Rule |
+|---|---|
+| `REQ`, `COUNT` | After the per-client rate limits: refused `auth-required:` without AUTH, `restricted:` unless the authenticated pubkey is inside the region (same lookup, cache and exemptions as writers). |
+| Live events (after EOSE) | Pushed only to connections whose pubkey is admitted, decided from the cache without blocking. An expired verdict keeps answering while a background lookup refreshes it, so someone who leaves the region (moving elsewhere) stops receiving within `cache_ttl_seconds` plus one lookup; an unknown pubkey gets nothing until its lookup completes. |
+| HTTP | Everything except the websocket, NIP-11 and NIP-86 at `/` answers 404: grain's web client and API (`/api/v1/events/*`, `/api/v1/client/*`, stats, the dashboard) read through the server's own relay pool, and a browser can sign AUTH for that shared pool, so they would be a way around the gate. Manage the relay through its config files and NIP-86. |
+
+NIP-11 advertises `auth_required` and `restricted_writes`. The NIP-11 document
+itself stays public, so the relay's existence, name and description are not secret.
+
+Verified over the wire: outsider REQ without AUTH `auth-required`, with AUTH
+`restricted`; member reads its note; member COUNT 1, outsider COUNT refused;
+`GET /`, `/api/v1/events/query`, `/api/v1/relay/stats`, `/static/*` all 404.
 
 ## Looking up a chain
 

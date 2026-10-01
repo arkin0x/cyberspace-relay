@@ -49,6 +49,12 @@ func HandleCount(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	if msg, refused := readGateRefusal(client, ReadGateTimeout); refused {
+		log.Req().Info("COUNT rejected by read gate", "sub_id", subID, "reason", msg)
+		response.SendClosed(client, subID, msg)
+		return
+	}
+
 	filters, err := parseFilters(message[2:])
 	if err != nil {
 		log.Req().Info("Rejected malformed COUNT filter", "sub_id", subID, "error", err)

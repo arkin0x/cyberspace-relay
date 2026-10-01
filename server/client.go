@@ -900,6 +900,9 @@ func BroadcastEvent(evt nostr.Event) {
 		if protected && !handlers.CanServeProtectedEvent(evt, handlers.GetAuthedPubkey(c)) {
 			continue
 		}
+		if handlers.LiveReadGate != nil && !handlers.LiveReadGate(handlers.GetAuthedPubkey(c)) {
+			continue
+		}
 		c.ForEachSubscription(func(subID string, filters []nostr.Filter) {
 			for _, f := range filters {
 				if f.MatchesEvent(evt) {

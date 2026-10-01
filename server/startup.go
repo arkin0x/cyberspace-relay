@@ -55,7 +55,7 @@ func Run() error {
 		lim.MaxContentLength = c.RateLimit.MaxContentLength // content-field char cap (0 = unset)
 		lim.MaxSubscriptions = c.Server.MaxSubscriptionsPerClient
 		lim.MaxLimit = c.Server.ImplicitReqLimit // max events returned per REQ
-		lim.AuthRequired = c.Auth.Required
+		lim.AuthRequired = c.Auth.Required || handlers.ReadGate != nil
 		lim.PaymentRequired = false // grain has no payment gate
 		// restricted_writes: true when a gate governs *who* may write.
 		if wl := config.GetWhitelistConfig(); wl != nil {
@@ -373,7 +373,7 @@ func setupHTTPServer(cfg *cfgType.ServerConfig) *http.Server {
 
 	server := &http.Server{
 		Addr:         cfg.Server.Port,
-		Handler:      mux,
+		Handler:      httpGuard(mux),
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
 		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,

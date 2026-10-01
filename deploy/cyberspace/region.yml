@@ -2,6 +2,7 @@
 # refuses every event (fail closed). See docs/region-gate.md for the forms.
 enabled: true
 mode: structural
+gate_reads: true # speakeasy: reading needs AUTH as a pubkey inside the region
 regions: []
 chain_relays:
   - wss://cyberspace.nostr1.com

@@ -90,13 +90,23 @@ func (g *Gate) Admit(ctx context.Context, evt nostr.Event) (bool, string) {
 		g.remember(evt.PubKey, ok, reason)
 		return ok, reason
 	}
+	return g.AdmitPubkey(ctx, evt.PubKey)
+}
 
+// AdmitPubkey reports whether a pubkey is inside the region right now: from
+// the cache when fresh, otherwise by one shared lookup. Readers are judged
+// with it (by the pubkey they authenticated as), and so are writers of
+// anything but movement events.
+func (g *Gate) AdmitPubkey(ctx context.Context, pubkey string) (bool, string) {
+	if g.cfg.exempt[pubkey] {
+		return true, ""
+	}
 	g.mu.Lock()
-	if c, hit := g.cache[evt.PubKey]; hit && g.now().Before(c.expires) {
+	if c, hit := g.cache[pubkey]; hit && g.now().Before(c.expires) {
 		g.mu.Unlock()
 		return c.ok, c.reason
 	}
-	if c := g.inflight[evt.PubKey]; c != nil {
+	if c := g.inflight[pubkey]; c != nil {
 		g.mu.Unlock()
 		select {
 		case <-c.done:
@@ -106,16 +116,48 @@ func (g *Gate) Admit(ctx context.Context, evt nostr.Event) (bool, string) {
 		}
 	}
 	c := &call{done: make(chan struct{})}
-	g.inflight[evt.PubKey] = c
+	g.inflight[pubkey] = c
 	g.mu.Unlock()
 
-	c.ok, c.reason = g.decide(ctx, evt.PubKey, nil)
+	c.ok, c.reason = g.decide(ctx, pubkey, nil)
 	g.mu.Lock()
-	delete(g.inflight, evt.PubKey)
+	delete(g.inflight, pubkey)
 	g.mu.Unlock()
-	g.remember(evt.PubKey, c.ok, c.reason)
+	g.remember(pubkey, c.ok, c.reason)
 	close(c.done)
 	return c.ok, c.reason
+}
+
+// LiveAllowed decides, without blocking, whether a live event may be pushed
+// to a connection authenticated as pubkey. It answers from the cache; an
+// expired verdict keeps answering until a background lookup replaces it
+// (so someone who leaves the region stops receiving events within one
+// cache_ttl_seconds plus one lookup), and an unknown pubkey gets nothing
+// until its lookup completes.
+func (g *Gate) LiveAllowed(pubkey string) bool {
+	if pubkey == "" {
+		return false
+	}
+	if g.cfg.exempt[pubkey] {
+		return true
+	}
+	g.mu.Lock()
+	c, hit := g.cache[pubkey]
+	fresh := hit && g.now().Before(c.expires)
+	busy := g.inflight[pubkey] != nil
+	g.mu.Unlock()
+	if !fresh && !busy {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), g.lookupTimeout())
+			defer cancel()
+			g.AdmitPubkey(ctx, pubkey)
+		}()
+	}
+	return hit && c.ok
+}
+
+func (g *Gate) lookupTimeout() time.Duration {
+	return time.Duration(g.cfg.FetchTimeoutSeconds+2) * time.Second
 }
 
 func (g *Gate) remember(pubkey string, ok bool, reason string) {
@@ -192,7 +234,7 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 		"length", vd.Length, "unchecked", vd.Unchecked, "position_event", vd.PositionEvent, "stopped", vd.Stopped)
 	switch {
 	case !vd.HasChain:
-		return false, "restricted: this relay only accepts events from cyberspace identities inside its region; no movement chain found for your pubkey"
+		return false, "restricted: this relay is only for cyberspace identities inside its region; no movement chain found for your pubkey"
 	case pos == nil:
 		return false, "restricted: your cyberspace chain could not be verified: " + vd.Stopped
 	case !g.cfg.Contains(*pos):

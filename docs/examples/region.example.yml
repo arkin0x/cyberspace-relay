@@ -14,6 +14,13 @@ enabled: true
 #   spec is ratified no proof is verified, so this is the spawn point.
 mode: structural
 
+# Speakeasy (default true): reading also requires NIP-42 AUTH as a pubkey
+# inside the region (REQ, COUNT and live events), and every HTTP route except
+# the websocket, NIP-11 and NIP-86 is closed (no web client, no dashboard).
+# Set auth.relay_url in config.yml to the public URL or no AUTH can succeed.
+# false = anyone can read; only writing is gated.
+gate_reads: true
+
 # An author is admitted when its position lies in ANY of these.
 regions:
   # One sector (2^30 per axis, CYBERSPACE_V2 §10), as in the event S tag.

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"time"
 
@@ -21,12 +22,13 @@ const regionConfigFile = "region.yml"
 // it is fixed, because an open relay is the wrong failure for a gated one.
 func startRegionGate() {
 	handlers.EventGate = nil
+	handlers.ReadGate = nil
+	handlers.LiveReadGate = nil
+	httpGuard = func(h http.Handler) http.Handler { return h }
 	cfg, err := regiongate.LoadConfig(config.ConfigPath(regionConfigFile))
 	if err != nil {
 		log.RegionGate().Error("region.yml invalid; refusing all events until fixed", "error", err)
-		handlers.EventGate = func(context.Context, nostr.Event) (bool, string) {
-			return false, "restricted: relay region is misconfigured"
-		}
+		failClosed()
 		return
 	}
 	if cfg == nil || !cfg.Enabled {
@@ -47,9 +49,7 @@ func startRegionGate() {
 		key, err := regiongate.AuthKey(os.Getenv("GRAIN_REGION_AUTH_KEY"))
 		if err != nil {
 			log.RegionGate().Error("GRAIN_REGION_AUTH_KEY invalid; refusing all events until fixed", "error", err)
-			handlers.EventGate = func(context.Context, nostr.Event) (bool, string) {
-				return false, "restricted: relay region is misconfigured"
-			}
+			failClosed()
 			return
 		}
 		sources = append(sources, regiongate.RelaySource{
@@ -66,7 +66,29 @@ func startRegionGate() {
 		defer cancel()
 		return gate.Admit(ctx, evt)
 	}
+	if *cfg.GateReads {
+		handlers.ReadGate = gate.AdmitPubkey
+		handlers.LiveReadGate = gate.LiveAllowed
+		httpGuard = speakeasyHTTP
+	}
 	log.RegionGate().Info("Region gate enabled",
-		"mode", cfg.Mode, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
+		"mode", cfg.Mode, "gate_reads", *cfg.GateReads, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
 		"proof_checker", "PendingSpec (no work proofs checked until the spec is ratified)")
+}
+
+// httpGuard wraps the HTTP handler. It is the identity unless the region gate
+// guards reading.
+var httpGuard = func(h http.Handler) http.Handler { return h }
+
+// speakeasyHTTP closes every HTTP route except the websocket, NIP-11 and
+// NIP-86 (see regiongate.SpeakeasyGuard).
+func speakeasyHTTP(h http.Handler) http.Handler { return regiongate.SpeakeasyGuard(h) }
+
+// failClosed refuses every write and read until region.yml is fixed.
+func failClosed() {
+	const msg = "restricted: relay region is misconfigured"
+	handlers.EventGate = func(context.Context, nostr.Event) (bool, string) { return false, msg }
+	handlers.ReadGate = func(context.Context, string) (bool, string) { return false, msg }
+	handlers.LiveReadGate = func(string) bool { return false }
+	httpGuard = speakeasyHTTP
 }

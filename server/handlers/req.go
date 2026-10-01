@@ -52,6 +52,12 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	if msg, refused := readGateRefusal(client, ReadGateTimeout); refused {
+		log.Req().Info("REQ rejected by read gate", "sub_id", subID, "reason", msg)
+		response.SendClosed(client, subID, msg)
+		return
+	}
+
 	// Parse and validate filters. Strict: a malformed field rejects the whole
 	// REQ rather than being dropped, since a dropped constraint widens the
 	// query (see nostr.ParseFilter).
