@@ -61,6 +61,9 @@ func Run() error {
 		if wl := config.GetWhitelistConfig(); wl != nil {
 			lim.RestrictedWrites = wl.PubkeyWhitelist.Enabled || wl.DomainWhitelist.Enabled
 		}
+		if handlers.EventGate != nil {
+			lim.RestrictedWrites = true
+		}
 		// created_at bounds: advertise the same window the timestamp validator
 		// enforces (recomputed per request so relative "now±X" bounds stay live).
 		minTs, maxTs := validation.ResolveTimeBounds(c)
@@ -153,6 +156,12 @@ func startConfigWatchers(restartChan chan<- struct{}) {
 		"whitelist.yml",
 		"blacklist.yml",
 		"relay_metadata.json",
+	}
+
+	// region.yml is optional; the watcher exits on a missing file, so it
+	// is only watched when present at startup.
+	if _, err := os.Stat(config.ConfigPath(regionConfigFile)); err == nil {
+		watchFiles = append(watchFiles, regionConfigFile)
 	}
 
 	for _, file := range watchFiles {
@@ -328,6 +337,9 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 
 	// Wire up real-time event broadcasting to active subscribers
 	handlers.OnEventStored = BroadcastEvent
+
+	// Optional admission gate (region.yml).
+	startRegionGate()
 
 	// Initialize client package with server configuration. This must happen
 	// BEFORE InitializePubkeyCache because the initial blacklist refresh

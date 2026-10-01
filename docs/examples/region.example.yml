@@ -1,0 +1,45 @@
+# GRAIN region gate (optional)
+#
+# Copy to region.yml in the data directory to accept events only from
+# pubkeys whose Cyberspace v2 movement chain places them inside a region.
+# Reads stay open. Without region.yml (or with enabled: false) there is no
+# gate. An invalid region.yml refuses every event until it is fixed.
+# See docs/region-gate.md.
+
+enabled: true
+
+# structural: position = chain head; signatures, links, coordinates and
+#   virtual brackets are checked, work proofs are not (yet).
+# strict: position = last proof-verified event. Until the chain-verification
+#   spec is ratified no proof is verified, so this is the spawn point.
+mode: structural
+
+# An author is admitted when its position lies in ANY of these.
+regions:
+  # One sector (2^30 per axis, CYBERSPACE_V2 §10), as in the event S tag.
+  - sector: "18014398471862661-18014398502844484-18014398543304959"
+    plane: 0 # 0 dataspace, 1 ideaspace
+  # An aligned cube of height H (the virtual-bracket region form, §8.11.1):
+  # the low H bits of each axis of base must be zero.
+  # - base: "<64 hex coordinate>"
+  #   height: 40
+  # A hint box with per-axis heights (§7.7); 85 leaves an axis open.
+  # - base: "<64 hex coordinate>"
+  #   heights: [40, 40, 85]
+
+# Where to look up authors' movement events (kind 3333). AUTH challenges are
+# answered with GRAIN_REGION_AUTH_KEY (hex or nsec) or a fresh key.
+chain_relays:
+  - wss://cyberspace.nostr1.com
+  - wss://nos.lol
+  - wss://relay.damus.io
+  - wss://relay.primal.net
+use_local_events: true # also use movement events published here
+
+exempt_pubkeys: [] # hex or npub; always admitted (e.g. the operator)
+always_allow_kinds: [5] # deletions are always allowed
+
+cache_ttl_seconds: 600 # keep an admission this long
+negative_cache_ttl_seconds: 60 # keep a refusal this long
+fetch_timeout_seconds: 8
+max_chain_events: 5000

@@ -1,0 +1,13 @@
+# Cyberspace region relay. Set regions before deploying: with none, the gate
+# refuses every event (fail closed). See docs/region-gate.md for the forms.
+enabled: true
+mode: structural
+regions: []
+chain_relays:
+  - wss://cyberspace.nostr1.com
+  - wss://nos.lol
+  - wss://relay.damus.io
+  - wss://relay.primal.net
+use_local_events: true
+exempt_pubkeys: []
+always_allow_kinds: [5]

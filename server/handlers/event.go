@@ -20,6 +20,11 @@ import (
 // Set by the server package to broadcast events to active subscribers.
 var OnEventStored func(evt nostr.Event)
 
+// EventGate, when set, is an extra admission check run after the
+// blacklist/whitelist: it returns false and a NIP-01 OK message to refuse
+// an event. The server sets it when a gate such as the region gate is on.
+var EventGate func(ctx context.Context, evt nostr.Event) (bool, string)
+
 // backupRelaySem bounds the number of concurrent best-effort backup-relay
 // forwards. Each forward holds a goroutine and a socket for up to the
 // dial+write timeout; without a cap, a slow or unreachable backup relay
@@ -129,6 +134,15 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 			"reason", result.Message)
 		response.SendOK(client, evt.ID, false, result.Message)
 		return
+	}
+
+	if EventGate != nil {
+		if ok, msg := EventGate(context.TODO(), evt); !ok {
+			log.Event().Info("Event rejected by event gate",
+				"event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
+			response.SendOK(client, evt.ID, false, msg)
+			return
+		}
 	}
 
 	// Per-client rate and size limit checks
