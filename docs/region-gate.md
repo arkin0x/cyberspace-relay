@@ -24,6 +24,12 @@ chain could not be verified (with the reason), or the position is outside.
 When every chain source fails, the event is refused with a retry message and
 nothing is cached.
 
+The gate runs after the relay's per-client rate limits, so a client cannot
+make it look up chains faster than those allow, and at most
+`max_concurrent_lookups` lookups (default 16) run at once; an event that
+cannot start one in time is refused with "try again", uncached. Expired
+verdicts are swept from the cache once it holds more than 4,096 authors.
+
 ## Looking up a chain
 
 The gate asks each source two indexed questions, so an identity with a long

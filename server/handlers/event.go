@@ -136,15 +136,6 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
-	if EventGate != nil {
-		if ok, msg := EventGate(context.TODO(), evt); !ok {
-			log.Event().Info("Event rejected by event gate",
-				"event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
-			response.SendOK(client, evt.ID, false, msg)
-			return
-		}
-	}
-
 	// Per-client rate and size limit checks
 	result = validation.CheckRateAndSizeLimits(client, evt, eventSize)
 	if !result.Valid {
@@ -155,6 +146,17 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 			"reason", result.Message)
 		response.SendOK(client, evt.ID, false, result.Message)
 		return
+	}
+
+	// Admission gate last among the policy checks: it can cost network
+	// lookups, so rate limits must bound how often a client reaches it.
+	if EventGate != nil {
+		if ok, msg := EventGate(context.TODO(), evt); !ok {
+			log.Event().Info("Event rejected by event gate",
+				"event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
+			response.SendOK(client, evt.ID, false, msg)
+			return
+		}
 	}
 
 	// Check database availability

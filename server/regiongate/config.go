@@ -56,6 +56,10 @@ type Config struct {
 	CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
 	// NegativeCacheTTLSeconds keeps a refusal this long. Default 60.
 	NegativeCacheTTLSeconds int `yaml:"negative_cache_ttl_seconds"`
+	// MaxConcurrentLookups caps chain lookups in flight, so a flood of
+	// events from unknown pubkeys cannot make the relay hammer the chain
+	// relays. Default 16.
+	MaxConcurrentLookups int `yaml:"max_concurrent_lookups"`
 
 	boxes  []Box
 	exempt map[string]bool
@@ -118,6 +122,9 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.NegativeCacheTTLSeconds <= 0 {
 		c.NegativeCacheTTLSeconds = 60
+	}
+	if c.MaxConcurrentLookups <= 0 {
+		c.MaxConcurrentLookups = 16
 	}
 	if !c.Enabled {
 		return &c, nil

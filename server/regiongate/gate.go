@@ -36,10 +36,16 @@ type Gate struct {
 	verifier Verifier
 	now      func() time.Time
 
-	mu       sync.Mutex
-	cache    map[string]cached
-	inflight map[string]*call
+	lookups chan struct{} // semaphore: chain lookups in flight
+
+	mu        sync.Mutex
+	cache     map[string]cached
+	inflight  map[string]*call
+	lastSweep time.Time
 }
+
+// sweepAbove is the cache size past which expired entries are dropped.
+const sweepAbove = 4096
 
 type cached struct {
 	ok      bool
@@ -55,9 +61,14 @@ type call struct {
 
 // NewGate builds a gate. Sources are read in order and merged.
 func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
+	n := cfg.MaxConcurrentLookups
+	if n <= 0 {
+		n = 16
+	}
 	return &Gate{
 		cfg: cfg, sources: sources, verifier: verifier, now: time.Now,
-		cache: map[string]cached{}, inflight: map[string]*call{},
+		lookups: make(chan struct{}, n),
+		cache:   map[string]cached{}, inflight: map[string]*call{},
 	}
 }
 
@@ -108,19 +119,38 @@ func (g *Gate) Admit(ctx context.Context, evt nostr.Event) (bool, string) {
 }
 
 func (g *Gate) remember(pubkey string, ok bool, reason string) {
-	if reason == errFetch {
+	if reason == errFetch || reason == errBusy {
 		return // a failed lookup is not a verdict
 	}
 	g.mu.Lock()
-	g.cache[pubkey] = cached{ok: ok, reason: reason, expires: g.now().Add(g.cfg.cacheTTL(ok))}
-	g.mu.Unlock()
+	defer g.mu.Unlock()
+	now := g.now()
+	g.cache[pubkey] = cached{ok: ok, reason: reason, expires: now.Add(g.cfg.cacheTTL(ok))}
+	// Refusals for random pubkeys would otherwise pile up forever.
+	if len(g.cache) > sweepAbove && now.Sub(g.lastSweep) > time.Minute {
+		g.lastSweep = now
+		for pk, c := range g.cache {
+			if !now.Before(c.expires) {
+				delete(g.cache, pk)
+			}
+		}
+	}
 }
 
-const errFetch = "restricted: could not fetch your cyberspace chain, try again"
+const (
+	errFetch = "restricted: could not fetch your cyberspace chain, try again"
+	errBusy  = "restricted: relay busy verifying chains, try again"
+)
 
 // decide fetches and verifies a pubkey's chain, with an optional new
 // movement event appended, and checks the resulting position.
 func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
+	select {
+	case g.lookups <- struct{}{}:
+		defer func() { <-g.lookups }()
+	case <-ctx.Done():
+		return false, errBusy
+	}
 	// 1. The spawns. Signatures are checked before choosing, so a forged
 	// "newer" spawn cannot redirect the lookup.
 	spawns, ok := g.gather(ctx, pubkey, map[string][]string{"A": {ActSpawn}})

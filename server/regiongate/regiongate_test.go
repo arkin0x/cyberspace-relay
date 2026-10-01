@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -523,6 +524,48 @@ func TestGateMoveIntoRegionAndStrictMode(t *testing.T) {
 	// But an identity whose spawn is inside is admitted in strict mode.
 	if ok, _ := gateFor(t, ModeStrict, cubeAround(t, s.pubkey, 20), src).Admit(ctx, s.sign(t, 1, 4)); !ok {
 		t.Fatal("strict mode refused a spawn inside the region")
+	}
+}
+
+func TestGateBoundsLookupsAndCache(t *testing.T) {
+	s := newSigner(t)
+	box := cubeAround(t, s.pubkey, 40)
+	slow := &fakeSource{delay: 200 * time.Millisecond}
+	cfg := &Config{Enabled: true, Mode: ModeStructural, AlwaysAllowKinds: []int{5}, CacheTTLSeconds: 600,
+		NegativeCacheTTLSeconds: 60, MaxConcurrentLookups: 1, boxes: []Box{box}, exempt: map[string]bool{}}
+	g := NewGate(cfg, verifier(), slow)
+
+	// One lookup slot: a second unknown author waiting past its deadline
+	// is told to retry, and that is not cached.
+	go g.Admit(context.Background(), newSigner(t).sign(t, 1, 1))
+	time.Sleep(20 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	other := newSigner(t)
+	if ok, msg := g.Admit(ctx, other.sign(t, 1, 1)); ok || msg != errBusy {
+		t.Fatalf("want busy refusal, got %v %q", ok, msg)
+	}
+	g.mu.Lock()
+	_, cachedBusy := g.cache[other.pubkey]
+	g.mu.Unlock()
+	if cachedBusy {
+		t.Fatal("a busy refusal must not be cached")
+	}
+
+	// Expired refusals are swept once the cache is large.
+	now := time.Now()
+	g.now = func() time.Time { return now }
+	g.mu.Lock()
+	for i := 0; i < sweepAbove+10; i++ {
+		g.cache[strings.Repeat("0", 60)+strconv.Itoa(1000+i)] = cached{expires: now.Add(-time.Second)}
+	}
+	g.mu.Unlock()
+	g.remember(s.pubkey, true, "")
+	g.mu.Lock()
+	n := len(g.cache)
+	g.mu.Unlock()
+	if n > 10 {
+		t.Fatalf("expired entries not swept: %d left", n)
 	}
 }
 
