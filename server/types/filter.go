@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -110,6 +111,14 @@ func (f Filter) MatchesEvent(evt Event) bool {
 	}
 
 	return true
+}
+
+// MarshalJSON writes the NIP-01 wire form: since/until as unix seconds and
+// tag filters as "#<name>" keys. Without it, encoding/json wrote since/until
+// as RFC 3339 strings and tags under a single "#" key, so every REQ the client
+// library sent with a time bound or tag filter was malformed.
+func (f Filter) MarshalJSON() ([]byte, error) {
+	return json.Marshal(f.ToSubscriptionFilter())
 }
 
 // ToSubscriptionFilter converts Filter to a relay-compatible format
