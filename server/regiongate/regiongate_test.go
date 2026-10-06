@@ -121,6 +121,9 @@ func regionTag(b Box, h uint) []string {
 	return []string{"region", b.Base.Hex(), big.NewInt(int64(h)).String()}
 }
 
+// gameTag is the p tag every enter-virtual carries, naming its game (§8.11.1).
+func gameTag() []string { return []string{"p", strings.Repeat("ab", 32), "", "game"} }
+
 func verifier() Verifier {
 	return Verifier{Proofs: PendingSpec{}, Signature: validation.CheckSignature}
 }
@@ -312,37 +315,61 @@ func TestVerifyStopsAtInvalidEvent(t *testing.T) {
 	b.pos = offset(t, s.pubkey, 50) // the next event's c will not match h1's C
 	bad := b.move(ActHop, offset(t, s.pubkey, 51))
 	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, bad})
-	if vd.PositionEvent != h1.ID || !strings.Contains(vd.Stopped, "c does not equal") {
+	if vd.Valid() || vd.Reason != ReasonCMismatch || vd.InvalidAt != bad.ID || vd.InvalidIndex != 2 || vd.PositionEvent != h1.ID {
 		t.Fatalf("verdict: %+v", vd)
 	}
 
 	// A spawn whose C is not the pubkey places the identity nowhere.
 	s2 := newSigner(t)
 	wrong := s2.sign(t, KindMovement, 1, []string{"A", ActSpawn}, []string{"C", offset(t, s2.pubkey, 1)})
-	if vd := verifier().Verify(s2.pubkey, []nostr.Event{wrong}); vd.Position != nil || !vd.HasChain {
+	if vd := verifier().Verify(s2.pubkey, []nostr.Event{wrong}); vd.Position != nil || !vd.HasChain || vd.Reason != ReasonSpawnCoordinate {
 		t.Fatalf("bad spawn verdict: %+v", vd)
 	}
-	if vd := verifier().Verify(s2.pubkey, nil); vd.HasChain {
+	if vd := verifier().Verify(s2.pubkey, nil); vd.HasChain || vd.Reason != ReasonNoSpawn {
 		t.Fatal("no events means no chain")
 	}
 }
 
-func TestVerifyUnknownActionIsUnverifiableNotInvalid(t *testing.T) {
+func TestVerifyUnknownActionIsSkipped(t *testing.T) {
 	s := newSigner(t)
 	b := newChain(t, s)
 	h1 := b.move(ActHop, offset(t, s.pubkey, 1))
-	b.move("teleport", offset(t, s.pubkey, 2))
-	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, b.last})
-	if vd.PositionEvent != h1.ID || !strings.Contains(vd.Stopped, "§8.9") {
+	carried := b.pos
+	teleport := b.move("teleport", offset(t, s.pubkey, 2))
+
+	// A chain ending on a skipped action is valid; the position is the C of
+	// the last recognized action and the head is the skipped one (§8.9 step 5).
+	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, teleport})
+	if !vd.Valid() || vd.PositionEvent != h1.ID || vd.Position.Hex() != carried || vd.Head != teleport.ID ||
+		len(vd.Skipped) != 1 || vd.Skipped[0] != teleport.ID {
 		t.Fatalf("verdict: %+v", vd)
+	}
+
+	// The next recognized action starts where the chain carries it, not
+	// where the skipped action claimed to go (§8.9 step 2), and links
+	// through the skipped action (step 1).
+	from := *b
+	from.pos = carried
+	hop := from.move(ActHop, offset(t, s.pubkey, 3))
+	vd = verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, teleport, hop})
+	if !vd.Valid() || vd.PositionEvent != hop.ID || vd.Length != 4 {
+		t.Fatalf("hop from the carried position: %+v", vd)
+	}
+	moved := b.move(ActHop, offset(t, s.pubkey, 4)) // its c is the teleport's C
+	vd = verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, teleport, moved})
+	if vd.Reason != ReasonCMismatch || vd.InvalidAt != moved.ID || vd.PositionEvent != h1.ID {
+		t.Fatalf("a position change across a skipped action must be invalid: %+v", vd)
 	}
 }
 
 func TestVerifyHyperjumpOrdering(t *testing.T) {
 	s := newSigner(t)
 	b := newChain(t, s)
-	jump := b.move(ActHyperjump, offset(t, s.pubkey, 9))
-	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, jump}); !strings.Contains(vd.Stopped, "DECK-0001") {
+	heights := func(from, to string) [][]string {
+		return [][]string{{"from_height", from}, {"B", to}, {"as_of", to}}
+	}
+	jump := b.move(ActHyperjump, offset(t, s.pubkey, 9), heights("2", "3")...)
+	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, jump}); vd.Reason != ReasonHyperjumpPredecessor {
 		t.Fatalf("hyperjump after spawn must be invalid: %+v", vd)
 	}
 
@@ -351,15 +378,15 @@ func TestVerifyHyperjumpOrdering(t *testing.T) {
 	b = newChain(t, s)
 	box := cubeAround(t, s.pubkey, 10)
 	enterH := b.move(ActEnterHyperspace, s.pubkey)
-	enterV := b.move(ActEnterVirtual, s.pubkey, regionTag(box, 10))
+	enterV := b.move(ActEnterVirtual, s.pubkey, regionTag(box, 10), gameTag())
 	exitV := b.move(ActExitVirtual, s.pubkey, []string{"e", enterV.ID, "", "entry"})
-	jump = b.move(ActHyperjump, offset(t, s.pubkey, 1<<40))
+	jump = b.move(ActHyperjump, offset(t, s.pubkey, 1<<40), heights("2", "3")...)
 	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enterH, enterV, exitV, jump})
-	if vd.Stopped != "" || vd.PositionEvent != jump.ID {
+	if !vd.Valid() || vd.PositionEvent != jump.ID {
 		t.Fatalf("verdict: %+v", vd)
 	}
 	moved := b.move(ActEnterHyperspace, offset(t, s.pubkey, 5)) // must not move
-	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enterH, enterV, exitV, jump, moved}); vd.PositionEvent != jump.ID {
+	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enterH, enterV, exitV, jump, moved}); vd.PositionEvent != jump.ID || vd.Reason != ReasonEnterHyperspaceMoved {
 		t.Fatalf("moving enter-hyperspace must be invalid: %+v", vd)
 	}
 }
@@ -371,51 +398,54 @@ func TestVerifyVirtualBrackets(t *testing.T) {
 	inside := func(dx int64) string { return offset(t, box.Base.Hex(), dx) }
 
 	b := newChain(t, s)
-	enter := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
+	enter := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
 	act := b.move("shoot", inside(2))
 	open := []nostr.Event{b.spawn, enter, act}
 	vd := verifier().Verify(s.pubkey, open)
-	if vd.Stopped != "" || vd.Position.Hex() != s.pubkey {
+	if !vd.Valid() || vd.Position.Hex() != s.pubkey || vd.OpenBracket != enter.ID || len(vd.Skipped) != 0 {
 		t.Fatalf("inside an open bracket the position is the enter's c (rule 7): %+v", vd)
 	}
 	exit := b.move(ActExitVirtual, s.pubkey, []string{"e", enter.ID, "", "entry"})
 	hop := b.move(ActHop, offset(t, s.pubkey, 1))
 	vd = verifier().Verify(s.pubkey, append(open, exit, hop))
-	if vd.Stopped != "" || vd.PositionEvent != hop.ID {
+	if !vd.Valid() || vd.PositionEvent != hop.ID || vd.OpenBracket != "" {
 		t.Fatalf("closed bracket: %+v", vd)
 	}
 
-	invalid := func(name string, build func(b *chainBuilder) []nostr.Event, wantRule string) {
+	invalid := func(name string, build func(b *chainBuilder) []nostr.Event, wantReason string) {
 		t.Helper()
 		b := newChain(t, s)
 		evs := build(b)
 		vd := verifier().Verify(s.pubkey, append([]nostr.Event{b.spawn}, evs...))
-		if !strings.Contains(vd.Stopped, wantRule) {
-			t.Errorf("%s: want stop mentioning %q, got %q", name, wantRule, vd.Stopped)
+		if vd.Reason != wantReason || vd.InvalidAt != evs[len(evs)-1].ID {
+			t.Errorf("%s: want %s at the last event, got %q: %s", name, wantReason, vd.Reason, vd.Stopped)
 		}
 	}
 	invalid("base action inside", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
+		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
 		return []nostr.Event{e, b.move(ActHop, inside(2))}
-	}, "rule 3")
+	}, ReasonBaseActionInBracket)
 	invalid("virtual action outside the box", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
+		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
 		return []nostr.Event{e, b.move("shoot", offset(t, box.Base.Hex(), 1<<h))}
-	}, "rule 4")
+	}, ReasonOutsideRegion)
 	invalid("exit naming the wrong entry", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
+		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
 		return []nostr.Event{e, b.move(ActExitVirtual, s.pubkey, []string{"e", strings.Repeat("a", 64), "", "entry"})}
-	}, "rule 6")
+	}, ReasonExitWrongEntry)
 	invalid("exit not restoring the base position", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
+		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
 		return []nostr.Event{e, b.move(ActExitVirtual, inside(3), []string{"e", e.ID, "", "entry"})}
-	}, "rule 2")
+	}, ReasonExitPosition)
 	invalid("exit with no bracket", func(b *chainBuilder) []nostr.Event {
 		return []nostr.Event{b.move(ActExitVirtual, s.pubkey, []string{"e", b.spawn.ID, "", "entry"})}
-	}, "rule 6")
+	}, ReasonExitWithoutBracket)
 	invalid("misaligned region", func(b *chainBuilder) []nostr.Event {
-		return []nostr.Event{b.move(ActEnterVirtual, inside(1), []string{"region", inside(1), "16"})}
-	}, "§8.11.1")
+		return []nostr.Event{b.move(ActEnterVirtual, inside(1), []string{"region", inside(1), "16"}, gameTag())}
+	}, ReasonRegion)
+	invalid("entry naming no game", func(b *chainBuilder) []nostr.Event {
+		return []nostr.Event{b.move(ActEnterVirtual, inside(1), regionTag(box, h))}
+	}, ReasonGameTag)
 }
 
 // ── the gate ──────────────────────────────────────────────────────────

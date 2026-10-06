@@ -1,6 +1,7 @@
 package regiongate
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 
@@ -9,6 +10,11 @@ import (
 
 // KindMovement is the Cyberspace movement event kind (§8.1).
 const KindMovement = 3333
+
+// ChainRulesRevision names the chain rules this verifier implements (§8.12).
+// A verifier states the revision it runs so that two verifiers that disagree
+// about a chain can see whether they are running the same rules.
+const ChainRulesRevision = "2026-09-28-virtual-brackets"
 
 // Action names (§8.8, DECK-0001, §8.11).
 const (
@@ -21,12 +27,26 @@ const (
 	ActExitVirtual     = "exit-virtual"
 )
 
-// baseActions may not appear inside a virtual bracket (§8.11.4 rule 3).
-var baseActions = map[string]bool{
+// recognizedActions are the actions this verifier recognizes (§8.9): the base
+// actions (§8.8) and the actions of every mandatory DECK, which at this
+// revision is DECK-0001 alone (§8.12). This relay implements no optional
+// DECK, so every other action name outside a virtual bracket is skipped.
+var recognizedActions = map[string]bool{
+	ActSpawn: true, ActHop: true, ActSidestep: true, ActEnterVirtual: true, ActExitVirtual: true,
+	ActEnterHyperspace: true, ActHyperjump: true,
+}
+
+// notInBracket are the action names that make an event inside a virtual
+// bracket invalid (§8.11.4 rule 3). Every other name inside a bracket is a
+// virtual action.
+var notInBracket = map[string]bool{
 	ActHop: true, ActSidestep: true, ActEnterHyperspace: true, ActHyperjump: true, ActEnterVirtual: true,
 }
 
-// Move is a movement event with its chain tags pulled out.
+// Move is a movement event with its chain tags pulled out. Where a tag
+// appears more than once, the first one is kept, which is the one chain
+// resolution follows (§8.7.3); the verifier counts the tags it reads and
+// rejects a repeated one as malformed.
 type Move struct {
 	Event    nostr.Event
 	Action   string // A tag
@@ -35,43 +55,85 @@ type Move struct {
 	Entry    string // e ... "entry" (exit-virtual)
 	From     string // c tag
 	To       string // C tag
-	Region   []string
+	Game     string // p ... "game" (enter-virtual, §8.11.1)
 }
 
 // ParseMove extracts the chain tags of a kind 3333 event. ok is false for any
-// other kind or an event with no A tag.
+// other kind. An event with no A tag is still a move: it can be a link of a
+// chain (§8.7.3), and the verifier reports it as malformed when it is.
 func ParseMove(evt nostr.Event) (m Move, ok bool) {
 	if evt.Kind != KindMovement {
 		return Move{}, false
 	}
 	m.Event = evt
+	seen := map[string]bool{}
+	first := func(key string) bool {
+		if seen[key] {
+			return false
+		}
+		seen[key] = true
+		return true
+	}
 	for _, t := range evt.Tags {
 		if len(t) < 2 {
 			continue
 		}
 		switch t[0] {
 		case "A":
-			m.Action = t[1]
+			if first("A") {
+				m.Action = t[1]
+			}
 		case "c":
-			m.From = t[1]
+			if first("c") {
+				m.From = t[1]
+			}
 		case "C":
-			m.To = t[1]
-		case "region":
-			m.Region = t[1:]
+			if first("C") {
+				m.To = t[1]
+			}
+		case "p":
+			if len(t) >= 4 && t[3] == "game" && first("p game") {
+				m.Game = t[1]
+			}
 		case "e":
-			if len(t) >= 4 {
-				switch t[3] {
-				case "genesis":
-					m.Genesis = t[1]
-				case "previous":
-					m.Previous = t[1]
-				case "entry":
-					m.Entry = t[1]
-				}
+			if len(t) < 4 || !first("e "+t[3]) {
+				continue
+			}
+			switch t[3] {
+			case "genesis":
+				m.Genesis = t[1]
+			case "previous":
+				m.Previous = t[1]
+			case "entry":
+				m.Entry = t[1]
 			}
 		}
 	}
-	return m, m.Action != ""
+	return m, true
+}
+
+// tagValues returns the second element of every tag named name.
+func tagValues(evt nostr.Event, name string) []string {
+	var out []string
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == name {
+			out = append(out, t[1])
+		}
+	}
+	return out
+}
+
+// countTags counts the tags named name; with a marker, only those whose
+// fourth element is that marker (["e", id, relay, marker], ["p", pubkey,
+// relay, marker]).
+func countTags(evt nostr.Event, name, marker string) int {
+	n := 0
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == name && (marker == "" || len(t) >= 4 && t[3] == marker) {
+			n++
+		}
+	}
+	return n
 }
 
 // ActiveChain resolves a pubkey's movement events into its active chain, from
@@ -82,7 +144,9 @@ func ParseMove(evt nostr.Event) (m Move, ok bool) {
 //  4. at a fork the smallest created_at continues (smaller id on a tie);
 //  5. stop at the first event nothing names as previous.
 //
-// Events by other pubkeys are ignored. It returns nil when there is no spawn.
+// Events by other pubkeys are ignored. An event whose A is spawn is never a
+// link: a spawn names no previous event, so it starts a chain of its own
+// wherever it is published (§3.2). It returns nil when there is no spawn.
 func ActiveChain(pubkey string, events []nostr.Event) []Move {
 	var spawn *Move
 	children := map[string][]Move{}
@@ -146,24 +210,67 @@ func older(a, b nostr.Event) bool {
 	return a.ID < b.ID
 }
 
-// parseRegion reads a bracket's ["region", coord_hex, H] tag (§8.11.1): an
-// aligned cube, H canonical decimal in [0, 85].
-func parseRegion(tag []string) (Box, bool) {
-	if len(tag) < 2 {
-		return Box{}, false
+// parseRegion reads an enter-virtual's region (§8.11.1): exactly one
+// ["region", coord_hex, H] tag, H a decimal in [0, 85] written with no sign
+// and no leading zeros except "0", and coord_hex the cube's aligned base (the
+// low H bits of each axis zero). It returns the cube, or "" and why not.
+func parseRegion(evt nostr.Event) (Box, string) {
+	var tag []string
+	n := 0
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == "region" {
+			tag = t
+			n++
+		}
 	}
-	hs := tag[1]
-	if hs == "" || (len(hs) > 1 && hs[0] == '0') {
-		return Box{}, false
+	if n != 1 {
+		return Box{}, fmt.Sprintf("expected exactly one region tag, found %d", n)
+	}
+	if len(tag) < 3 {
+		return Box{}, "region tag has no height"
+	}
+	base, err := ParseCoord(tag[1])
+	if err != nil {
+		return Box{}, "region base: " + err.Error()
+	}
+	hs := tag[2]
+	if !isDecimal(hs) || (len(hs) > 1 && hs[0] == '0') {
+		return Box{}, fmt.Sprintf("region height %q is not a canonical decimal", hs)
 	}
 	h, err := strconv.Atoi(hs)
-	if err != nil || h < 0 || h > AxisBits {
-		return Box{}, false
-	}
-	base, err := ParseCoord(tag[0])
-	if err != nil {
-		return Box{}, false
+	if err != nil || h > AxisBits {
+		return Box{}, fmt.Sprintf("region height %s is above %d", hs, AxisBits)
 	}
 	b, err := NewBox(base, uint(h), uint(h), uint(h))
-	return b, err == nil
+	if err != nil {
+		return Box{}, "region base is not aligned to its height"
+	}
+	return b, ""
+}
+
+// isDecimal reports whether s is one or more ASCII digits.
+func isDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isHex32 reports whether s is 32 bytes of lowercase hex, the form of a
+// coordinate, an event id and a pubkey.
+func isHex32(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !(s[i] >= '0' && s[i] <= '9' || s[i] >= 'a' && s[i] <= 'f') {
+			return false
+		}
+	}
+	return true
 }

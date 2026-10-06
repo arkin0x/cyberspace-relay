@@ -75,7 +75,9 @@ the two questions returned 139 events in 5.7 s and verification took 32 ms.
 
 ## Verifying a chain
 
-`regiongate.Verifier` does, in order:
+`regiongate.Verifier` implements the chain rules of revision
+`2026-09-28-virtual-brackets` (CYBERSPACE_V2 §8.12, `regiongate.ChainRulesRevision`,
+logged at startup). It does, in order:
 
 1. Drops events whose id or signature does not verify. This happens **before**
    fork resolution, or anyone could cut a chain off by publishing an unsigned
@@ -83,39 +85,117 @@ the two questions returned 139 events in 5.7 s and verification took 32 ms.
 2. Resolves the active chain by §8.7.3: newest spawn (larger id on a tie),
    only events whose genesis names it, forward through `e … previous`, at a
    fork the smallest `created_at` (smaller id on a tie), head = first event
-   nothing names as previous.
-3. Walks the chain checking structure:
-   - the spawn's `C` equals the pubkey (§8.3);
-   - every event's `c` equals the previous event's `C`, and `C` is a valid coordinate;
-   - `enter-hyperspace` does not move; a `hyperjump` follows `enter-hyperspace` or a `hyperjump` (DECK-0001 §4.3), looking through brackets;
-   - virtual brackets (§8.11.4): a well-formed, aligned `region`; no base actions inside; every `C` inside the box; the exit names the open entry and restores the base position. Inside a bracket the position is the `enter-virtual`'s `c`.
-   - an action the verifier does not know, outside a bracket, is **unverifiable, never invalid** (§8.9): the walk stops and reports the last position it verified.
-   An invalid event ends the walk; the position is the last valid event's.
-4. Asks the `ProofChecker` about each base action's work proof.
+   nothing names as previous. Where an event repeats a tag, the first one is
+   followed. An event whose `A` is `spawn` is never a link: it starts a chain
+   of its own, even while a bracket is open.
+3. Walks the chain from the spawn. The recognized actions are the base actions
+   (`spawn`, `hop`, `sidestep`, `enter-virtual`, `exit-virtual`) and those of
+   DECK-0001, which is mandatory (`enter-hyperspace`, `hyperjump`). This relay
+   implements no optional DECK.
+   - The spawn's `C` equals the pubkey (§8.3).
+   - Every event has exactly one `A`; every action that is checked has exactly
+     one `e … genesis`, one `e … previous`, one `c` and one `C`, each `c` and
+     `C` 32 bytes of lowercase hex.
+   - **Unrecognized actions are skipped** (§8.9). Outside a bracket, an action
+     the verifier does not recognize is treated as if it were not on the
+     chain: its links are still followed, so it never breaks the chain apart;
+     it does not move the identity; and the walk goes on verifying every
+     recognized action after it. Concretely:
+     - the `c` of each recognized action must equal the `C` of the **nearest
+       recognized action** before it, not the `C` of a skipped one. A skipped
+       action that changed the position therefore leaves the next recognized
+       action's `c` mismatched, and the chain is invalid from that action
+       (a move nobody can check is a teleport);
+     - work is still seeded by the **actual previous event**: a hop or
+       sidestep after a skipped action derives its temporal axis from the
+       skipped action's id, which the proof checker reads from the action's
+       own `e … previous` tag;
+     - rules that look back (DECK-0001 §4.3) see through skipped actions to
+       the nearest recognized action;
+     - a chain that ends on skipped actions is valid, and the position is the
+       `C` of the last recognized action. The verdict lists the skipped ids.
+   - `enter-hyperspace` does not move. A `hyperjump` looks back to an
+     `enter-hyperspace` or a `hyperjump` (DECK-0001 §4.3), through skipped
+     actions and closed brackets; its `from_height` and `B` are base-10
+     heights; the first ride after boarding carries an `as_of` of at least
+     `B`; a later ride departs from the previous ride's `B`, and only a first
+     ride may have `from_height` equal to `B` (§5.2, §5.6, read literally).
+   - Virtual brackets (§8.11): an `enter-virtual` carries exactly one aligned
+     `region` tag with a canonical `H`, and exactly one
+     `["p", <game_pubkey>, <relay_hint>, "game"]` tag holding 32 bytes of
+     lowercase hex (checked for form only; the game is never contacted). Its
+     `c` is the carried position and its `C` lies in the region. Inside, every
+     name that is not a base or DECK-0001 action is a virtual action (never
+     skipped): no base actions, each `c` is the previous event's `C`, every
+     `C` in the box. The exit names the open entry, its `c` is the last
+     position inside, and its `C` restores the base position. Inside a
+     bracket, and at a head inside an open one, the position is the
+     `enter-virtual`'s `c`; a closed bracket stands for the action before its
+     entry when a later rule looks back.
 
-The verdict carries two positions: `Position` (after the last structurally
-valid event) and `VerifiedPosition` (after the longest prefix whose every
-proof the checker verified). `mode: structural` uses the first, `mode: strict`
-the second.
+   The first event that breaks a rule makes the chain invalid from that event,
+   and the walk stops there. The verdict names the rule with the same reason
+   codes as the reference implementation's golden vectors (`Verdict.Reason`,
+   `InvalidAt`, `InvalidIndex`). The position the gate uses is then the one
+   carried up to the invalid event; the spec does not say whether an identity
+   with an invalid chain stands there or at its spawn (§3.2).
+4. Asks the `ProofChecker` about each hop, sidestep, `enter-hyperspace` and
+   `hyperjump` outside a bracket, after its structural checks pass.
+
+The verdict carries two positions: `Position` (after the last event the walk
+accepted) and `VerifiedPosition` (after the longest prefix whose every proof
+the checker verified). `mode: structural` uses the first, `mode: strict` the
+second.
+
+### Golden vectors
+
+`server/regiongate/testdata/chain-rules-2026-09-28-virtual-brackets.json` is
+the reference implementation's vector file, copied unchanged from
+arkin0x/cyberspace-cli PR #24 (commit `593683f`). `TestChainRulesGoldenVectors`
+runs every vector through the verifier with signatures checked:
+
+- vectors whose verdict rests on structure (resolution, skipping, brackets,
+  the game tag, ride tags) must match the reference exactly: validity, chain,
+  position, head, open bracket and skipped ids, or the reason code and the
+  invalid event;
+- vectors whose verdict rests on a proof, or on Bitcoin's block data, are
+  marked pending: the test asserts the chain is structurally valid up to that
+  event and the event's proof is reported unchecked, never verified.
+
+Two vectors carry an `open_question` in the reference, and the literal
+reading is implemented for both: an exit whose `c` is not the previous
+event's `C` is invalid (§8.11.3, though §8.11.5 step 3 does not list the
+check), and a later ride with `from_height` equal to `B` is invalid
+(DECK-0001 §5.2), although published, grandfathered rides of that shape
+exist.
 
 ## The placeholder: what is NOT checked yet
 
-The chain-verification spec is being audited, so proofs are not verified:
-the only `ProofChecker` is `PendingSpec`, which answers `ProofUnchecked` for
-every hop, sidestep, enter-hyperspace and hyperjump.
+Proofs are not verified yet: the only `ProofChecker` is `PendingSpec`, which
+answers `ProofUnchecked` for every hop, sidestep, enter-hyperspace and
+hyperjump.
 
 | Mode | With `PendingSpec` |
 |---|---|
 | `structural` | Position = chain head. Structure is enforced; work is trusted. Someone could sign a structurally valid chain that hops anywhere without doing the work. |
 | `strict` | Position = spawn point. Only identities that spawned inside the region are admitted. |
 
-To plug in the ratified rules, implement `regiongate.ProofChecker`
+To plug in the proof rules, implement `regiongate.ProofChecker`
 (`server/regiongate/verify.go`) and pass it in `server/regiongate_startup.go`
-in place of `PendingSpec{}`. It receives each event and the one before it on
-the active chain. Expected contents, per the current spec: hop proofs (§8.7.1
-or their successor), sidestep Level 1 (§8.7.2) with the `mn` re-roll price
-and `grandfathered-v2-sidesteps.txt`, hyperjump ride openings (DECK-0001 §5.8)
-with `decks/grandfathered-v1-hyperjumps.txt`. Nothing else changes.
+in place of `PendingSpec{}`. It receives each proof-bearing action as `cur`
+and, as `prev`, the action a rule that looks back sees: the nearest recognized
+action before it, with a closed bracket standing for the action before its
+entry. `prev`'s `C` is `cur`'s `c`. The work is seeded by `cur.Previous`, the
+id the action's `e … previous` names, which can be a skipped action or an
+`exit-virtual` and is then not `prev`. Expected contents, per the current spec:
+hop proofs (§8.7.1), sidestep Level 1 (§8.7.2) with the `mn` re-roll price and
+`grandfathered-v2-sidesteps.txt`, entry proofs (DECK-0001 §3.2), and rides at
+Level 1 (DECK-0001 §5.5, §5.8) with `decks/grandfathered-v1-hyperjumps.txt`.
+Rides also need the line's block data for the rules the verifier cannot
+decide from tags: `as_of` is a height on the line, `from_height` is the
+station within `as_of`, and `C` is the stop of `B`. A refusal names its rule
+by starting the reason string with a proof code (`hop-proof`,
+`hyperjump-station`, and so on). Nothing else changes.
 
 ## Region forms
 

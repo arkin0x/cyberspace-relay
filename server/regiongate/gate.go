@@ -231,7 +231,8 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 		pos = vd.VerifiedPosition
 	}
 	log.RegionGate().Debug("Chain verdict", "pubkey", pubkey, "has_chain", vd.HasChain,
-		"length", vd.Length, "unchecked", vd.Unchecked, "position_event", vd.PositionEvent, "stopped", vd.Stopped)
+		"length", vd.Length, "unchecked", vd.Unchecked, "skipped", len(vd.Skipped), "position_event", vd.PositionEvent,
+		"reason", vd.Reason, "stopped", vd.Stopped)
 	switch {
 	case !vd.HasChain:
 		return false, "restricted: this relay is only for cyberspace identities inside its region; no movement chain found for your pubkey"

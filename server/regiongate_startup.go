@@ -72,7 +72,7 @@ func startRegionGate() {
 		httpGuard = speakeasyHTTP
 	}
 	log.RegionGate().Info("Region gate enabled",
-		"mode", cfg.Mode, "gate_reads", *cfg.GateReads, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
+		"chain_rules", regiongate.ChainRulesRevision, "mode", cfg.Mode, "gate_reads", *cfg.GateReads, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
 		"proof_checker", "PendingSpec (no work proofs checked until the spec is ratified)")
 }
 
