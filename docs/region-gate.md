@@ -100,7 +100,8 @@ the two questions returned 139 events in 5.7 s and verification took 32 ms.
 `regiongate.Verifier` implements the chain rules of revision
 `2026-09-28-virtual-brackets` (CYBERSPACE_V2 §8.12, `regiongate.ChainRulesRevision`,
 logged at startup), with the rulings of 2026-10-07 and the clarifications of
-2026-10-08 that arkin0x/cyberspace #46 (`912f3d7`) folded into that revision.
+2026-10-08 that arkin0x/cyberspace #46 (`912f3d7`) and #48 (`1bf5694`) folded
+into that revision.
 It does, in order:
 
 1. **Discards every event that is not authentic** (§8.7.3): an id that is not
@@ -122,7 +123,7 @@ It does, in order:
    never extends or forks it and is never a skipped or virtual action. A
    spawn with a second `A` tag is an invalid newest spawn. Always mainnet:
    a `net` tag is informational, and nothing here reads it.
-   **A fork kills the chain** (arkinox, 2026-10-08; spec PR #48): when the
+   **A fork kills the chain** (arkinox, 2026-10-08; arkin0x/cyberspace #48): when the
    walk from the spawn reaches an event that two or more chain events name
    as `e … previous` (each event's first copy), the whole chain is dead,
    whichever branch is valid or signed first, and the identity stands at its
@@ -235,10 +236,11 @@ the identity.
 
 `server/regiongate/testdata/chain-rules-2026-09-28-virtual-brackets.json` is
 the reference implementation's vector file, copied unchanged from
-arkin0x/cyberspace-cli PR #24 (commit `80ab145`, generated against the spec
-at `912f3d7` with the rulings of 2026-10-08, spec PR #48). Events in it that
-are not NIP-01 shaped are left out, as a relay could not accept them. `TestChainRulesGoldenVectors` runs every vector through the
-verifier, every event checked for authenticity:
+arkin0x/cyberspace-cli PR #25 (commit `32c21dc`, generated against the spec
+at `1bf5694`, arkin0x/cyberspace #48). Events in it that are not NIP-01
+shaped are left out, as a relay could not accept them.
+`TestChainRulesGoldenVectors` runs every vector through the verifier, every
+event checked for authenticity:
 
 - vectors whose verdict rests on structure must match the reference exactly:
   validity, chain, position, head, open bracket and skipped ids, or the

@@ -12,12 +12,11 @@ import (
 // The golden vectors of the chain rules at revision
 // 2026-09-28-virtual-brackets (CYBERSPACE_V2 §8.12), with the rulings of
 // 2026-10-07 and 2026-10-08 folded in (arkin0x/cyberspace #46, 912f3d7, and
-// spec PR #48 in review), copied unchanged from the reference
-// implementation:
+// #48, 1bf5694), copied unchanged from the reference implementation:
 //
-//	arkin0x/cyberspace-cli PR #24, commit 80ab1456f24a94a51bb024e798ffe02d07cadd34,
+//	arkin0x/cyberspace-cli PR #25, commit 32c21dc901d1ef14c453ac95f2407cc03f1df0fe,
 //	vectors/chain-rules-2026-09-28-virtual-brackets.json
-//	sha256 735886e151237ac198b126bc5e1df0fc8f3c98f96c139668d5ec76b4d6b7c990
+//	sha256 a88378cf300dd382d02f553268f816b2c426e2ba958864c42abceaf2f1b3f7d1
 //
 // The format is described in that repository's vectors/README.md. Replace the
 // file, never edit it: a vector that disagrees with this verifier is a
