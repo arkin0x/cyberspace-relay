@@ -121,11 +121,13 @@ func TestRuling1008ForkIsDead(t *testing.T) {
 	fork.at = early.CreatedAt + 5
 	late := fork.move(ActHop, offset(t, s.pubkey, 2)) // valid, signed later
 	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, late, early})
-	expectInvalid(t, vd, ReasonFork, h1, s.pubkey)
+	// As the reference reports it: invalid from the spawn, the chain running
+	// from the spawn to the event the branches name.
+	expectInvalid(t, vd, ReasonFork, b.spawn, s.pubkey)
 	want := []string{early.ID, late.ID}
 	slices.Sort(want)
-	if !slices.Equal(vd.Fork, want) || vd.InvalidIndex != 1 {
-		t.Fatalf("branches %v at index %d", vd.Fork, vd.InvalidIndex)
+	if !slices.Equal(vd.Fork, want) || vd.InvalidIndex != 0 || !slices.Equal(vd.Chain, []string{b.spawn.ID, h1.ID}) {
+		t.Fatalf("branches %v at index %d, chain %v", vd.Fork, vd.InvalidIndex, vd.Chain)
 	}
 
 	// Two valid branches, one of them a skipped action: dead as well.
@@ -134,20 +136,17 @@ func TestRuling1008ForkIsDead(t *testing.T) {
 	fork = *b
 	next := b.move(ActHop, offset(t, s.pubkey, 2))
 	wave := fork.raw("wave")
-	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, next, wave}), ReasonFork, h1, s.pubkey)
+	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, next, wave}), ReasonFork, b.spawn, s.pubkey)
 
-	// Branches the links do not reach (both name a missing event) are a
-	// fork all the same.
+	// Branches the walk never reaches (both name an event nobody holds) make
+	// no fork (spec PR #48): the chain stays valid at h1.
 	b = newChain(t, s)
 	h1 = b.move(ActHop, offset(t, s.pubkey, 1))
-	missing := b.move(ActHop, offset(t, s.pubkey, 2))
+	b.move(ActHop, offset(t, s.pubkey, 2)) // never handed over
 	fork = *b
 	o1 := b.move(ActHop, offset(t, s.pubkey, 3))
 	o2 := fork.move(ActHop, offset(t, s.pubkey, 4))
-	vd = verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, o1, o2})
-	if vd.Reason != ReasonFork || vd.InvalidAt != missing.ID || vd.InvalidIndex != -1 || vd.Position.Hex() != s.pubkey {
-		t.Fatalf("unreached fork: %+v", vd)
-	}
+	expectValid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, o1, o2}), h1, offset(t, s.pubkey, 1))
 
 	// A forged sibling is discarded before resolution and is not a branch.
 	b = newChain(t, s)
@@ -272,7 +271,7 @@ func TestRuling1008ExactlyOnceWithAValue(t *testing.T) {
 	check("bare second X", ReasonSectorTags, func(b *chainBuilder) []nostr.Event {
 		return []nostr.Event{b.move(ActHop, to, []string{"X"})}
 	})
-	check("bare second proof", ReasonHopProof, func(b *chainBuilder) []nostr.Event {
+	check("bare second proof", ReasonMalformed, func(b *chainBuilder) []nostr.Event {
 		return []nostr.Event{b.move(ActHop, to, []string{"proof"})}
 	})
 
@@ -286,10 +285,10 @@ func TestRuling1008ExactlyOnceWithAValue(t *testing.T) {
 	check("ride", "", ride())
 	check("second B", ReasonMalformed, ride([]string{"B", "3"}))
 	check("bare second from_height", ReasonMalformed, ride([]string{"from_height"}))
-	check("second as_of on the first ride", ReasonHyperjumpAsOf, ride([]string{"as_of", "3"}))
-	check("second mp", ReasonHyperjumpProof, ride([]string{"mp", "ab"}, []string{"mp", "cd"}))
-	check("second mn", ReasonHyperjumpProof, ride([]string{"mn", strings.Repeat("1", 16)}))
-	check("ride with no mp", ReasonHyperjumpProof, func(b *chainBuilder) []nostr.Event {
+	check("second as_of on the first ride", ReasonMalformed, ride([]string{"as_of", "3"}))
+	check("second mp", ReasonMalformed, ride([]string{"mp", "ab"}, []string{"mp", "cd"}))
+	check("second mn", ReasonMalformed, ride([]string{"mn", strings.Repeat("1", 16)}))
+	check("ride with no mp", ReasonMalformed, func(b *chainBuilder) []nostr.Event {
 		board := b.move(ActEnterHyperspace, s.pubkey)
 		to := offset(t, s.pubkey, 1<<40)
 		tags := append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "3"}, {"as_of", "3"}, {"proof", strings.Repeat("ab", 32)}}, sectorTags(t, to)...)
@@ -301,6 +300,51 @@ func TestRuling1008ExactlyOnceWithAValue(t *testing.T) {
 		tags := append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "3"}, {"as_of", "3"}, {"proof", strings.Repeat("ab", 32)}, {"mp", "ab"}}, sectorTags(t, to)...)
 		return []nostr.Event{board, b.raw(ActHyperjump, tags...)}
 	})
+
+	// as_of is read on the first ride only: missing there it breaks
+	// DECK-0001 §4.2; garbled it is malformed; on a later ride it is free.
+	check("first ride with no as_of", ReasonHyperjumpAsOf, func(b *chainBuilder) []nostr.Event {
+		board := b.move(ActEnterHyperspace, s.pubkey)
+		return []nostr.Event{board, b.move(ActHyperjump, offset(t, s.pubkey, 1<<40), []string{"from_height", "2"}, []string{"B", "3"})}
+	})
+	check("garbled as_of", ReasonMalformed, ride([]string{"as_of", "x"}))
+	check("as_of twice on a later ride", "", func(b *chainBuilder) []nostr.Event {
+		evs := ride()(b)
+		return append(evs, b.move(ActHyperjump, offset(t, s.pubkey, 1<<41), []string{"from_height", "3"}, []string{"B", "4"}, []string{"as_of", "x"}, []string{"as_of"}))
+	})
+	// The ride's heights come first, then DECK-0001 §5.6, then its other
+	// tags: a zero-length ride with no proof tags is zero-length.
+	check("zero-length ride with no proof tags", ReasonHyperjumpZeroLength, func(b *chainBuilder) []nostr.Event {
+		board := b.move(ActEnterHyperspace, s.pubkey)
+		to := offset(t, s.pubkey, 1<<40)
+		tags := append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "2"}, {"as_of", "2"}}, sectorTags(t, to)...)
+		return []nostr.Event{board, b.raw(ActHyperjump, tags...)}
+	})
+	check("ride with bad heights and no proof tags", ReasonMalformed, func(b *chainBuilder) []nostr.Event {
+		board := b.move(ActEnterHyperspace, s.pubkey)
+		to := offset(t, s.pubkey, 1<<40)
+		tags := append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "x"}}, sectorTags(t, to)...)
+		return []nostr.Event{board, b.raw(ActHyperjump, tags...)}
+	})
+
+	// A sidestep's mr, mp, hx, hy and hz appear exactly once in form; its mn
+	// may be absent (§6.16 lists sidesteps without one) but not repeated.
+	root := strings.Repeat("ef", 32)
+	sidestep := func(drop string, extra ...[]string) func(b *chainBuilder) []nostr.Event {
+		return func(b *chainBuilder) []nostr.Event {
+			tags := [][]string{{"mr", root + ":" + root + ":" + root}, {"mp", "ab"}, {"hx", "1"}, {"hy", "1"}, {"hz", "1"}}
+			tags = slices.DeleteFunc(tags, func(t []string) bool { return t[0] == drop })
+			return []nostr.Event{b.move(ActSidestep, to, append(tags, extra...)...)}
+		}
+	}
+	check("sidestep", "", sidestep(""))
+	check("sidestep with mn", "", sidestep("", []string{"mn", strings.Repeat("1", 16)}))
+	check("sidestep with two mn", ReasonMalformed, sidestep("", []string{"mn", strings.Repeat("1", 16)}, []string{"mn", strings.Repeat("1", 16)}))
+	check("sidestep with a short mn", ReasonMalformed, sidestep("", []string{"mn", "12"}))
+	check("sidestep with two roots in mr", ReasonMalformed, sidestep("mr", []string{"mr", root + ":" + root}))
+	check("sidestep with no mp", ReasonMalformed, sidestep("mp"))
+	check("sidestep with hx not decimal", ReasonMalformed, sidestep("hx", []string{"hx", "-1"}))
+	check("sidestep with two hz", ReasonMalformed, sidestep("", []string{"hz", "1"}))
 
 	// Unread tags are free: on a hop an unknown tag twice, on a skipped
 	// action c and C twice and bare, inside a bracket anything but A and e.
@@ -314,4 +358,39 @@ func TestRuling1008ExactlyOnceWithAValue(t *testing.T) {
 		e := b.move(ActEnterVirtual, s.pubkey, regionTag(box, 8), gameTag())
 		return []nostr.Event{e, b.raw("shoot", []string{"C"}, []string{"C", "x"}, []string{"proof"}, []string{"region"})}
 	})
+}
+
+// A spawn is never a link (arkinox, spec #48): an event any of whose A tags
+// is "spawn" is never reached by the walk, whatever e tags it carries, so an
+// older one never extends or forks the chain and is never skipped.
+func TestRuling1008SpawnIsNeverALink(t *testing.T) {
+	s := newSigner(t)
+	b := newChain(t, s)
+	h1 := b.move(ActHop, offset(t, s.pubkey, 1))
+	h2 := b.move(ActHop, offset(t, s.pubkey, 2))
+	// Older than the spawn, so it is history, not the newest spawn; it names
+	// h1 as previous under this chain's genesis.
+	spawnLink := s.sign(t, KindMovement, b.spawn.CreatedAt-100, append([][]string{{"A", ActSpawn}, {"C", s.pubkey},
+		{"e", b.spawn.ID, "", "genesis"}, {"e", h1.ID, "", "previous"}}, sectorTags(t, s.pubkey)...)...)
+	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, h2, spawnLink})
+	expectValid(t, vd, h2, offset(t, s.pubkey, 2))
+	if len(vd.Chain) != 3 || len(vd.Skipped) != 0 {
+		t.Fatalf("chain %v skipped %v", vd.Chain, vd.Skipped)
+	}
+
+	// The same with the spawn tag second, behind another A tag.
+	second := s.sign(t, KindMovement, b.spawn.CreatedAt-50, append([][]string{{"A", "wave"}, {"A", ActSpawn},
+		{"e", b.spawn.ID, "", "genesis"}, {"e", h1.ID, "", "previous"}}, sectorTags(t, s.pubkey)...)...)
+	expectValid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, h2, second}), h2, offset(t, s.pubkey, 2))
+}
+
+// Always mainnet (arkinox, spec #48): a net tag is informational and never
+// read by chain validity, whatever its value or count.
+func TestRuling1008NetTagIsNeverRead(t *testing.T) {
+	s := newSigner(t)
+	b := newChain(t, s)
+	board := b.move(ActEnterHyperspace, s.pubkey, []string{"net", "testnet"}, []string{"net"})
+	jump := b.move(ActHyperjump, offset(t, s.pubkey, 1<<40), []string{"from_height", "2"}, []string{"B", "3"}, []string{"as_of", "3"},
+		[]string{"net", "signet"}, []string{"net", "regtest"})
+	expectValid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, board, jump}), jump, offset(t, s.pubkey, 1<<40))
 }

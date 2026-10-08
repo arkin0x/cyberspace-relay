@@ -91,6 +91,11 @@ func (b *chainBuilder) moveTags(action, to string, sectors [][]string, extra ...
 	if _, bearing := proofOf[action]; bearing && !given("proof") {
 		tags = append(tags, []string{"proof", strings.Repeat("ab", 32)})
 	}
+	if action == ActSidestep && !given("mr") {
+		root := strings.Repeat("ef", 32)
+		tags = append(tags, []string{"mr", root + ":" + root + ":" + root}, []string{"mp", "ab"},
+			[]string{"hx", "1"}, []string{"hy", "1"}, []string{"hz", "1"})
+	}
 	if action == ActHyperjump && !given("mp") {
 		tags = append(tags, []string{"mp", strings.Repeat("cd", 32)}, []string{"mn", strings.Repeat("0", 16)})
 	}
@@ -734,10 +739,10 @@ func TestGateCachingAndFailures(t *testing.T) {
 	}
 }
 
-// Every proof-bearing action carries a proof tag of 32 bytes of lowercase
-// hex (§8.4, §8.5, DECK-0001 §3.1, §5.2), checked in structural mode too,
-// since no checker can verify a proof that is not there. As in the
-// reference, the first proof tag is the one read.
+// Every proof-bearing action carries exactly one proof tag of 32 bytes of
+// lowercase hex (§8.4, §8.5, DECK-0001 §3.1, §5.2), checked in structural
+// mode too, since no checker can verify a proof that is not there. A tag of
+// the wrong form is malformed, as in the reference.
 func TestProofTagRequiredInStructuralMode(t *testing.T) {
 	s := newSigner(t)
 	for _, action := range []string{ActHop, ActSidestep, ActEnterHyperspace} {
@@ -752,7 +757,7 @@ func TestProofTagRequiredInStructuralMode(t *testing.T) {
 				tags = append(tags, proof)
 			}
 			evt := b.raw(action, append(tags, sectorTags(t, b.pos)...)...)
-			expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, evt}), proofOf[action], evt, s.pubkey)
+			expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, evt}), ReasonMalformed, evt, s.pubkey)
 			if t.Failed() {
 				t.Fatalf("%s with a %s proof", action, name)
 			}
@@ -763,11 +768,11 @@ func TestProofTagRequiredInStructuralMode(t *testing.T) {
 	board := b.move(ActEnterHyperspace, s.pubkey)
 	to := offset(t, s.pubkey, 1<<40)
 	jump := b.raw(ActHyperjump, append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "3"}, {"as_of", "3"}}, sectorTags(t, to)...)...)
-	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, board, jump}), ReasonHyperjumpProof, jump, s.pubkey)
+	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, board, jump}), ReasonMalformed, jump, s.pubkey)
 
 	// The proof tag appears exactly once (arkinox, 2026-10-08): a second
 	// one makes the action invalid even when the first is well formed.
 	b = newChain(t, s)
 	hop := b.move(ActHop, offset(t, s.pubkey, 1), []string{"proof", strings.Repeat("cd", 32)}, []string{"proof", strings.Repeat("cd", 32)})
-	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, hop}), ReasonHopProof, hop, s.pubkey)
+	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, hop}), ReasonMalformed, hop, s.pubkey)
 }

@@ -1,8 +1,6 @@
 package regiongate
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"slices"
@@ -13,30 +11,19 @@ import (
 
 // The golden vectors of the chain rules at revision
 // 2026-09-28-virtual-brackets (CYBERSPACE_V2 §8.12), with the rulings of
-// 2026-10-07 and 2026-10-08 folded in (arkin0x/cyberspace #46, 912f3d7),
-// copied unchanged from the reference implementation:
+// 2026-10-07 and 2026-10-08 folded in (arkin0x/cyberspace #46, 912f3d7, and
+// spec PR #48 in review), copied unchanged from the reference
+// implementation:
 //
-//	arkin0x/cyberspace-cli PR #24, commit 85f4e44cf816d9c465f8377586333e3de1fac879,
+//	arkin0x/cyberspace-cli PR #24, commit 80ab1456f24a94a51bb024e798ffe02d07cadd34,
 //	vectors/chain-rules-2026-09-28-virtual-brackets.json
-//	sha256 e127eb1c4dfe68739632243427f74f6a5063b47feb7e1e5e50e9574e1f815d96
+//	sha256 735886e151237ac198b126bc5e1df0fc8f3c98f96c139668d5ec76b4d6b7c990
 //
 // The format is described in that repository's vectors/README.md. Replace the
 // file, never edit it: a vector that disagrees with this verifier is a
 // finding about one implementation or the other. REGIONGATE_VECTORS=<path>
 // runs another vectors file in place of this one, without copying it in.
 const vectorsFile = "testdata/chain-rules-2026-09-28-virtual-brackets.json"
-
-// The rulings of 2026-10-08 made a fork kill the chain. The vectors of
-// 85f4e44 predate them, so while that exact file (pinned by its sha256) is
-// in testdata, its vectors that lock the older fork rule are skipped, and
-// the new reason code is not expected in it. Any other file runs in full.
-const preForkRulingSHA256 = "e127eb1c4dfe68739632243427f74f6a5063b47feb7e1e5e50e9574e1f815d96"
-
-var supersededByForkRuling = map[string]bool{
-	"fork-older-branch-continues":      true,
-	"fork-tie-smaller-id":              true,
-	"fork-earlier-invalid-branch-wins": true,
-}
 
 type vectorFile struct {
 	Revision   string `json:"chain_rules_revision"`
@@ -90,8 +77,6 @@ func TestChainRulesGoldenVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(data)
-	preForkRuling := hex.EncodeToString(sum[:]) == preForkRulingSHA256
 	var vf vectorFile
 	if err := json.Unmarshal(data, &vf); err != nil {
 		t.Fatal(err)
@@ -105,7 +90,7 @@ func TestChainRulesGoldenVectors(t *testing.T) {
 		}
 	}
 	for code := range Reasons {
-		if _, ok := vf.Reasons[code]; !ok && !(preForkRuling && code == ReasonFork) {
+		if _, ok := vf.Reasons[code]; !ok {
 			t.Errorf("verifier reason code %q is not in the vectors", code)
 		}
 	}
@@ -119,12 +104,6 @@ func TestChainRulesGoldenVectors(t *testing.T) {
 		ex := vec.Expected
 		proofPending := !ex.Valid && (pendingReasons[ex.Reason] || needsBlockData[vec.Name])
 		onUnchecked := false
-		if preForkRuling && supersededByForkRuling[vec.Name] {
-			t.Run(vec.Name, func(t *testing.T) {
-				t.Skip("superseded by arkinox's ruling of 2026-10-08: a fork kills the chain")
-			})
-			continue
-		}
 		t.Run(vec.Name, func(t *testing.T) {
 			if vec.OpenQuestion != "" {
 				t.Logf("open question, literal reading implemented: %s", vec.OpenQuestion)

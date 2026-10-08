@@ -117,14 +117,21 @@ It does, in order:
    genesis names it; forward through `e … previous`; head = first event
    nothing names as previous. Where an event repeats a tag, the first one is
    followed. An event is a spawn when **any** of its `A` tags is `spawn`,
-   wherever it stands; a spawn is never a link, and one with a second `A`
-   tag is an invalid newest spawn.
-   **A fork kills the chain** (arkinox, 2026-10-08): when two or more chain
-   events name the same `e … previous`, the whole chain is dead, whichever
-   branch is valid or signed first, and the identity stands at its spawn
-   coordinate (its pubkey's) until it respawns. Reason `fork`. This holds
-   for branches the links do not reach as well. A forged event is discarded
-   in step 1, so it is never a branch.
+   wherever it stands. A spawn is never a link, whatever `e` tags it
+   carries: the newest starts the chain, and older ones are history that
+   never extends or forks it and is never a skipped or virtual action. A
+   spawn with a second `A` tag is an invalid newest spawn. Always mainnet:
+   a `net` tag is informational, and nothing here reads it.
+   **A fork kills the chain** (arkinox, 2026-10-08; spec PR #48): when the
+   walk from the spawn reaches an event that two or more chain events name
+   as `e … previous` (each event's first copy), the whole chain is dead,
+   whichever branch is valid or signed first, and the identity stands at its
+   spawn coordinate (its pubkey's) until it respawns. Reason `fork`; the
+   verdict's chain runs from the spawn to that event, and it is invalid from
+   the spawn. Events the walk never reaches (behind a discarded event, or
+   naming an id nobody holds) make no fork. A forged event is discarded in
+   step 1, so it is never a branch. An event whose first `e … previous` is
+   empty names nothing and drops off the chain.
 3. **Walks the chain from the spawn.** The recognized actions are the base
    actions (`spawn`, `hop`, `sidestep`, `enter-virtual`, `exit-virtual`) and
    those of DECK-0001, which is mandatory (`enter-hyperspace`, `hyperjump`).
@@ -135,13 +142,20 @@ It does, in order:
      rule reads appears exactly once with a well-formed value. A tag with no
      value still counts as that tag: a bare `["A"]` is an `A` tag, and
      invalid, and a bare second `["C"]` is a second `C`. Unread tags are free.
-     The tags read are `A`, `c`, `C`, the `e` tags, `region`, the game `p`
-     tag, the sector tags, `proof`, and on a ride `from_height`, `B`, `as_of`
-     (on the first ride after boarding) and `mp`. A ride's `mn` may appear
-     at most once, and its absence is left to the proof checker, because
-     DECK-0001 §5.8 lists rides without one. Inside a bracket only `A` and
-     the `e` tags are constrained; on skipped actions only `A` and the `e`
-     tags; on an exit also `C`, the sector tags and `e … entry`.
+     The tags read are `A`, `c`, `C`, the `e` tags (not on the spawn),
+     `region`, the game `p` tag, the sector tags, `proof` on every
+     proof-bearing action, `mr` (three roots), `mp`, `hx`, `hy` and `hz` on a
+     sidestep, and `from_height`, `B` and `mp` on a ride, plus `as_of` on the
+     first ride after boarding (missing there: `hyperjump-as-of`; present
+     but repeated or not decimal: `malformed`; on later rides unread). `mn`
+     may be absent on a sidestep or a ride, because the exemption lists
+     (§6.16, DECK-0001 §5.8) name events with none, but not repeated; a
+     missing `mn` on an unlisted event is the proof checker's. A tag of the
+     wrong form is `malformed`. On a ride the heights come first, then
+     DECK-0001 §5.6 (zero-length), then the other ride tags. Inside a
+     bracket only `A` and the `e` tags are constrained; on skipped actions
+     only `A` and the `e` tags; on an exit also `C`, the sector tags and
+     `e … entry`.
    - **Exactly one `e … genesis` and one `e … previous`** on every chain
      event, recognized, skipped or virtual, each an event id, and exactly
      one `e … entry` on an exit. Reason `malformed`.
@@ -221,8 +235,9 @@ the identity.
 
 `server/regiongate/testdata/chain-rules-2026-09-28-virtual-brackets.json` is
 the reference implementation's vector file, copied unchanged from
-arkin0x/cyberspace-cli PR #24 (commit `85f4e44`, generated against the spec
-at `912f3d7`). `TestChainRulesGoldenVectors` runs every vector through the
+arkin0x/cyberspace-cli PR #24 (commit `80ab145`, generated against the spec
+at `912f3d7` with the rulings of 2026-10-08, spec PR #48). Events in it that
+are not NIP-01 shaped are left out, as a relay could not accept them. `TestChainRulesGoldenVectors` runs every vector through the
 verifier, every event checked for authenticity:
 
 - vectors whose verdict rests on structure must match the reference exactly:
@@ -296,7 +311,8 @@ may be listed; any match admits.
   respawns. Without the parent nobody can tell whether it would win a fork
   or extend the chain.
 - **A fork kills the chain** (arkinox, 2026-10-08). Two chain events naming
-  the same previous make the chain dead at the spawn coordinate. This closes
+  the same previous, where the walk from the spawn reaches it, make the
+  chain dead at the spawn coordinate. This closes
   the frozen-chain rewind: without it, an identity that had left the region
   could sign one invalid event backdated to just after an old event inside
   the region, win the fork by signing time, freeze the chain there and be

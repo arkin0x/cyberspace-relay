@@ -168,11 +168,11 @@ func countTags(evt nostr.Event, name, marker string) int {
 
 // Resolution is a pubkey's events resolved by §8.7.3.
 type Resolution struct {
-	// Chain is the active chain from the spawn. When there is a fork that
-	// the links reach, it stops at the event the branches name.
+	// Chain is the active chain from the spawn. At a fork it stops at the
+	// event the branches name.
 	Chain []Move
-	// ForkedFrom is the id of an event that two or more chain events name
-	// as previous, or "". Fork lists those events' ids, sorted.
+	// ForkedFrom is the id of the event on the walk that two or more chain
+	// events name as previous, or "". Fork lists those events' ids, sorted.
 	ForkedFrom string
 	Fork       []string
 }
@@ -190,9 +190,9 @@ func ActiveChain(pubkey string, events []nostr.Event) []Move {
 //     An event is a spawn when any of its A tags is "spawn";
 //  2. keep only events whose genesis names that spawn: the chain events;
 //  3. follow previous links forward;
-//  4. a fork, two or more chain events naming the same previous, makes the
-//     whole chain dead (arkinox, 2026-10-08), whichever branch is valid or
-//     signed first;
+//  4. a fork, two or more chain events naming the current event as previous,
+//     makes the whole chain dead (arkinox, 2026-10-08), whichever branch is
+//     valid or signed first; resolution stops at that event;
 //  5. stop at the first event nothing names as previous.
 //
 // Resolution reads links, created_at and ids only, never a proof or a tag
@@ -200,8 +200,9 @@ func ActiveChain(pubkey string, events []nostr.Event) []Move {
 // already have discarded every event that is not authentic (Verifier.Verify
 // does): a discarded event never existed, so it is never a branch of a fork,
 // an event naming it as previous is never reached, and the chain ends at the
-// event before it. Events by other pubkeys, other kinds and repeated ids are
-// ignored. A spawn names no previous event, so it is never a link. The
+// event before it. Events the walk never reaches, behind a discarded event
+// or naming an id nobody holds, cannot make a fork. Events by other pubkeys,
+// other kinds and repeated ids are ignored. A spawn names no previous event, so it is never a link. The
 // first copy of each e tag is the one followed. Chain is nil when there is
 // no spawn.
 func Resolve(pubkey string, events []nostr.Event) Resolution {
@@ -254,19 +255,6 @@ func Resolve(pubkey string, events []nostr.Event) Resolution {
 		}
 		r.Chain = append(r.Chain, next[0])
 		cur = next[0].Event.ID
-	}
-	// A fork the links do not reach (its branches name an event that is
-	// not on the chain) is a fork all the same: the smallest such id is
-	// reported, for a deterministic verdict.
-	var ids []string
-	for id, kids := range children {
-		if len(kids) > 1 {
-			ids = append(ids, id)
-		}
-	}
-	if len(ids) > 0 {
-		sort.Strings(ids)
-		forked(ids[0])
 	}
 	return r
 }

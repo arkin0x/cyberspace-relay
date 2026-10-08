@@ -83,9 +83,9 @@ const (
 // Reasons maps every reason code to the rule it names.
 var Reasons = map[string]string{
 	ReasonNoSpawn:              "no authentic spawn event for this pubkey, so there is no chain (§8.7.3 rule 1)",
-	ReasonFork:                 "two or more chain events name the same previous event: the chain is dead, and the identity stands at its spawn coordinate (arkinox, 2026-10-08)",
+	ReasonFork:                 "two or more events whose e genesis names the newest spawn name the same event as e previous (each event's first e previous tag), where the walk from the spawn reaches it; the chain is invalid from the spawn, and the identity stands at its spawn coordinate (§8.7.3)",
 	ReasonATag:                 "the event carries no A tag, more than one, or one with no value (§8.8)",
-	ReasonMalformed:            "a tag the chain rules read is missing, repeated or ill-formed: e genesis, e previous, e entry, c, C, from_height, B",
+	ReasonMalformed:            "a tag a chain rule reads is missing, repeated, valueless or ill-formed: e genesis and e previous on every event but the spawn, e entry on an exit, C on every recognized action, c on every recognized action but the exit, proof on a proof-bearing action, mr, mp, hx, hy and hz on a sidestep, from_height, B and mp on a ride, as_of on the first ride when present; mn may be absent on a sidestep or ride but not repeated",
 	ReasonSectorTags:           "a recognized action's X, Y, Z or S tag is missing, repeated, or not the value computed from its C (§10)",
 	ReasonSpawnCoordinate:      "the spawn's C is not its pubkey (§8.3)",
 	ReasonCMismatch:            "c is not the C of the nearest recognized action before it (§8.9 item 2, continuity)",
@@ -163,7 +163,7 @@ type Verdict struct {
 	// walk accepted past the proof-verified prefix, skipped actions aside.
 	Length, Unchecked int
 	// Fork lists the ids of the chain events that name the same previous
-	// event, InvalidAt, when the chain is dead by a fork.
+	// event, the last event of Chain, when the chain is dead by a fork.
 	Fork []string
 	// Reason is the code (Reasons) of the rule the chain breaks, or "" when
 	// every event of the active chain passed. InvalidAt and InvalidIndex
@@ -237,10 +237,9 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	// never a branch.
 	if res.ForkedFrom != "" {
 		atSpawn()
-		vd.Reason, vd.InvalidAt, vd.Fork = ReasonFork, res.ForkedFrom, res.Fork
-		if last := len(chain) - 1; chain[last].Event.ID == res.ForkedFrom {
-			vd.InvalidIndex = last
-		}
+		// As the reference reports it: the chain runs from the spawn to the
+		// event the branches name, and it is invalid from the spawn.
+		vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Fork = ReasonFork, chain[0].Event.ID, 0, res.Fork
 		vd.Stopped = fmt.Sprintf("fork: %d chain events name %s as previous (%s)", len(res.Fork), res.ForkedFrom, strings.Join(res.Fork, ", "))
 		return vd
 	}
@@ -269,6 +268,11 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		if n := countTags(cur.Event, "A", ""); n != 1 || cur.Action == "" {
 			return invalid(i, ReasonATag, fmt.Sprintf("expected exactly one A tag with a value, found %d", n))
 		}
+		// Exactly one e genesis and one e previous on every event but the
+		// spawn: recognized, skipped or virtual (arkinox, 2026-10-08).
+		if reason, detail := links(cur); reason != "" {
+			return invalid(i, reason, detail)
+		}
 		if w.bracket == nil && !recognizedActions[cur.Action] {
 			// §8.9: an action this verifier does not recognize is skipped.
 			// It is checked for being authentic (discarded above otherwise),
@@ -278,11 +282,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 			// before the next action for rules that look back (item 4), so
 			// the walk leaves its state untouched. Its id still seeds the
 			// work of the action after it, which the checker reads from that
-			// action's e previous tag (item 3). Its e genesis and e previous
-			// must each appear exactly once (arkinox, 2026-10-08).
-			if reason, detail := links(cur); reason != "" {
-				return invalid(i, reason, detail)
-			}
+			// action's e previous tag (item 3).
 			vd.Skipped = append(vd.Skipped, cur.Event.ID)
 			continue
 		}
@@ -293,18 +293,8 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 
 		// Only base and DECK-0001 actions outside a bracket carry a work
 		// proof; brackets and virtual actions carry none (§8.11.2), and a
-		// proof-bearing action inside a bracket was refused by step. The
-		// proof tag itself is checked here in every mode: a proof that is
-		// missing or not 32 bytes of lowercase hex cannot verify, whatever
-		// checker is plugged in (§8.4, §8.5, DECK-0001 §3.1, §5.2). It must
-		// appear exactly once (arkinox, 2026-10-08), and so must a ride's
-		// mp; a ride's mn may be absent only for the rides DECK-0001 §5.8
-		// lists, which the proof checker knows.
-		if code, bearing := proofOf[cur.Action]; bearing {
-			if why := proofTags(cur); why != "" {
-				return invalid(i, code, why)
-			}
-		}
+		// proof-bearing action inside a bracket was refused by step, which
+		// has also checked the form of its proof tags.
 		if code, bearing := proofOf[cur.Action]; bearing && proofsHold && v.Proofs != nil {
 			res, why := v.Proofs.Check(prev, cur)
 			switch res {
@@ -428,9 +418,6 @@ func (w *walk) inside(cur Move) (string, string) {
 	if notInBracket[cur.Action] {
 		return ReasonBaseActionInBracket, fmt.Sprintf("%s inside the bracket opened by %s (§8.11.4 rule 3)", cur.Action, b.entry.Event.ID)
 	}
-	if reason, detail := links(cur); reason != "" {
-		return reason, detail
-	}
 	if cur.Action != ActExitVirtual {
 		return "", ""
 	}
@@ -464,9 +451,6 @@ func (w *walk) inside(cur Move) (string, string) {
 func (w *walk) outside(cur Move) (string, string) {
 	if cur.Action == ActExitVirtual {
 		return ReasonExitWithoutBracket, "no bracket is open (§8.11.4 rule 6)"
-	}
-	if reason, detail := links(cur); reason != "" {
-		return reason, detail
 	}
 	if _, reason, detail := coord(cur, "c", cur.From); reason != "" {
 		return reason, detail
@@ -502,9 +486,20 @@ func (w *walk) outside(cur Move) (string, string) {
 		// action stay as they are until the exit.
 		w.bracket = &openBracket{entry: cur}
 		return "", ""
+	case ActHop:
+		if why := proofTags(cur); why != "" {
+			return ReasonMalformed, why
+		}
+	case ActSidestep:
+		if why := proofTags(cur); why != "" {
+			return ReasonMalformed, why
+		}
 	case ActEnterHyperspace:
 		if cur.To != cur.From {
 			return ReasonEnterHyperspaceMoved, "C is not c; boarding does not move the identity (DECK-0001 §3.1)"
+		}
+		if why := proofTags(cur); why != "" {
+			return ReasonMalformed, why
 		}
 	case ActHyperjump:
 		if reason, detail := ride(w.lookback, cur); reason != "" {
@@ -527,9 +522,14 @@ func ride(look, cur Move) (string, string) {
 		return ReasonMalformed, "from_height and B: expected exactly one each, a base-10 block height (DECK-0001 §5.2)"
 	}
 	// There is no zero-length ride, the first ride after boarding included,
-	// and no ride is exempt from this (DECK-0001 §5.2, §5.6, §5.8).
+	// and no ride is exempt from this (DECK-0001 §5.2, §5.6, §5.8). It comes
+	// before the proof tags, which a zero-length ride cannot carry in a
+	// verifiable form.
 	if from.Cmp(to) == 0 {
 		return ReasonHyperjumpZeroLength, "B equals from_height; every ride passes at least one block (DECK-0001 §5.6)"
+	}
+	if why := proofTags(cur); why != "" {
+		return ReasonMalformed, why
 	}
 	if look.Action != ActEnterHyperspace && look.Action != ActHyperjump {
 		return ReasonHyperjumpPredecessor, fmt.Sprintf("the action before this ride is %s (DECK-0001 §4.3)", look.Action)
@@ -537,9 +537,17 @@ func ride(look, cur Move) (string, string) {
 	if look.Action == ActEnterHyperspace {
 		// The first ride after boarding declares the station set bound,
 		// and the bound is at least the destination (DECK-0001 §4.2).
+		// as_of is read on the first ride after boarding only. Missing, it
+		// breaks DECK-0001 §4.2; present, it appears once as a height.
+		if countTags(cur.Event, "as_of", "") == 0 {
+			return ReasonHyperjumpAsOf, "the first ride after boarding carries no as_of (DECK-0001 §4.2)"
+		}
 		asOf, ok := onlyDecimal(cur.Event, "as_of")
-		if !ok || asOf.Cmp(to) < 0 {
-			return ReasonHyperjumpAsOf, "the first ride needs exactly one as_of, of at least B (DECK-0001 §4.2, §4.3)"
+		if !ok {
+			return ReasonMalformed, "as_of: expected exactly once with a base-10 height"
+		}
+		if asOf.Cmp(to) < 0 {
+			return ReasonHyperjumpAsOf, "as_of must be at least B (DECK-0001 §4.2, §4.3)"
 		}
 		return "", ""
 	}
@@ -550,25 +558,47 @@ func ride(look, cur Move) (string, string) {
 	return "", ""
 }
 
-// proofTags checks the proof tags of a proof-bearing action: exactly one
-// proof holding 32 bytes of lowercase hex, and for a ride exactly one mp with
-// a value and at most one mn, of 16 lowercase hex characters (DECK-0001
-// §5.2). A ride with no mn is invalid unless DECK-0001 §5.8 lists it, which
-// the proof checker decides. It returns why not, or "".
+// proofTags checks the form of a proof-bearing action's proof tags, which
+// a chain rule reads, so each appears exactly once with a well-formed value
+// (arkinox, 2026-10-08): proof (32 bytes of lowercase hex) on every one; mr
+// (three colon-joined 32-byte roots), mp (a value), hx, hy and hz (base-10)
+// on a sidestep (§8.5); mp on a ride (DECK-0001 §5.2). mn, on a sidestep or
+// a ride, may be absent, because the exemption lists name events with none
+// (§6.16, DECK-0001 §5.8), but not repeated, and it is 16 lowercase hex
+// characters. Whether the values verify is the proof checker's. It returns
+// why not, or "".
 func proofTags(cur Move) string {
-	if vs := tagValues(cur.Event, "proof"); len(vs) != 1 || !isHex32(vs[0]) {
-		return fmt.Sprintf("proof: expected exactly one 32-byte lowercase hex value, found %d tags", len(vs))
+	type tagForm struct {
+		name string
+		form func(string) bool
 	}
-	if cur.Action != ActHyperjump {
-		return ""
+	nonEmpty := func(v string) bool { return v != "" }
+	forms := []tagForm{{"proof", isHex32}}
+	switch cur.Action {
+	case ActSidestep:
+		forms = append(forms, tagForm{"mr", isRoots}, tagForm{"mp", nonEmpty},
+			tagForm{"hx", isDecimal}, tagForm{"hy", isDecimal}, tagForm{"hz", isDecimal})
+	case ActHyperjump:
+		forms = append(forms, tagForm{"mp", nonEmpty})
 	}
-	if vs := tagValues(cur.Event, "mp"); len(vs) != 1 || vs[0] == "" {
-		return fmt.Sprintf("mp: expected exactly one with a value, found %d tags", len(vs))
+	for _, f := range forms {
+		if vs := tagValues(cur.Event, f.name); len(vs) != 1 || !f.form(vs[0]) {
+			return f.name + ": expected exactly once with a well-formed value"
+		}
 	}
-	if vs := tagValues(cur.Event, "mn"); len(vs) > 1 || len(vs) == 1 && !isHexLen(vs[0], 16) {
-		return "mn: expected at most one, of 16 lowercase hex characters"
+	if cur.Action == ActSidestep || cur.Action == ActHyperjump {
+		if vs := tagValues(cur.Event, "mn"); len(vs) > 1 || len(vs) == 1 && !isHexLen(vs[0], 16) {
+			return "mn: expected at most once, 16 lowercase hex characters"
+		}
 	}
 	return ""
+}
+
+// isRoots reports whether s is three 32-byte lowercase hex roots joined by
+// colons, the form of a sidestep's mr tag (§8.5).
+func isRoots(s string) bool {
+	parts := strings.Split(s, ":")
+	return len(parts) == 3 && isHex32(parts[0]) && isHex32(parts[1]) && isHex32(parts[2])
 }
 
 // onlyDecimal reads the one tag named name as a base-10 height, which may
