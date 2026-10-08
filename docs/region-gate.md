@@ -63,7 +63,29 @@ history of old chains costs two small answers:
    redirect the lookup.
 2. `{"authors":[pk],"kinds":[3333],"#e":[newest_spawn_id]}`: every event that
    names it, which includes every event of its chain (they all carry it as
-   `e … genesis`, §8.7.3 step 2).
+   `e … genesis`, §8.7.3 rule 2).
+
+Each source reads at most `max_chain_events` (default 5000) events per
+question, paging remote relays 500 at a time. Only events that count are read
+toward that cap: authentic events by the author, and for the second question
+only those whose `e … genesis` names the newest spawn, so events a third
+party forged cannot push the real chain out of the answer.
+
+The gate judges a chain only when it holds all of it, because relays answer
+newest first and a cut-short answer drops the events right after the spawn
+(or an older branch at a fork), which would resolve to a wrong position:
+
+- **Gaps.** A held chain event whose `e … previous` is neither the spawn nor
+  held is asked for by id (`{"ids":[...]}`), for up to 8 rounds. An event
+  that comes back and is on the chain fills the gap. One that comes back but
+  that resolution never follows closes it, since the branch through it is cut
+  off (§8.7.3): an event that is not authentic, or that is on another chain.
+  Only the event whose id is the hash of its content can close a gap this
+  way, so a forgery borrowing the id cannot cut a chain short.
+- **Refusals that are not cached.** A source that hit the cap
+  (`max_chain_events`), a relay that failed part way through paging (or kept
+  answering the same full page), or a gap that no source could fill, makes
+  the lookup a refusal that says "try again" and is not cached.
 
 Sources are this relay's own store (`use_local_events`) and `chain_relays`.
 `wss://cyberspace.nostr1.com` refuses reads without NIP-42 AUTH; the gate
@@ -241,4 +263,27 @@ may be listed; any match admits.
   `fetch_timeout_seconds`.
 - Chain relays are trusted for completeness, not for content: events are
   verified, but a relay that hides an author's newest events can make the
-  gate see an older position.
+  gate see an older position. Gaps in the middle of a chain are caught (see
+  Looking up a chain), but missing events past the head cannot be seen, and
+  neither can an older fork branch that no source returns. A chain relay
+  that fails outright is left out of the answer, as if it held nothing.
+- An identity with more than `max_chain_events` events since its newest
+  spawn, its own fork branches included, is refused ("try again") on every
+  lookup until the operator raises `max_chain_events` or the identity
+  respawns. The cap bounds the cost of one lookup.
+- An identity whose chain names a previous event that no source holds (its
+  client published an event but never its parent) is refused ("try again")
+  until the parent is published somewhere the gate reads, or the identity
+  respawns. Without the parent nobody can tell whether it would win a fork
+  or extend the chain.
+- **The frozen-chain rewind (awaiting a ruling).** The gate admits a frozen
+  chain at its last valid position (§3.2, §8.7.3). An identity that has left
+  the region can sign one invalid event naming an old event of its own,
+  from a time it was inside, as previous, backdated to just after that
+  event. Signing time decides a fork before validity (§8.7.3 rule 4), so
+  the backdated branch wins, the chain freezes at the old position inside
+  the region, and the gate admits the identity again with no work. This is
+  the identity rewriting its own chain, which the spec permits (§8.7.3
+  note); whether a gated relay should admit frozen chains at all (admit only
+  valid chains, a heuristic, or an `admit_frozen` setting, off by default)
+  is awaiting arkinox's ruling. The gate is unchanged until then.

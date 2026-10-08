@@ -35,17 +35,18 @@ func TestLiveChain(t *testing.T) {
 
 	// The gate's two indexed questions: spawns, then the newest spawn's chain.
 	start := time.Now()
-	spawns, ok := g.gather(context.Background(), pk, map[string][]string{"A": {ActSpawn}})
+	spawns, _, ok := g.gather(context.Background(), pk, ChainQuery{Tags: map[string][]string{"A": {ActSpawn}}})
 	if !ok {
 		t.Fatal("spawn query failed on every relay")
 	}
 	vd0 := ver.Verify(pk, spawns)
-	chain, _ := g.gather(context.Background(), pk, map[string][]string{"e": {vd0.Head}})
+	chain, cov, _ := g.gather(context.Background(), pk, ChainQuery{Tags: map[string][]string{"e": {vd0.Head}}})
 	fetched := time.Since(start)
 	start = time.Now()
 	vd := ver.Verify(pk, append(spawns, chain...))
 	t.Logf("fetched %d spawns + %d chain events in %s, verified in %s", len(spawns), len(chain),
 		fetched.Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
+	t.Logf("chain answer coverage %+v", cov)
 	t.Logf("has_chain=%v length=%d unchecked=%d head=%s", vd.HasChain, vd.Length, vd.Unchecked, vd.Head)
 	t.Logf("position_event=%s stopped=%q", vd.PositionEvent, vd.Stopped)
 	if vd.Position != nil {

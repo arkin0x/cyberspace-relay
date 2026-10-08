@@ -19,6 +19,10 @@ import (
 // maxQueryResults is the maximum number of results a single query can return.
 const maxQueryResults = 10000
 
+// MaxQueryResults is the most events one Query returns, whatever limit it is
+// given: a larger limit is lowered to it.
+const MaxQueryResults = maxQueryResults
+
 // Query executes NIP-01 filters against the database and returns matching events.
 // This opens and closes a read transaction internally.
 func (db *NDB) Query(filters []nostr.Filter, limit int) ([]nostr.Event, error) {

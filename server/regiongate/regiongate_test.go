@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,8 +81,13 @@ func (b *chainBuilder) move(action, to string, extra ...[]string) nostr.Event {
 }
 
 // moveTags is move with the given sector tags instead of the computed ones.
+// An action that carries a work proof gets a well-formed proof tag (which
+// PendingSpec never checks) unless extra gives one.
 func (b *chainBuilder) moveTags(action, to string, sectors [][]string, extra ...[]string) nostr.Event {
 	tags := [][]string{{"c", b.pos}, {"C", to}}
+	if _, bearing := proofOf[action]; bearing && !slices.ContainsFunc(extra, func(t []string) bool { return t[0] == "proof" }) {
+		tags = append(tags, []string{"proof", strings.Repeat("ab", 32)})
+	}
 	evt := b.raw(action, append(append(tags, sectors...), extra...)...)
 	b.pos = to
 	return evt
@@ -482,32 +488,47 @@ func TestVerifyVirtualBrackets(t *testing.T) {
 
 // ── the gate ──────────────────────────────────────────────────────────
 
+// fakeSource is a relay holding events. It answers newest first, as relays
+// do, so a cap drops the oldest events.
 type fakeSource struct {
 	mu     sync.Mutex
 	events []nostr.Event
 	calls  atomic.Int32
 	fail   bool
 	delay  time.Duration
+	// partial makes every answer Partial, as a relay failing part way.
+	partial bool
+	// untagged events are missing from tag queries, as from a relay whose
+	// tag index lost them, but are returned when asked for by id.
+	untagged map[string]bool
 }
 
-func (f *fakeSource) Movement(ctx context.Context, pubkey string, tags map[string][]string, max int) ([]nostr.Event, error) {
+func (f *fakeSource) Movement(ctx context.Context, pubkey string, q ChainQuery) ([]nostr.Event, Coverage, error) {
 	f.calls.Add(1)
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
 	if f.fail {
-		return nil, errors.New("relay down")
+		return nil, Coverage{}, errors.New("relay down")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []nostr.Event
-	flt := nostr.Filter{Authors: []string{pubkey}, Kinds: []int{KindMovement}, Tags: tags}
+	flt := nostr.Filter{Authors: []string{pubkey}, Kinds: []int{KindMovement}, Tags: q.Tags, IDs: q.IDs}
 	for _, e := range f.events {
-		if flt.MatchesEvent(e) {
+		if len(q.IDs) == 0 && f.untagged[e.ID] {
+			continue
+		}
+		if flt.MatchesEvent(e) && (q.Keep == nil || q.Keep(e)) {
 			out = append(out, e)
 		}
 	}
-	return out, nil
+	slices.SortFunc(out, func(a, b nostr.Event) int { return int(b.CreatedAt - a.CreatedAt) })
+	cov := Coverage{Partial: f.partial}
+	if q.Max > 0 && len(out) > q.Max {
+		out, cov.Capped = out[:q.Max], true
+	}
+	return out, cov, nil
 }
 
 func gateFor(t *testing.T, mode Mode, box Box, src Source, exempt ...string) *Gate {
@@ -695,4 +716,41 @@ func TestGateCachingAndFailures(t *testing.T) {
 	if n := down.calls.Load(); n != 2 {
 		t.Fatalf("a failed lookup must not be cached: %d calls", n)
 	}
+}
+
+// Every proof-bearing action carries a proof tag of 32 bytes of lowercase
+// hex (§8.4, §8.5, DECK-0001 §3.1, §5.2), checked in structural mode too,
+// since no checker can verify a proof that is not there. As in the
+// reference, the first proof tag is the one read.
+func TestProofTagRequiredInStructuralMode(t *testing.T) {
+	s := newSigner(t)
+	for _, action := range []string{ActHop, ActSidestep, ActEnterHyperspace} {
+		for name, proof := range map[string][]string{
+			"missing":   nil,
+			"short":     {"proof", "abcd"},
+			"uppercase": {"proof", strings.Repeat("AB", 32)},
+		} {
+			b := newChain(t, s)
+			tags := [][]string{{"c", b.pos}, {"C", b.pos}}
+			if proof != nil {
+				tags = append(tags, proof)
+			}
+			evt := b.raw(action, append(tags, sectorTags(t, b.pos)...)...)
+			expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, evt}), proofOf[action], evt, s.pubkey)
+			if t.Failed() {
+				t.Fatalf("%s with a %s proof", action, name)
+			}
+		}
+	}
+
+	b := newChain(t, s)
+	board := b.move(ActEnterHyperspace, s.pubkey)
+	to := offset(t, s.pubkey, 1<<40)
+	jump := b.raw(ActHyperjump, append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "3"}, {"as_of", "3"}}, sectorTags(t, to)...)...)
+	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, board, jump}), ReasonHyperjumpProof, jump, s.pubkey)
+
+	// A well-formed first proof tag passes, whatever follows it.
+	b = newChain(t, s)
+	hop := b.move(ActHop, offset(t, s.pubkey, 1), []string{"proof", strings.Repeat("cd", 32)}, []string{"proof", "junk"})
+	expectValid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, hop}), hop, offset(t, s.pubkey, 1))
 }

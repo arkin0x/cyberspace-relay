@@ -71,7 +71,7 @@ type Move struct {
 
 // ParseMove extracts the chain tags of a kind 3333 event. ok is false for any
 // other kind. An event with no A tag is still a move: it can be a link of a
-// chain (§8.7.3), and the verifier reports it as malformed when it is.
+// chain (§8.7.3), and the verifier reports it under a-tag when it is (§8.8).
 func ParseMove(evt nostr.Event) (m Move, ok bool) {
 	if evt.Kind != KindMovement {
 		return Move{}, false

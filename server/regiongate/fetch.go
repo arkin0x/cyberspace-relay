@@ -32,64 +32,83 @@ type RelaySource struct {
 }
 
 // Movement implements Source: every relay is queried concurrently and the
-// results merged. It fails only when every relay fails.
-func (s RelaySource) Movement(ctx context.Context, pubkey string, tags map[string][]string, max int) ([]nostr.Event, error) {
+// results merged. It fails only when every relay fails. A relay that fails
+// outright is left out; one that is capped or fails part way makes the
+// answer Capped or Partial.
+func (s RelaySource) Movement(ctx context.Context, pubkey string, q ChainQuery) ([]nostr.Event, Coverage, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()
 	type result struct {
 		evs []nostr.Event
+		cov Coverage
 		err error
 	}
 	results := make(chan result, len(s.Relays))
 	for _, url := range s.Relays {
 		go func(url string) {
-			evs, err := s.fetch(ctx, url, pubkey, tags, max)
+			evs, cov, err := s.fetch(ctx, url, pubkey, q)
 			if err != nil {
 				err = fmt.Errorf("%s: %w", url, err)
 			}
-			results <- result{evs, err}
+			results <- result{evs, cov, err}
 		}(url)
 	}
 	var out []nostr.Event
+	var cov Coverage
 	var errs []string
 	for range s.Relays {
 		r := <-results
 		if r.err != nil {
 			errs = append(errs, r.err.Error())
+			continue
 		}
+		cov.add(r.cov)
 		out = append(out, r.evs...)
 	}
 	if len(errs) == len(s.Relays) {
-		return nil, fmt.Errorf("every chain relay failed: %s", strings.Join(errs, "; "))
+		return nil, Coverage{}, fmt.Errorf("every chain relay failed: %s", strings.Join(errs, "; "))
 	}
-	return out, nil
+	return out, cov, nil
 }
 
-// fetch pages one relay's movement events for pubkey, newest first.
-func (s RelaySource) fetch(ctx context.Context, url, pubkey string, tags map[string][]string, max int) ([]nostr.Event, error) {
-	q, err := openQuery(ctx, url, s.AuthKey)
+// pageLimit is the limit of each REQ. Relays may answer fewer per page.
+const pageLimit = 500
+
+// fetch pages one relay's movement events for pubkey, newest first, until a
+// page brings nothing new or more than q.Max events that q.Keep keeps are in
+// hand (Capped; q.Max <= 0 is no cap). Events Keep drops do not count toward q.Max. A page that fails
+// after the first makes the answer Partial; a failed first page is an error.
+func (s RelaySource) fetch(ctx context.Context, url, pubkey string, q ChainQuery) ([]nostr.Event, Coverage, error) {
+	conn, err := openQuery(ctx, url, s.AuthKey)
 	if err != nil {
-		return nil, err
+		return nil, Coverage{}, err
 	}
-	defer q.close()
+	defer conn.close()
 
 	seen := map[string]bool{}
 	var out []nostr.Event
 	var until int64
-	for page := 0; len(out) < max; page++ {
-		filter := map[string]interface{}{"authors": []string{pubkey}, "kinds": []int{KindMovement}, "limit": 500}
-		for k, v := range tags {
+	for page := 0; ; page++ {
+		// One event past the cap proves there are more than q.Max.
+		if q.Max > 0 && len(out) > q.Max {
+			return out[:q.Max], Coverage{Capped: true}, nil
+		}
+		filter := map[string]interface{}{"authors": []string{pubkey}, "kinds": []int{KindMovement}, "limit": pageLimit}
+		for k, v := range q.Tags {
 			filter["#"+k] = v
+		}
+		if len(q.IDs) > 0 {
+			filter["ids"] = q.IDs
 		}
 		if until > 0 {
 			filter["until"] = until
 		}
-		evs, err := q.page(ctx, "chain"+strconv.Itoa(page), filter)
+		evs, err := conn.page(ctx, "chain"+strconv.Itoa(page), filter)
 		if err != nil {
-			if len(out) > 0 {
-				return out, nil // keep what we have
+			if page > 0 {
+				return out, Coverage{Partial: true}, nil
 			}
-			return nil, err
+			return nil, Coverage{}, err
 		}
 		added := 0
 		oldest := int64(0)
@@ -98,20 +117,24 @@ func (s RelaySource) fetch(ctx context.Context, url, pubkey string, tags map[str
 				continue
 			}
 			seen[e.ID] = true
-			out = append(out, e)
 			added++
 			if oldest == 0 || e.CreatedAt < oldest {
 				oldest = e.CreatedAt
 			}
+			if q.Keep == nil || q.Keep(e) {
+				out = append(out, e)
+			}
 		}
 		// until is inclusive: the next page repeats the oldest second, and
-		// stops once a page brings nothing new.
+		// paging stops once a page brings nothing new. A full page that
+		// brings nothing new means the relay is not moving back through
+		// time (it ignores until, or one second holds more than a page),
+		// so what it holds further back is unknown.
 		if added == 0 {
-			break
+			return out, Coverage{Partial: len(evs) >= pageLimit}, nil
 		}
 		until = oldest
 	}
-	return out, nil
 }
 
 // query is one websocket used for a few sequential REQs.

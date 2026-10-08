@@ -43,7 +43,7 @@ func startRegionGate() {
 				return nil, nil
 			}
 			return db.Query(f, limit)
-		}})
+		}, MaxResults: nostrdb.MaxQueryResults})
 	}
 	if len(cfg.ChainRelays) > 0 {
 		key, err := regiongate.AuthKey(os.Getenv("GRAIN_REGION_AUTH_KEY"))

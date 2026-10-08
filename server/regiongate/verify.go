@@ -264,7 +264,14 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 
 		// Only base and DECK-0001 actions outside a bracket carry a work
 		// proof; brackets and virtual actions carry none (§8.11.2), and a
-		// proof-bearing action inside a bracket was refused by step.
+		// proof-bearing action inside a bracket was refused by step. The
+		// proof tag itself is checked here in every mode: a proof that is
+		// missing or not 32 bytes of lowercase hex cannot verify, whatever
+		// checker is plugged in (§8.4, §8.5, DECK-0001 §3.1, §5.2). As in
+		// the reference, the first proof tag is the one read.
+		if code, bearing := proofOf[cur.Action]; bearing && !isHex32(firstValue(cur.Event, "proof")) {
+			return invalid(i, code, "proof: missing or not a 32-byte lowercase hex value")
+		}
 		if code, bearing := proofOf[cur.Action]; bearing && proofsHold && v.Proofs != nil {
 			res, why := v.Proofs.Check(prev, cur)
 			switch res {
@@ -503,6 +510,14 @@ func ride(look, cur Move) (string, string) {
 		return ReasonHyperjumpFromHeight, fmt.Sprintf("from_height %s but the previous ride ended at %s (DECK-0001 §4.3)", from, prevB)
 	}
 	return "", ""
+}
+
+// firstValue returns the value of the first tag named name, or "".
+func firstValue(evt nostr.Event, name string) string {
+	if vs := tagValues(evt, name); len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
 }
 
 // firstDecimal reads the first tag named name as a base-10 height, which may
