@@ -193,8 +193,10 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 	case <-ctx.Done():
 		return false, errBusy
 	}
-	// 1. The spawns. Signatures are checked before choosing, so a forged
-	// "newer" spawn cannot redirect the lookup.
+	// 1. The spawns. Authenticity is checked before choosing, so a forged
+	// "newer" spawn cannot redirect the lookup (§8.7.3). Validity is not:
+	// the newest authentic spawn is the one whose chain is fetched even when
+	// it is invalid, because the newest spawn wins with no fallback (§3.2).
 	spawns, ok := g.gather(ctx, pubkey, map[string][]string{"A": {ActSpawn}})
 	if !ok {
 		return false, errFetch
@@ -225,6 +227,13 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 		events = append(events, chain...)
 	}
 
+	// The verdict's position is where the identity stands, valid chain or
+	// not. An invalid chain is frozen at its last valid position (§3.2,
+	// §8.7.3), and an invalid newest spawn leaves the identity at its spawn
+	// coordinate, so the gate judges both by that position: a frozen
+	// identity inside the region stays admitted until it respawns, and no
+	// event published on a frozen chain, the incoming one included, can move
+	// it in or out. Only a respawn changes its position.
 	vd := g.verifier.Verify(pubkey, events)
 	pos := vd.Position
 	if g.cfg.Mode == ModeStrict {

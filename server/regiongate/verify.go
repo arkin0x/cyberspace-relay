@@ -54,7 +54,9 @@ type ProofChecker interface {
 // can be compared with the reference implementation's, rule for rule.
 const (
 	ReasonNoSpawn              = "no-spawn"
+	ReasonATag                 = "a-tag"
 	ReasonMalformed            = "malformed"
+	ReasonSectorTags           = "sector-tags"
 	ReasonSpawnCoordinate      = "spawn-coordinate"
 	ReasonCMismatch            = "c-mismatch"
 	ReasonHopProof             = "hop-proof"
@@ -68,9 +70,9 @@ const (
 	ReasonHyperjumpZeroLength  = "hyperjump-zero-length"
 	ReasonHyperjumpStop        = "hyperjump-stop"
 	ReasonHyperjumpProof       = "hyperjump-proof"
+	ReasonEnterVirtualMoved    = "enter-virtual-moved"
 	ReasonRegion               = "region"
 	ReasonGameTag              = "game-tag"
-	ReasonOutsideRegion        = "outside-region"
 	ReasonBaseActionInBracket  = "base-action-in-bracket"
 	ReasonExitWithoutBracket   = "exit-without-bracket"
 	ReasonExitWrongEntry       = "exit-wrong-entry"
@@ -79,10 +81,12 @@ const (
 
 // Reasons maps every reason code to the rule it names.
 var Reasons = map[string]string{
-	ReasonNoSpawn:              "no spawn event for this pubkey, so there is no chain (§8.7.3 step 1)",
-	ReasonMalformed:            "a tag the chain rules read is missing, repeated or ill-formed: A, e genesis, e previous, e entry, c, C, from_height, B",
+	ReasonNoSpawn:              "no authentic spawn event for this pubkey, so there is no chain (§8.7.3 rule 1)",
+	ReasonATag:                 "the event carries no A tag, or more than one (§8.8)",
+	ReasonMalformed:            "a tag the chain rules read is missing, repeated or ill-formed: e genesis, e previous, e entry, c, C, from_height, B",
+	ReasonSectorTags:           "a recognized action's X, Y, Z or S tag is missing, repeated, or not the value computed from its C (§10)",
 	ReasonSpawnCoordinate:      "the spawn's C is not its pubkey (§8.3)",
-	ReasonCMismatch:            "c is not the C of the nearest recognized action before it (§8.9 step 2), or inside a bracket not the C of the previous event (§8.11.5)",
+	ReasonCMismatch:            "c is not the C of the nearest recognized action before it (§8.9 item 2, continuity)",
 	ReasonHopProof:             "the hop's proof does not verify (§8.7.1)",
 	ReasonSidestepProof:        "the sidestep does not verify at Level 1 (§8.7.2)",
 	ReasonEnterHyperspaceMoved: "an enter-hyperspace's C is not its c (DECK-0001 §3.1)",
@@ -91,13 +95,13 @@ var Reasons = map[string]string{
 	ReasonHyperjumpAsOf:        "the first ride after boarding has no as_of tag, or as_of is not a height on the line, or is below B (DECK-0001 §4.2, §4.3)",
 	ReasonHyperjumpStation:     "the first ride after boarding does not depart from the station (DECK-0001 §4.2, §4.3)",
 	ReasonHyperjumpFromHeight:  "a later ride does not depart from the previous ride's B (DECK-0001 §4.3)",
-	ReasonHyperjumpZeroLength:  "a ride with from_height equal to B that is not a first ride from the station (DECK-0001 §5.2, §5.6)",
+	ReasonHyperjumpZeroLength:  "a ride whose B equals its from_height; there is no zero-length ride (DECK-0001 §5.2, §5.6)",
 	ReasonHyperjumpStop:        "the ride's C is not the stop coordinate of B, or B is not a height on the line (DECK-0001 §5.5 Level 1 step 2)",
 	ReasonHyperjumpProof:       "the ride's proof does not verify at Level 1 (DECK-0001 §5.5, §5.8)",
+	ReasonEnterVirtualMoved:    "an enter-virtual's C is not its c; entering a game does not move the identity (§8.11.1)",
 	ReasonRegion:               "the enter-virtual's region tag is missing, repeated or ill-formed: H not canonical in [0, 85], or the base not aligned (§8.11.1)",
 	ReasonGameTag:              "the enter-virtual does not carry exactly one p tag marked game holding a 32-byte lowercase hex pubkey (§8.11.1)",
-	ReasonOutsideRegion:        "the C of an enter-virtual or a virtual action lies outside the declared region (§8.11.4 rule 4)",
-	ReasonBaseActionInBracket:  "hop, sidestep, enter-hyperspace, hyperjump or enter-virtual inside an open bracket (§8.11.4 rule 3)",
+	ReasonBaseActionInBracket:  "an action of the base protocol or of a mandatory DECK inside an open bracket (§8.11.4 rule 3)",
 	ReasonExitWithoutBracket:   "an exit-virtual when no bracket is open (§8.11.4 rule 6)",
 	ReasonExitWrongEntry:       "an exit-virtual whose e entry names anything but the open enter-virtual (§8.11.4 rule 6)",
 	ReasonExitPosition:         "an exit-virtual whose C is not the c of its enter-virtual (§8.11.4 rule 2)",
@@ -124,15 +128,19 @@ type Verdict struct {
 	HasChain bool
 	// Chain lists the ids of the active chain (§8.7.3), the spawn first.
 	Chain []string
-	// Position is the identity's position after the last event the walk
-	// accepted: the C of the last recognized action (§8.9 step 5), or,
+	// Position is where the identity stands, valid chain or not. For a valid
+	// chain it is the C of the last recognized action (§8.9 item 5), or,
 	// inside an open bracket, the bracket's base position (§8.11.4 rules 1
-	// and 7). When the chain is invalid it is the position carried up to the
-	// invalid event; the spec does not say whether an identity with an
-	// invalid chain stands there or at its spawn (§3.2).
+	// and 7). For an invalid chain it is the last valid position (§3.2,
+	// §8.7.3): the position the chain gives the identity if it ended at the
+	// last valid event before InvalidAt. The chain is frozen there: nothing
+	// published after the invalid event can move the identity, and only a
+	// respawn starts a chain that can be valid again. When the spawn itself
+	// is invalid there is no valid event, and the identity stands at its
+	// spawn coordinate, the coordinate of its pubkey (§3.2, §8.7.3 rule 1).
 	Position *Coord
 	// PositionEvent is the id of the last event the walk accepted that is
-	// not a skipped action.
+	// not a skipped action, or "" when the spawn itself is invalid.
 	PositionEvent string
 	// VerifiedPosition is the position after the longest prefix of the
 	// chain whose every proof the checker verified, and VerifiedEvent the id
@@ -178,9 +186,13 @@ type Verifier struct {
 // Verify resolves and checks a pubkey's chain from the events held for it,
 // under the chain rules of ChainRulesRevision.
 func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
-	// Signatures first: a forged event must not take part in fork
-	// resolution, or anyone could cut a chain off by publishing an
-	// "older" branch in someone else's name.
+	// Authentic events only (§8.7.3): every event that is not a valid NIP-01
+	// event by this pubkey is discarded before resolution and treated as if
+	// it never existed. Nobody can end another identity's chain with a
+	// forged spawn or a forged "older" branch, and a branch through a
+	// discarded event is cut off, ending the chain at the event before it.
+	// Signature is validation.CheckSignature in production, which checks the
+	// id hash and the sig; there is no unsigned local chain (§8.2).
 	signed := events[:0:0]
 	for _, e := range events {
 		if e.PubKey == pubkey && e.Kind == KindMovement && (v.Signature == nil || v.Signature(e)) {
@@ -207,6 +219,15 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 
 	spawn := chain[0]
 	if reason, detail := checkSpawn(spawn, pubkey); reason != "" {
+		// The newest spawn wins even when it is invalid, with no fallback
+		// to an older spawn (§3.2, §8.7.3 rule 1). The identity stands at
+		// its spawn coordinate, the coordinate of its pubkey, frozen until
+		// it publishes another spawn. That position rests on no proof, so
+		// it is also the proof-verified one.
+		if at, err := ParseCoord(pubkey); err == nil {
+			verified := at
+			vd.Position, vd.VerifiedPosition = &at, &verified
+		}
 		return invalid(0, reason, detail)
 	}
 	pos, _ := ParseCoord(spawn.To) // checked by checkSpawn
@@ -218,17 +239,21 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	w := walk{carried: spawn.To, lookback: spawn}
 	for i := 1; i < len(chain); i++ {
 		cur := chain[i]
+		// Exactly one A tag on every event: recognized, skipped, or inside
+		// a bracket (§8.8).
 		if n := countTags(cur.Event, "A", ""); n != 1 {
-			return invalid(i, ReasonMalformed, fmt.Sprintf("expected exactly one A tag, found %d", n))
+			return invalid(i, ReasonATag, fmt.Sprintf("expected exactly one A tag, found %d", n))
 		}
 		if w.bracket == nil && !recognizedActions[cur.Action] {
 			// §8.9: an action this verifier does not recognize is skipped.
-			// Its links were followed when the chain was resolved (step 1);
-			// it neither moves the identity (step 2) nor stands before the
-			// next action for rules that look back (step 4), so the walk
-			// leaves its state untouched. Its id still seeds the work of the
-			// action after it, which the checker reads from that action's
-			// e previous tag (step 3).
+			// It is checked for being authentic (discarded above otherwise),
+			// linked (resolution reached it) and carrying one A tag, and for
+			// nothing else: its other tags, proofs and sector tags belong to
+			// its DECK. It neither moves the identity (item 2) nor stands
+			// before the next action for rules that look back (item 4), so
+			// the walk leaves its state untouched. Its id still seeds the
+			// work of the action after it, which the checker reads from that
+			// action's e previous tag (item 3).
 			vd.Skipped = append(vd.Skipped, cur.Event.ID)
 			continue
 		}
@@ -269,17 +294,22 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	return vd
 }
 
-// checkSpawn checks the first event of the active chain: exactly one A tag,
-// and exactly one C, which is the pubkey (§8.3).
+// checkSpawn checks the first event of the active chain: exactly one A tag
+// (§8.8), exactly one C, which is the pubkey (§8.3), and the sector tags
+// computed from it (§8.3, §10).
 func checkSpawn(spawn Move, pubkey string) (string, string) {
 	if n := countTags(spawn.Event, "A", ""); n != 1 {
-		return ReasonMalformed, fmt.Sprintf("expected exactly one A tag, found %d", n)
+		return ReasonATag, fmt.Sprintf("expected exactly one A tag, found %d", n)
 	}
-	if countTags(spawn.Event, "C", "") != 1 || !isHex32(spawn.To) {
+	C, err := ParseCoord(spawn.To)
+	if countTags(spawn.Event, "C", "") != 1 || err != nil {
 		return ReasonMalformed, "C: expected exactly one 32-byte lowercase hex coordinate"
 	}
 	if spawn.To != pubkey {
 		return ReasonSpawnCoordinate, "the spawn's C is not its pubkey (§8.3)"
+	}
+	if !sectorTagsOK(spawn.Event, C) {
+		return ReasonSectorTags, "the spawn's sector tags are not X, Y, Z and S once each, computed from C (§8.3, §10)"
 	}
 	return "", ""
 }
@@ -297,13 +327,11 @@ type walk struct {
 	bracket  *openBracket
 }
 
-// openBracket is a virtual bracket the walk is inside (§8.11).
+// openBracket is a virtual bracket the walk is inside (§8.11). The bracket
+// is opaque (§8.11.4 rule 4): the walk keeps nothing about the game, only
+// the entry, whose c (which its C repeats) is the base position (rule 1).
 type openBracket struct {
-	entry Move // the enter-virtual; its c is the base position (rule 1)
-	box   Box
-	// game is the C of the last event inside the bracket, where the next
-	// one starts (§8.11.5 step 2).
-	game string
+	entry Move
 }
 
 // position is the identity's position in cyberspace at this point of the
@@ -316,72 +344,74 @@ func (w *walk) position() Coord {
 
 // step checks one recognized action, or any action inside a bracket, and
 // advances the walk past it. It returns the reason code and a detail when
-// the event breaks a rule, or "" when the event is structurally valid.
+// the event breaks a rule, or "" when the event is valid as far as the
+// verifier itself can tell (the checker is asked about proofs afterwards).
 func (w *walk) step(cur Move) (string, string) {
-	for _, marker := range []string{"genesis", "previous"} {
-		if n := countTags(cur.Event, "e", marker); n != 1 {
-			return ReasonMalformed, fmt.Sprintf("e %s: expected exactly one, found %d", marker, n)
-		}
-	}
 	if w.bracket != nil {
 		return w.inside(cur)
 	}
 	return w.outside(cur)
 }
 
-// coords checks that the event has exactly one c and one C, each a 32-byte
-// lowercase hex coordinate, and returns C decoded.
-func coords(cur Move) (Coord, string, string) {
-	if countTags(cur.Event, "c", "") != 1 || !isHex32(cur.From) {
-		return Coord{}, ReasonMalformed, "c: expected exactly one 32-byte lowercase hex coordinate"
+// links checks that a recognized action carries exactly one e genesis and
+// one e previous tag. Resolution has already followed the first of each.
+func links(cur Move) (string, string) {
+	for _, marker := range []string{"genesis", "previous"} {
+		if n := countTags(cur.Event, "e", marker); n != 1 {
+			return ReasonMalformed, fmt.Sprintf("e %s: expected exactly one, found %d", marker, n)
+		}
 	}
-	to, err := ParseCoord(cur.To)
-	if countTags(cur.Event, "C", "") != 1 || err != nil {
-		return Coord{}, ReasonMalformed, "C: expected exactly one 32-byte lowercase hex coordinate"
-	}
-	return to, "", ""
+	return "", ""
 }
 
-// inside checks an event inside an open bracket: a virtual action or the
-// exit-virtual that closes it (§8.11.4, §8.11.5 steps 2 and 3).
+// coord checks that the event carries exactly one tag named name ("c" or
+// "C") holding a 32-byte lowercase hex coordinate, and returns it decoded.
+func coord(cur Move, name, value string) (Coord, string, string) {
+	c, err := ParseCoord(value)
+	if countTags(cur.Event, name, "") != 1 || err != nil {
+		return Coord{}, ReasonMalformed, name + ": expected exactly one 32-byte lowercase hex coordinate"
+	}
+	return c, "", ""
+}
+
+// inside checks an event inside an open bracket (§8.11.4, §8.11.5 steps 2
+// and 3). The bracket is opaque: a virtual action is checked only for being
+// linked (resolution reached it), carrying one A tag (checked by the caller)
+// and not using a reserved name (rule 3). Its c, C and sector tags are the
+// game's and are neither required nor checked (rule 4).
 func (w *walk) inside(cur Move) (string, string) {
 	b := w.bracket
 	if notInBracket[cur.Action] {
 		return ReasonBaseActionInBracket, fmt.Sprintf("%s inside the bracket opened by %s (§8.11.4 rule 3)", cur.Action, b.entry.Event.ID)
 	}
-	to, reason, detail := coords(cur)
+	if cur.Action != ActExitVirtual {
+		return "", ""
+	}
+	// The exit-virtual (§8.11.5 step 3): its entry, its C and its sector
+	// tags. Its c is optional and not checked (§8.11.3, rule 4).
+	if reason, detail := links(cur); reason != "" {
+		return reason, detail
+	}
+	if n := countTags(cur.Event, "e", "entry"); n != 1 {
+		return ReasonMalformed, fmt.Sprintf("e entry: expected exactly one, found %d", n)
+	}
+	if cur.Entry != b.entry.Event.ID {
+		return ReasonExitWrongEntry, fmt.Sprintf("e entry names %s, the open bracket is %s (§8.11.4 rule 6)", cur.Entry, b.entry.Event.ID)
+	}
+	to, reason, detail := coord(cur, "C", cur.To)
 	if reason != "" {
 		return reason, detail
 	}
-	if cur.Action == ActExitVirtual {
-		if n := countTags(cur.Event, "e", "entry"); n != 1 {
-			return ReasonMalformed, fmt.Sprintf("e entry: expected exactly one, found %d", n)
-		}
-		if cur.Entry != b.entry.Event.ID {
-			return ReasonExitWrongEntry, fmt.Sprintf("e entry names %s, the open bracket is %s (§8.11.4 rule 6)", cur.Entry, b.entry.Event.ID)
-		}
-		// §8.11.3 defines the exit's c as the C of the previous event, the
-		// last position inside the game. §8.11.5 step 3 does not list the
-		// check; it is applied here as a rule, as the reference does.
-		if cur.From != b.game {
-			return ReasonCMismatch, "the exit's c is not the C of the previous event (§8.11.3)"
-		}
-		if cur.To != b.entry.From {
-			return ReasonExitPosition, "the exit's C is not the c of its enter-virtual (§8.11.4 rule 2)"
-		}
-		// The base position is restored (rule 2), and it is carried
-		// already. The look-back action is still the one before the entry,
-		// which the exit stands for (rule 8).
-		w.bracket = nil
-		return "", ""
+	if cur.To != b.entry.From {
+		return ReasonExitPosition, "the exit's C is not the c of its enter-virtual (§8.11.4 rule 2)"
 	}
-	if cur.From != b.game {
-		return ReasonCMismatch, "the virtual action's c is not the C of the previous event (§8.11.5 step 2)"
+	if !sectorTagsOK(cur.Event, to) {
+		return ReasonSectorTags, "the exit's sector tags are not X, Y, Z and S once each, computed from C (§8.11.3, §10)"
 	}
-	if !b.box.Contains(to) {
-		return ReasonOutsideRegion, "the virtual action's C is outside the declared region (§8.11.4 rule 4)"
-	}
-	b.game = cur.To
+	// The base position is restored (rule 2) and continuity resumes from
+	// it; it is carried already. The look-back action is still the one
+	// before the entry, which the exit stands for (rule 8).
+	w.bracket = nil
 	return "", ""
 }
 
@@ -390,34 +420,43 @@ func (w *walk) outside(cur Move) (string, string) {
 	if cur.Action == ActExitVirtual {
 		return ReasonExitWithoutBracket, "no bracket is open (§8.11.4 rule 6)"
 	}
-	to, reason, detail := coords(cur)
+	if reason, detail := links(cur); reason != "" {
+		return reason, detail
+	}
+	if _, reason, detail := coord(cur, "c", cur.From); reason != "" {
+		return reason, detail
+	}
+	to, reason, detail := coord(cur, "C", cur.To)
 	if reason != "" {
 		return reason, detail
 	}
-	if cur.Action == ActEnterVirtual {
-		box, why := parseRegion(cur.Event)
-		if why != "" {
+	// Continuity (§8.9 item 2), the enter-virtual included (§8.11.5 step 1).
+	if cur.From != w.carried {
+		return ReasonCMismatch, "c is not the C of the nearest recognized action before it (§8.9 item 2)"
+	}
+	if !sectorTagsOK(cur.Event, to) {
+		return ReasonSectorTags, "sector tags are not X, Y, Z and S once each, computed from C (§10)"
+	}
+	switch cur.Action {
+	case ActEnterVirtual:
+		// Entering a game does not move the identity (§8.11.1).
+		if cur.To != cur.From {
+			return ReasonEnterVirtualMoved, "C is not c; entering a game does not move the identity (§8.11.1)"
+		}
+		// The region and the game are checked for form only. Nothing has
+		// to lie inside the region, the base position included: a game may
+		// be declared anywhere, and proximity is the game's to enforce
+		// (§8.11.1, §8.11.5).
+		if _, why := parseRegion(cur.Event); why != "" {
 			return ReasonRegion, why + " (§8.11.1)"
 		}
-		// A check of form only: the game is never contacted (§8.11.5).
 		if countTags(cur.Event, "p", "game") != 1 || !isHex32(cur.Game) {
 			return ReasonGameTag, "expected exactly one p tag marked game holding a 32-byte lowercase hex pubkey (§8.11.1)"
 		}
-		if cur.From != w.carried {
-			return ReasonCMismatch, "the entry's c is not the position the chain carries (§8.11.5 step 1)"
-		}
-		if !box.Contains(to) {
-			return ReasonOutsideRegion, "the entry's C is outside the declared region (§8.11.4 rule 4)"
-		}
 		// The position is held at c (rule 1): carried and the look-back
 		// action stay as they are until the exit.
-		w.bracket = &openBracket{entry: cur, box: box, game: cur.To}
+		w.bracket = &openBracket{entry: cur}
 		return "", ""
-	}
-	if cur.From != w.carried {
-		return ReasonCMismatch, "c is not the C of the nearest recognized action before it (§8.9 step 2)"
-	}
-	switch cur.Action {
 	case ActEnterHyperspace:
 		if cur.To != cur.From {
 			return ReasonEnterHyperspaceMoved, "C is not c; boarding does not move the identity (DECK-0001 §3.1)"
@@ -437,13 +476,18 @@ func (w *walk) outside(cur Move) (string, string) {
 // from_height is the station within as_of, C is the stop of B) and the ride's
 // proof are the ProofChecker's.
 func ride(look, cur Move) (string, string) {
-	if look.Action != ActEnterHyperspace && look.Action != ActHyperjump {
-		return ReasonHyperjumpPredecessor, fmt.Sprintf("the action before this ride is %s (DECK-0001 §4.3)", look.Action)
-	}
 	from, okFrom := firstDecimal(cur.Event, "from_height")
 	to, okTo := firstDecimal(cur.Event, "B")
 	if !okFrom || !okTo {
 		return ReasonMalformed, "from_height and B: expected base-10 block heights (DECK-0001 §5.2)"
+	}
+	// There is no zero-length ride, the first ride after boarding included,
+	// and no ride is exempt from this (DECK-0001 §5.2, §5.6, §5.8).
+	if from.Cmp(to) == 0 {
+		return ReasonHyperjumpZeroLength, "B equals from_height; every ride passes at least one block (DECK-0001 §5.6)"
+	}
+	if look.Action != ActEnterHyperspace && look.Action != ActHyperjump {
+		return ReasonHyperjumpPredecessor, fmt.Sprintf("the action before this ride is %s (DECK-0001 §4.3)", look.Action)
 	}
 	if look.Action == ActEnterHyperspace {
 		// The first ride after boarding declares the station set bound,
@@ -457,11 +501,6 @@ func ride(look, cur Move) (string, string) {
 	prevB, _ := firstDecimal(look.Event, "B") // checked when that ride was walked
 	if from.Cmp(prevB) != 0 {
 		return ReasonHyperjumpFromHeight, fmt.Sprintf("from_height %s but the previous ride ended at %s (DECK-0001 §4.3)", from, prevB)
-	}
-	// B may equal from_height only on a first ride from the station
-	// (DECK-0001 §5.2, §5.6), read literally.
-	if from.Cmp(to) == 0 {
-		return ReasonHyperjumpZeroLength, "only the first ride from the station may have from_height equal to B (DECK-0001 §5.2, §5.6)"
 	}
 	return "", ""
 }

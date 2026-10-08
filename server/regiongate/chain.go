@@ -37,11 +37,22 @@ var recognizedActions = map[string]bool{
 }
 
 // notInBracket are the action names that make an event inside a virtual
-// bracket invalid (§8.11.4 rule 3). Every other name inside a bracket is a
-// virtual action.
-var notInBracket = map[string]bool{
-	ActHop: true, ActSidestep: true, ActEnterHyperspace: true, ActHyperjump: true, ActEnterVirtual: true,
-}
+// bracket invalid (§8.11.4 rule 3). Rule 3 names a category, not a list:
+// every action of the base protocol or of a mandatory DECK is reserved inside
+// a bracket. A spawn is never inside one (it starts a new chain, §3.2) and an
+// exit-virtual closes it (rule 6), so the reserved names are the recognized
+// actions less those two. A new mandatory DECK added to recognizedActions is
+// reserved inside brackets with no further change. Every other name inside a
+// bracket is a virtual action.
+var notInBracket = func() map[string]bool {
+	m := map[string]bool{}
+	for a := range recognizedActions {
+		if a != ActSpawn && a != ActExitVirtual {
+			m[a] = true
+		}
+	}
+	return m
+}()
 
 // Move is a movement event with its chain tags pulled out. Where a tag
 // appears more than once, the first one is kept, which is the one chain
@@ -138,15 +149,23 @@ func countTags(evt nostr.Event, name, marker string) int {
 
 // ActiveChain resolves a pubkey's movement events into its active chain, from
 // spawn to head, by the rule every reader must apply (§8.7.3):
-//  1. start at the newest spawn (largest created_at; larger id on a tie);
+//  1. start at the newest spawn (largest created_at; larger id on a tie),
+//     whether or not it is valid; there is no fallback to an older spawn;
 //  2. keep only events whose genesis names that spawn;
 //  3. follow previous links forward;
-//  4. at a fork the smallest created_at continues (smaller id on a tie);
+//  4. at a fork the smallest created_at continues (smaller id on a tie),
+//     even when that branch is invalid and a later one is valid;
 //  5. stop at the first event nothing names as previous.
 //
-// Events by other pubkeys are ignored. An event whose A is spawn is never a
-// link: a spawn names no previous event, so it starts a chain of its own
-// wherever it is published (§3.2). It returns nil when there is no spawn.
+// Resolution reads links, created_at and ids only, never a proof or a tag
+// the chain rules check, so it comes before validity (§8.7.3, "Validity and
+// position"). The caller must already have discarded every event that is not
+// authentic (Verifier.Verify does): a discarded event never existed, so an
+// event naming it as previous is never reached, and the chain ends at the
+// event before it. Events by other pubkeys are ignored. An event whose first
+// A is spawn is never a link: a spawn names no previous event, so it starts
+// a chain of its own wherever it is published (§3.2). It returns nil when
+// there is no spawn.
 func ActiveChain(pubkey string, events []nostr.Event) []Move {
 	var spawn *Move
 	children := map[string][]Move{}
@@ -246,6 +265,24 @@ func parseRegion(evt nostr.Event) (Box, string) {
 		return Box{}, "region base is not aligned to its height"
 	}
 	return b, ""
+}
+
+// sectorTagsOK reports whether evt carries each of the sector tags X, Y, Z
+// and S exactly once, equal to the values computed from C (§10): base-10
+// with no sign and no leading zeros, and S as "<sx>-<sy>-<sz>". Comparing
+// with the computed strings checks the format and the values at once. A
+// sector tag missing, repeated or wrong makes a base or mandatory DECK action
+// invalid; virtual actions and skipped actions are not checked (§10).
+func sectorTagsOK(evt nostr.Event, C Coord) bool {
+	sx, sy, sz := C.Sector()
+	want := map[string]string{"X": sx, "Y": sy, "Z": sz, "S": sx + "-" + sy + "-" + sz}
+	for name, value := range want {
+		vs := tagValues(evt, name)
+		if len(vs) != 1 || vs[0] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // isDecimal reports whether s is one or more ASCII digits.

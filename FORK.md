@@ -2,7 +2,7 @@
 
 This is [grain](https://github.com/0ceanSlim/grain) by OceanSlim (MIT, see `license`) plus:
 
-- **Region gate** (`server/regiongate`): with `region.yml` in the data directory, the relay accepts events only from pubkeys whose Cyberspace v2 movement chain places them inside the configured region, and by default (`gate_reads`) is a speakeasy: reading needs AUTH as a pubkey inside the region, and the web client/API is closed. Chains are checked structurally under chain rules revision `2026-09-28-virtual-brackets` (CYBERSPACE_V2 §8.12), against the reference implementation's golden vectors; work proofs go through a placeholder (`PendingSpec`) until a proof checker is built.
+- **Region gate** (`server/regiongate`): with `region.yml` in the data directory, the relay accepts events only from pubkeys whose Cyberspace v2 movement chain places them inside the configured region, and by default (`gate_reads`) is a speakeasy: reading needs AUTH as a pubkey inside the region, and the web client/API is closed. Chains are checked structurally under chain rules revision `2026-09-28-virtual-brackets` (CYBERSPACE_V2 §8.12) with the rulings arkin0x/cyberspace #46 folded into it (`912f3d7`), against the reference implementation's golden vectors; work proofs go through a placeholder (`PendingSpec`) until a proof checker is built.
 - **Deploy profile** (`deploy/cyberspace`): refuses all writes until a region is set.
 - **Fix** (`server/types/filter.go`): filters are sent in NIP-01 wire form (offered upstream).
 

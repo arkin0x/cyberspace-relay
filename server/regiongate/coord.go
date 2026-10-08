@@ -66,6 +66,14 @@ func (c Coord) Hex() string {
 	return hex.EncodeToString(out)
 }
 
+// Sector returns the sector indexes of the coordinate as the decimal strings
+// its X, Y and Z tags carry (§10): each axis shifted right by SectorBits.
+func (c Coord) Sector() (sx, sy, sz string) {
+	return new(big.Int).Rsh(c.X, SectorBits).String(),
+		new(big.Int).Rsh(c.Y, SectorBits).String(),
+		new(big.Int).Rsh(c.Z, SectorBits).String()
+}
+
 // Equal reports whether two coordinates are the same point.
 func (c Coord) Equal(o Coord) bool {
 	return c.Plane == o.Plane && c.X.Cmp(o.X) == 0 && c.Y.Cmp(o.Y) == 0 && c.Z.Cmp(o.Z) == 0

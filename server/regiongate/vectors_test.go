@@ -10,22 +10,24 @@ import (
 )
 
 // The golden vectors of the chain rules at revision
-// 2026-09-28-virtual-brackets (CYBERSPACE_V2 §8.12, arkin0x/cyberspace
-// df00a48), copied unchanged from the reference implementation:
+// 2026-09-28-virtual-brackets (CYBERSPACE_V2 §8.12), with the rulings of
+// 2026-10-07 and 2026-10-08 folded in (arkin0x/cyberspace #46, 912f3d7),
+// copied unchanged from the reference implementation:
 //
-//	arkin0x/cyberspace-cli PR #24, commit 593683fd358b5297ec4c5aa9d7ae49b0ad68c375,
+//	arkin0x/cyberspace-cli PR #24, commit 85f4e44cf816d9c465f8377586333e3de1fac879,
 //	vectors/chain-rules-2026-09-28-virtual-brackets.json
-//	sha256 b41968fa72cfbbf2bc62f142ae072c9e1f6820f35c78ba944e61cecb4f58831d
+//	sha256 e127eb1c4dfe68739632243427f74f6a5063b47feb7e1e5e50e9574e1f815d96
 //
 // The format is described in that repository's vectors/README.md. Replace the
 // file, never edit it: a vector that disagrees with this verifier is a
-// finding about one implementation or the other.
+// finding about one implementation or the other. REGIONGATE_VECTORS=<path>
+// runs another vectors file in place of this one, without copying it in.
 const vectorsFile = "testdata/chain-rules-2026-09-28-virtual-brackets.json"
 
 type vectorFile struct {
 	Revision   string `json:"chain_rules_revision"`
 	VerifyWith struct {
-		CheckSignatures bool `json:"check_signatures"`
+		Identity string `json:"identity"` // every event is checked for authenticity (§8.7.3)
 	} `json:"verify_with"`
 	TestKey struct{ Pubkey string } `json:"test_key"`
 	Reasons map[string]string       `json:"reasons"`
@@ -66,7 +68,11 @@ var pendingReasons = map[string]bool{
 var needsBlockData = map[string]bool{"ride-as-of-beyond-tip": true}
 
 func TestChainRulesGoldenVectors(t *testing.T) {
-	data, err := os.ReadFile(vectorsFile)
+	path := vectorsFile
+	if p := os.Getenv("REGIONGATE_VECTORS"); p != "" {
+		path = p
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +93,7 @@ func TestChainRulesGoldenVectors(t *testing.T) {
 			t.Errorf("verifier reason code %q is not in the vectors", code)
 		}
 	}
-	if !vf.VerifyWith.CheckSignatures || len(vf.Vectors) == 0 {
+	if vf.TestKey.Pubkey == "" || vf.VerifyWith.Identity != vf.TestKey.Pubkey || len(vf.Vectors) == 0 {
 		t.Fatal("vectors file is not the expected format")
 	}
 
@@ -140,6 +146,11 @@ func TestChainRulesGoldenVectors(t *testing.T) {
 			default:
 				if vd.Reason != ex.Reason || vd.InvalidAt != *ex.InvalidAt || vd.InvalidIndex != *ex.InvalidIndex {
 					t.Fatalf("want %s at %d (%s), got %q at %d: %s", ex.Reason, *ex.InvalidIndex, *ex.InvalidAt, vd.Reason, vd.InvalidIndex, vd.Stopped)
+				}
+				// An invalid verdict names where the identity stands: frozen
+				// at its last valid position (§3.2, §8.7.3).
+				if vd.Position == nil || vd.Position.Hex() != ex.Position {
+					t.Fatalf("frozen position: got %v want %s", vd.Position, ex.Position)
 				}
 			}
 		})

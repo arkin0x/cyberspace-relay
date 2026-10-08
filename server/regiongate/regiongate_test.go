@@ -68,24 +68,47 @@ type chainBuilder struct {
 
 func newChain(t *testing.T, s *signer) *chainBuilder {
 	b := &chainBuilder{t: t, s: s, at: 1_750_000_000}
-	b.spawn = s.sign(t, KindMovement, b.at, []string{"A", ActSpawn}, []string{"C", s.pubkey})
+	b.spawn = s.sign(t, KindMovement, b.at, append([][]string{{"A", ActSpawn}, {"C", s.pubkey}}, sectorTags(t, s.pubkey)...)...)
 	b.last, b.pos = b.spawn, s.pubkey
 	return b
 }
 
-// move appends an action to `to` and returns its event; extra tags are added.
+// move appends an action to `to` and returns its event, with the sector tags
+// computed from `to` (§10); extra tags are added.
 func (b *chainBuilder) move(action, to string, extra ...[]string) nostr.Event {
+	return b.moveTags(action, to, sectorTags(b.t, to), extra...)
+}
+
+// moveTags is move with the given sector tags instead of the computed ones.
+func (b *chainBuilder) moveTags(action, to string, sectors [][]string, extra ...[]string) nostr.Event {
+	tags := [][]string{{"c", b.pos}, {"C", to}}
+	evt := b.raw(action, append(append(tags, sectors...), extra...)...)
+	b.pos = to
+	return evt
+}
+
+// raw appends an event carrying only its A tag, its links and the given
+// tags: no c, C or sector tags unless given. The carried position is left as
+// it is, as for a virtual action or a skipped one.
+func (b *chainBuilder) raw(action string, tags ...[]string) nostr.Event {
 	b.at += 10
-	tags := [][]string{
+	head := [][]string{
 		{"A", action},
 		{"e", b.spawn.ID, "", "genesis"},
 		{"e", b.last.ID, "", "previous"},
-		{"c", b.pos},
-		{"C", to},
 	}
-	evt := b.s.sign(b.t, KindMovement, b.at, append(tags, extra...)...)
-	b.last, b.pos = evt, to
+	evt := b.s.sign(b.t, KindMovement, b.at, append(head, tags...)...)
+	b.last = evt
 	return evt
+}
+
+// sectorTags are the X, Y, Z and S tags computed from c, worked out here
+// independently of Coord.Sector: each axis shifted right by 30 (§10).
+func sectorTags(t *testing.T, c string) [][]string {
+	t.Helper()
+	p := mustCoord(t, c)
+	sx, sy, sz := new(big.Int).Rsh(p.X, 30), new(big.Int).Rsh(p.Y, 30), new(big.Int).Rsh(p.Z, 30)
+	return [][]string{{"X", sx.String()}, {"Y", sy.String()}, {"Z", sz.String()}, {"S", sx.String() + "-" + sy.String() + "-" + sz.String()}}
 }
 
 func mustCoord(t *testing.T, s string) Coord {
@@ -319,10 +342,12 @@ func TestVerifyStopsAtInvalidEvent(t *testing.T) {
 		t.Fatalf("verdict: %+v", vd)
 	}
 
-	// A spawn whose C is not the pubkey places the identity nowhere.
+	// A spawn whose C is not the pubkey is invalid, and the identity stands
+	// at its spawn coordinate, the pubkey's (§3.2, §8.7.3 rule 1).
 	s2 := newSigner(t)
 	wrong := s2.sign(t, KindMovement, 1, []string{"A", ActSpawn}, []string{"C", offset(t, s2.pubkey, 1)})
-	if vd := verifier().Verify(s2.pubkey, []nostr.Event{wrong}); vd.Position != nil || !vd.HasChain || vd.Reason != ReasonSpawnCoordinate {
+	vd = verifier().Verify(s2.pubkey, []nostr.Event{wrong})
+	if !vd.HasChain || vd.Reason != ReasonSpawnCoordinate || vd.Position == nil || vd.Position.Hex() != s2.pubkey || vd.PositionEvent != "" {
 		t.Fatalf("bad spawn verdict: %+v", vd)
 	}
 	if vd := verifier().Verify(s2.pubkey, nil); vd.HasChain || vd.Reason != ReasonNoSpawn {
@@ -396,18 +421,26 @@ func TestVerifyVirtualBrackets(t *testing.T) {
 	const h = 16
 	box := cubeAround(t, s.pubkey, h)
 	inside := func(dx int64) string { return offset(t, box.Base.Hex(), dx) }
+	entry := func(b *chainBuilder, extra ...[]string) nostr.Event {
+		return b.move(ActEnterVirtual, b.pos, append([][]string{regionTag(box, h), gameTag()}, extra...)...)
+	}
+	exit := func(b *chainBuilder, e nostr.Event, extra ...[]string) nostr.Event {
+		return b.move(ActExitVirtual, e.Tags[3][1], append([][]string{{"e", e.ID, "", "entry"}}, extra...)...)
+	}
 
+	// The entry does not move the identity (C = c); a virtual action carries
+	// whatever the game gives it (§8.11.2).
 	b := newChain(t, s)
-	enter := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
-	act := b.move("shoot", inside(2))
+	enter := entry(b)
+	act := b.raw("shoot", []string{"c", inside(1)}, []string{"C", inside(2)})
 	open := []nostr.Event{b.spawn, enter, act}
 	vd := verifier().Verify(s.pubkey, open)
 	if !vd.Valid() || vd.Position.Hex() != s.pubkey || vd.OpenBracket != enter.ID || len(vd.Skipped) != 0 {
 		t.Fatalf("inside an open bracket the position is the enter's c (rule 7): %+v", vd)
 	}
-	exit := b.move(ActExitVirtual, s.pubkey, []string{"e", enter.ID, "", "entry"})
+	x := exit(b, enter)
 	hop := b.move(ActHop, offset(t, s.pubkey, 1))
-	vd = verifier().Verify(s.pubkey, append(open, exit, hop))
+	vd = verifier().Verify(s.pubkey, append(open, x, hop))
 	if !vd.Valid() || vd.PositionEvent != hop.ID || vd.OpenBracket != "" {
 		t.Fatalf("closed bracket: %+v", vd)
 	}
@@ -422,29 +455,28 @@ func TestVerifyVirtualBrackets(t *testing.T) {
 		}
 	}
 	invalid("base action inside", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
-		return []nostr.Event{e, b.move(ActHop, inside(2))}
+		e := entry(b)
+		return []nostr.Event{e, b.move(ActHop, offset(t, s.pubkey, 2))}
 	}, ReasonBaseActionInBracket)
-	invalid("virtual action outside the box", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
-		return []nostr.Event{e, b.move("shoot", offset(t, box.Base.Hex(), 1<<h))}
-	}, ReasonOutsideRegion)
+	invalid("entry that moves", func(b *chainBuilder) []nostr.Event {
+		return []nostr.Event{b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())}
+	}, ReasonEnterVirtualMoved)
 	invalid("exit naming the wrong entry", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
+		e := entry(b)
 		return []nostr.Event{e, b.move(ActExitVirtual, s.pubkey, []string{"e", strings.Repeat("a", 64), "", "entry"})}
 	}, ReasonExitWrongEntry)
 	invalid("exit not restoring the base position", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())
+		e := entry(b)
 		return []nostr.Event{e, b.move(ActExitVirtual, inside(3), []string{"e", e.ID, "", "entry"})}
 	}, ReasonExitPosition)
 	invalid("exit with no bracket", func(b *chainBuilder) []nostr.Event {
 		return []nostr.Event{b.move(ActExitVirtual, s.pubkey, []string{"e", b.spawn.ID, "", "entry"})}
 	}, ReasonExitWithoutBracket)
 	invalid("misaligned region", func(b *chainBuilder) []nostr.Event {
-		return []nostr.Event{b.move(ActEnterVirtual, inside(1), []string{"region", inside(1), "16"}, gameTag())}
+		return []nostr.Event{b.move(ActEnterVirtual, s.pubkey, []string{"region", inside(1), "16"}, gameTag())}
 	}, ReasonRegion)
 	invalid("entry naming no game", func(b *chainBuilder) []nostr.Event {
-		return []nostr.Event{b.move(ActEnterVirtual, inside(1), regionTag(box, h))}
+		return []nostr.Event{b.move(ActEnterVirtual, s.pubkey, regionTag(box, h))}
 	}, ReasonGameTag)
 }
 
