@@ -114,27 +114,45 @@ It does, in order:
 2. **Resolves the active chain** by §8.7.3, from links, `created_at` and ids
    alone, before any validity check: the newest spawn (larger id on a tie),
    valid or not, with no fallback to an older spawn; only events whose
-   genesis names it; forward through `e … previous`; at a fork the smallest
-   `created_at` (smaller id on a tie), even when that branch is invalid and a
-   later one is valid; head = first event nothing names as previous. Where an
-   event repeats a tag, the first one is followed. An event whose first `A`
-   is `spawn` is never a link: it starts a chain of its own, even while a
-   bracket is open.
+   genesis names it; forward through `e … previous`; head = first event
+   nothing names as previous. Where an event repeats a tag, the first one is
+   followed. An event is a spawn when **any** of its `A` tags is `spawn`,
+   wherever it stands; a spawn is never a link, and one with a second `A`
+   tag is an invalid newest spawn.
+   **A fork kills the chain** (arkinox, 2026-10-08): when two or more chain
+   events name the same `e … previous`, the whole chain is dead, whichever
+   branch is valid or signed first, and the identity stands at its spawn
+   coordinate (its pubkey's) until it respawns. Reason `fork`. This holds
+   for branches the links do not reach as well. A forged event is discarded
+   in step 1, so it is never a branch.
 3. **Walks the chain from the spawn.** The recognized actions are the base
    actions (`spawn`, `hop`, `sidestep`, `enter-virtual`, `exit-virtual`) and
    those of DECK-0001, which is mandatory (`enter-hyperspace`, `hyperjump`).
    This relay implements no optional DECK.
-   - **Exactly one `A` tag** on every event: recognized, skipped, inside a
-     bracket, or the spawn (§8.8). Reason `a-tag`.
+   - **Exactly one `A` tag, with a value,** on every event: recognized,
+     skipped, inside a bracket, or the spawn (§8.8). Reason `a-tag`.
+   - **Exactly once, with a value** (arkinox, 2026-10-08): every tag a chain
+     rule reads appears exactly once with a well-formed value. A tag with no
+     value still counts as that tag: a bare `["A"]` is an `A` tag, and
+     invalid, and a bare second `["C"]` is a second `C`. Unread tags are free.
+     The tags read are `A`, `c`, `C`, the `e` tags, `region`, the game `p`
+     tag, the sector tags, `proof`, and on a ride `from_height`, `B`, `as_of`
+     (on the first ride after boarding) and `mp`. A ride's `mn` may appear
+     at most once, and its absence is left to the proof checker, because
+     DECK-0001 §5.8 lists rides without one. Inside a bracket only `A` and
+     the `e` tags are constrained; on skipped actions only `A` and the `e`
+     tags; on an exit also `C`, the sector tags and `e … entry`.
+   - **Exactly one `e … genesis` and one `e … previous`** on every chain
+     event, recognized, skipped or virtual, each an event id, and exactly
+     one `e … entry` on an exit. Reason `malformed`.
    - The spawn's `C` equals the pubkey (§8.3).
    - **Sector tags** (§10): every recognized action outside a bracket, and
      the spawn and the exit, carries `X`, `Y`, `Z` and `S` exactly once each,
      equal to the values computed from its `C` (base-10, no sign or leading
      zeros; `S` = `sx-sy-sz`). Missing, repeated or wrong is invalid. Reason
      `sector-tags`. Not required on virtual actions or skipped actions.
-   - A recognized action outside a bracket has exactly one `e … genesis`, one
-     `e … previous`, one `c` and one `C`, each `c` and `C` 32 bytes of
-     lowercase hex, and its `c` equals the `C` of the nearest recognized
+   - A recognized action outside a bracket has exactly one `c` and one `C`,
+     each 32 bytes of lowercase hex, and its `c` equals the `C` of the nearest recognized
      action before it (continuity, §8.9 item 2).
    - **Unrecognized actions are skipped** (§8.9). Outside a bracket, an action
      the verifier does not recognize is checked only for being authentic,
@@ -174,7 +192,8 @@ It does, in order:
      reserved with no further change. Its `c`, `C` and sector tags are the
      game's. The exit names the open entry (exactly one `e … entry`), its
      `C` restores the base position and carries the sector tags, and its
-     optional `c` is never read. Continuity resumes after the exit. Inside a
+     optional `c` is never read: missing, garbled or repeated, it leaves the
+     exit valid. Continuity resumes after the exit. Inside a
      bracket, and at a head inside an open one, the position is the
      `enter-virtual`'s `c`; a closed bracket stands for the action before its
      entry when a later rule looks back.
@@ -276,14 +295,18 @@ may be listed; any match admits.
   until the parent is published somewhere the gate reads, or the identity
   respawns. Without the parent nobody can tell whether it would win a fork
   or extend the chain.
-- **The frozen-chain rewind (awaiting a ruling).** The gate admits a frozen
-  chain at its last valid position (§3.2, §8.7.3). An identity that has left
-  the region can sign one invalid event naming an old event of its own,
-  from a time it was inside, as previous, backdated to just after that
-  event. Signing time decides a fork before validity (§8.7.3 rule 4), so
-  the backdated branch wins, the chain freezes at the old position inside
-  the region, and the gate admits the identity again with no work. This is
-  the identity rewriting its own chain, which the spec permits (§8.7.3
-  note); whether a gated relay should admit frozen chains at all (admit only
-  valid chains, a heuristic, or an `admit_frozen` setting, off by default)
-  is awaiting arkinox's ruling. The gate is unchanged until then.
+- **A fork kills the chain** (arkinox, 2026-10-08). Two chain events naming
+  the same previous make the chain dead at the spawn coordinate. This closes
+  the frozen-chain rewind: without it, an identity that had left the region
+  could sign one invalid event backdated to just after an old event inside
+  the region, win the fork by signing time, freeze the chain there and be
+  admitted again for free. A rewind needs a fork, and a fork is now death,
+  not a choice of branch. A chain that is invalid without a fork still
+  stands frozen at its last valid position.
+- A second branch the gate has not seen yet (published on a relay the gate
+  does not read, or after the last lookup) changes the verdict at the next
+  lookup: at once for a movement event published here, which is always
+  judged afresh, and otherwise once the cached verdict expires, after
+  `cache_ttl_seconds` (600 by default) for an admission and
+  `negative_cache_ttl_seconds` (60) for a refusal. Until then a forked
+  identity that was admitted stays admitted.

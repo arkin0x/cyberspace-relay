@@ -57,10 +57,16 @@ var notInBracket = func() map[string]bool {
 // Move is a movement event with its chain tags pulled out. Where a tag
 // appears more than once, the first one is kept, which is the one chain
 // resolution follows (§8.7.3); the verifier counts the tags it reads and
-// rejects a repeated one as malformed.
+// rejects a repeated one. A tag with no value still counts as that tag: a
+// bare ["A"] is an A tag whose value is "".
 type Move struct {
-	Event    nostr.Event
-	Action   string // A tag
+	Event nostr.Event
+	// Action is the first A tag's value.
+	Action string
+	// IsSpawn is true when any A tag is "spawn", wherever it stands: the
+	// event is then a spawn for resolution and never a link (§3.2). A spawn
+	// with a second A tag is a spawn, and an invalid one (§8.8).
+	IsSpawn  bool
 	Genesis  string // e ... "genesis"
 	Previous string // e ... "previous"
 	Entry    string // e ... "entry" (exit-virtual)
@@ -86,25 +92,29 @@ func ParseMove(evt nostr.Event) (m Move, ok bool) {
 		return true
 	}
 	for _, t := range evt.Tags {
-		if len(t) < 2 {
+		if len(t) == 0 {
 			continue
 		}
+		v := tagValue(t)
 		switch t[0] {
 		case "A":
+			if v == ActSpawn {
+				m.IsSpawn = true
+			}
 			if first("A") {
-				m.Action = t[1]
+				m.Action = v
 			}
 		case "c":
 			if first("c") {
-				m.From = t[1]
+				m.From = v
 			}
 		case "C":
 			if first("C") {
-				m.To = t[1]
+				m.To = v
 			}
 		case "p":
 			if len(t) >= 4 && t[3] == "game" && first("p game") {
-				m.Game = t[1]
+				m.Game = v
 			}
 		case "e":
 			if len(t) < 4 || !first("e "+t[3]) {
@@ -112,63 +122,89 @@ func ParseMove(evt nostr.Event) (m Move, ok bool) {
 			}
 			switch t[3] {
 			case "genesis":
-				m.Genesis = t[1]
+				m.Genesis = v
 			case "previous":
-				m.Previous = t[1]
+				m.Previous = v
 			case "entry":
-				m.Entry = t[1]
+				m.Entry = v
 			}
 		}
 	}
 	return m, true
 }
 
-// tagValues returns the second element of every tag named name.
+// tagValue is a tag's value, its second element, or "" when it has none.
+func tagValue(t []string) string {
+	if len(t) < 2 {
+		return ""
+	}
+	return t[1]
+}
+
+// tagValues returns the value of every tag named name, "" for a tag with no
+// value, which still counts as that tag.
 func tagValues(evt nostr.Event, name string) []string {
 	var out []string
 	for _, t := range evt.Tags {
-		if len(t) >= 2 && t[0] == name {
-			out = append(out, t[1])
+		if len(t) >= 1 && t[0] == name {
+			out = append(out, tagValue(t))
 		}
 	}
 	return out
 }
 
-// countTags counts the tags named name; with a marker, only those whose
-// fourth element is that marker (["e", id, relay, marker], ["p", pubkey,
-// relay, marker]).
+// countTags counts the tags named name, a tag with no value included; with
+// a marker, only those whose fourth element is that marker (["e", id,
+// relay, marker], ["p", pubkey, relay, marker]).
 func countTags(evt nostr.Event, name, marker string) int {
 	n := 0
 	for _, t := range evt.Tags {
-		if len(t) >= 2 && t[0] == name && (marker == "" || len(t) >= 4 && t[3] == marker) {
+		if len(t) >= 1 && t[0] == name && (marker == "" || len(t) >= 4 && t[3] == marker) {
 			n++
 		}
 	}
 	return n
 }
 
-// ActiveChain resolves a pubkey's movement events into its active chain, from
-// spawn to head, by the rule every reader must apply (§8.7.3):
+// Resolution is a pubkey's events resolved by §8.7.3.
+type Resolution struct {
+	// Chain is the active chain from the spawn. When there is a fork that
+	// the links reach, it stops at the event the branches name.
+	Chain []Move
+	// ForkedFrom is the id of an event that two or more chain events name
+	// as previous, or "". Fork lists those events' ids, sorted.
+	ForkedFrom string
+	Fork       []string
+}
+
+// ActiveChain resolves a pubkey's movement events into its active chain;
+// see Resolve.
+func ActiveChain(pubkey string, events []nostr.Event) []Move {
+	return Resolve(pubkey, events).Chain
+}
+
+// Resolve resolves a pubkey's movement events by the rule every reader must
+// apply (§8.7.3):
 //  1. start at the newest spawn (largest created_at; larger id on a tie),
-//     whether or not it is valid; there is no fallback to an older spawn;
-//  2. keep only events whose genesis names that spawn;
+//     whether or not it is valid; there is no fallback to an older spawn.
+//     An event is a spawn when any of its A tags is "spawn";
+//  2. keep only events whose genesis names that spawn: the chain events;
 //  3. follow previous links forward;
-//  4. at a fork the smallest created_at continues (smaller id on a tie),
-//     even when that branch is invalid and a later one is valid;
+//  4. a fork, two or more chain events naming the same previous, makes the
+//     whole chain dead (arkinox, 2026-10-08), whichever branch is valid or
+//     signed first;
 //  5. stop at the first event nothing names as previous.
 //
 // Resolution reads links, created_at and ids only, never a proof or a tag
-// the chain rules check, so it comes before validity (§8.7.3, "Validity and
-// position"). The caller must already have discarded every event that is not
-// authentic (Verifier.Verify does): a discarded event never existed, so an
-// event naming it as previous is never reached, and the chain ends at the
-// event before it. Events by other pubkeys are ignored. An event whose first
-// A is spawn is never a link: a spawn names no previous event, so it starts
-// a chain of its own wherever it is published (§3.2). It returns nil when
-// there is no spawn.
-func ActiveChain(pubkey string, events []nostr.Event) []Move {
-	var spawn *Move
-	children := map[string][]Move{}
+// the chain rules check, so it comes before validity. The caller must
+// already have discarded every event that is not authentic (Verifier.Verify
+// does): a discarded event never existed, so it is never a branch of a fork,
+// an event naming it as previous is never reached, and the chain ends at the
+// event before it. Events by other pubkeys, other kinds and repeated ids are
+// ignored. A spawn names no previous event, so it is never a link. The
+// first copy of each e tag is the one followed. Chain is nil when there is
+// no spawn.
+func Resolve(pubkey string, events []nostr.Event) Resolution {
 	var moves []Move
 	seen := map[string]bool{}
 	for _, evt := range events {
@@ -182,37 +218,57 @@ func ActiveChain(pubkey string, events []nostr.Event) []Move {
 		seen[evt.ID] = true
 		moves = append(moves, m)
 	}
+	var spawn *Move
 	for i := range moves {
-		m := &moves[i]
-		if m.Action != ActSpawn {
-			continue
-		}
-		if spawn == nil || newer(m.Event, spawn.Event) {
+		if m := &moves[i]; m.IsSpawn && (spawn == nil || newer(m.Event, spawn.Event)) {
 			spawn = m
 		}
 	}
 	if spawn == nil {
-		return nil
+		return Resolution{}
 	}
+	children := map[string][]Move{}
 	for _, m := range moves {
-		if m.Action == ActSpawn || m.Genesis != spawn.Event.ID || m.Previous == "" {
+		if m.IsSpawn || m.Genesis != spawn.Event.ID || m.Previous == "" {
 			continue
 		}
 		children[m.Previous] = append(children[m.Previous], m)
 	}
-	chain := []Move{*spawn}
+	var r Resolution
+	forked := func(id string) {
+		r.ForkedFrom = id
+		for _, m := range children[id] {
+			r.Fork = append(r.Fork, m.Event.ID)
+		}
+		sort.Strings(r.Fork)
+	}
+	r.Chain = []Move{*spawn}
 	for cur := spawn.Event.ID; ; {
 		next := children[cur]
-		if len(next) == 0 {
-			return chain
+		if len(next) > 1 {
+			forked(cur)
+			return r
 		}
-		sort.Slice(next, func(i, j int) bool { return older(next[i].Event, next[j].Event) })
-		chain = append(chain, next[0])
+		if len(next) == 0 || len(r.Chain) > len(moves) { // a cycle cannot happen with real ids; guard anyway
+			break
+		}
+		r.Chain = append(r.Chain, next[0])
 		cur = next[0].Event.ID
-		if len(chain) > len(moves) { // a cycle cannot happen with real ids; guard anyway
-			return chain
+	}
+	// A fork the links do not reach (its branches name an event that is
+	// not on the chain) is a fork all the same: the smallest such id is
+	// reported, for a deterministic verdict.
+	var ids []string
+	for id, kids := range children {
+		if len(kids) > 1 {
+			ids = append(ids, id)
 		}
 	}
+	if len(ids) > 0 {
+		sort.Strings(ids)
+		forked(ids[0])
+	}
+	return r
 }
 
 func newer(a, b nostr.Event) bool {
@@ -220,13 +276,6 @@ func newer(a, b nostr.Event) bool {
 		return a.CreatedAt > b.CreatedAt
 	}
 	return a.ID > b.ID
-}
-
-func older(a, b nostr.Event) bool {
-	if a.CreatedAt != b.CreatedAt {
-		return a.CreatedAt < b.CreatedAt
-	}
-	return a.ID < b.ID
 }
 
 // parseRegion reads an enter-virtual's region (§8.11.1): exactly one
@@ -237,7 +286,7 @@ func parseRegion(evt nostr.Event) (Box, string) {
 	var tag []string
 	n := 0
 	for _, t := range evt.Tags {
-		if len(t) >= 2 && t[0] == "region" {
+		if len(t) >= 1 && t[0] == "region" {
 			tag = t
 			n++
 		}
@@ -300,8 +349,11 @@ func isDecimal(s string) bool {
 
 // isHex32 reports whether s is 32 bytes of lowercase hex, the form of a
 // coordinate, an event id and a pubkey.
-func isHex32(s string) bool {
-	if len(s) != 64 {
+func isHex32(s string) bool { return isHexLen(s, 64) }
+
+// isHexLen reports whether s is n lowercase hex characters.
+func isHexLen(s string, n int) bool {
+	if len(s) != n {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

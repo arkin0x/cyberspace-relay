@@ -272,7 +272,7 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 	}
 	isSpawn := func(e nostr.Event) bool {
 		m, _ := ParseMove(e)
-		return m.Action == ActSpawn && authentic(e)
+		return m.IsSpawn && authentic(e)
 	}
 	spawns, cov, ok := g.gather(ctx, pubkey, ChainQuery{Tags: map[string][]string{"A": {ActSpawn}}, Keep: isSpawn})
 	if !ok {
@@ -294,7 +294,7 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 		spawnID := newest.ID
 		onChain := func(e nostr.Event) bool {
 			m, _ := ParseMove(e)
-			return m.Action != ActSpawn && m.Genesis == spawnID && authentic(e)
+			return !m.IsSpawn && m.Genesis == spawnID && authentic(e)
 		}
 		chain, chainCov, ok := g.gather(ctx, pubkey, ChainQuery{Tags: map[string][]string{"e": {spawnID}}, Keep: onChain})
 		if !ok {
@@ -319,8 +319,9 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 		}
 		events = append(events, chain...)
 	}
-	// Whatever a truncated answer left out could change the verdict: an
-	// older branch at a fork, or the events right after the spawn. Refuse
+	// Whatever a truncated answer left out could change the verdict: a
+	// second branch, which makes the chain dead, or the events right after
+	// the spawn. Refuse
 	// without caching rather than judge a part of the chain.
 	switch {
 	case cov.Capped:

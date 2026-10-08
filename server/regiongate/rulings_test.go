@@ -322,25 +322,6 @@ func TestRulingQ9SectorTags(t *testing.T) {
 	}
 }
 
-// Erratum 1 (2026-10-08): forks are resolved before validity. An earlier
-// invalid branch continues the chain, and a later valid one does not
-// replace it.
-func TestErratumForkResolvedBeforeValidity(t *testing.T) {
-	s := newSigner(t)
-	b := newChain(t, s)
-	h1 := b.move(ActHop, offset(t, s.pubkey, 1))
-	fork := *b
-	b.pos = offset(t, s.pubkey, 50)
-	early := b.move(ActHop, offset(t, s.pubkey, 51)) // c-mismatch, signed first
-	fork.at = early.CreatedAt + 5
-	late := fork.move(ActHop, offset(t, s.pubkey, 2)) // valid, signed later
-	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, late, early})
-	if !slices.Equal(vd.Chain, []string{b.spawn.ID, h1.ID, early.ID}) {
-		t.Fatalf("the earlier branch continues: %v", vd.Chain)
-	}
-	expectInvalid(t, vd, ReasonCMismatch, early, offset(t, s.pubkey, 1))
-}
-
 // The reason codes are the reference's (cyberspace-cli, regenerated against
 // 912f3d7): outside-region is gone, a-tag, sector-tags and
 // enter-virtual-moved are new.
@@ -358,36 +339,4 @@ func TestReasonCodesAfterRulings(t *testing.T) {
 			t.Errorf("%s still describes in-bracket continuity", code)
 		}
 	}
-}
-
-// Points the spec leaves open, decided as the reference decides them
-// (cyberspace-cli 85f4e44): resolution follows the first e tag of each
-// marker, and a repeated genesis, previous or entry tag is malformed on a
-// recognized action outside a bracket and on an exit, but not on a virtual
-// or skipped action, which are checked only for being linked; an exit's
-// optional c is not read even when malformed; only kind 3333 counts.
-func TestOpenPointsMatchTheReference(t *testing.T) {
-	s := newSigner(t)
-	box := cubeAround(t, s.pubkey, 8)
-
-	b := newChain(t, s)
-	dup := b.move(ActHop, offset(t, s.pubkey, 1), []string{"e", b.spawn.ID, "", "previous"})
-	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, dup}), ReasonMalformed, dup, s.pubkey)
-
-	b = newChain(t, s)
-	enter := b.move(ActEnterVirtual, s.pubkey, regionTag(box, 8), gameTag())
-	virtual := b.raw("shoot", []string{"e", b.spawn.ID, "", "previous"}, []string{"e", b.spawn.ID, "", "genesis"})
-	exit := b.raw(ActExitVirtual, append([][]string{{"e", enter.ID, "", "entry"}, {"c", "zz"}, {"C", s.pubkey}}, sectorTags(t, s.pubkey)...)...)
-	wave := b.raw("wave", []string{"e", b.spawn.ID, "", "previous"})
-	expectValid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enter, virtual, exit, wave}), wave, s.pubkey)
-
-	b = newChain(t, s)
-	enter = b.move(ActEnterVirtual, s.pubkey, regionTag(box, 8), gameTag())
-	dupExit := b.move(ActExitVirtual, s.pubkey, []string{"e", enter.ID, "", "entry"}, []string{"e", enter.ID, "", "entry"})
-	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enter, dupExit}), ReasonMalformed, dupExit, s.pubkey)
-
-	// A newer "spawn" of another kind is not a movement event.
-	b = newChain(t, s)
-	notMovement := s.sign(t, 1, b.at+100, append([][]string{{"A", ActSpawn}, {"C", offset(t, s.pubkey, 1)}}, sectorTags(t, s.pubkey)...)...)
-	expectValid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, notMovement}), b.spawn, s.pubkey)
 }

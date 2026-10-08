@@ -54,6 +54,7 @@ type ProofChecker interface {
 // can be compared with the reference implementation's, rule for rule.
 const (
 	ReasonNoSpawn              = "no-spawn"
+	ReasonFork                 = "fork"
 	ReasonATag                 = "a-tag"
 	ReasonMalformed            = "malformed"
 	ReasonSectorTags           = "sector-tags"
@@ -82,7 +83,8 @@ const (
 // Reasons maps every reason code to the rule it names.
 var Reasons = map[string]string{
 	ReasonNoSpawn:              "no authentic spawn event for this pubkey, so there is no chain (§8.7.3 rule 1)",
-	ReasonATag:                 "the event carries no A tag, or more than one (§8.8)",
+	ReasonFork:                 "two or more chain events name the same previous event: the chain is dead, and the identity stands at its spawn coordinate (arkinox, 2026-10-08)",
+	ReasonATag:                 "the event carries no A tag, more than one, or one with no value (§8.8)",
 	ReasonMalformed:            "a tag the chain rules read is missing, repeated or ill-formed: e genesis, e previous, e entry, c, C, from_height, B",
 	ReasonSectorTags:           "a recognized action's X, Y, Z or S tag is missing, repeated, or not the value computed from its C (§10)",
 	ReasonSpawnCoordinate:      "the spawn's C is not its pubkey (§8.3)",
@@ -160,6 +162,9 @@ type Verdict struct {
 	// Length is the active chain's length; Unchecked counts the events the
 	// walk accepted past the proof-verified prefix, skipped actions aside.
 	Length, Unchecked int
+	// Fork lists the ids of the chain events that name the same previous
+	// event, InvalidAt, when the chain is dead by a fork.
+	Fork []string
 	// Reason is the code (Reasons) of the rule the chain breaks, or "" when
 	// every event of the active chain passed. InvalidAt and InvalidIndex
 	// name the first event that breaks it, the spawn at index 0; with no
@@ -199,7 +204,8 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 			signed = append(signed, e)
 		}
 	}
-	chain := ActiveChain(pubkey, signed)
+	res := Resolve(pubkey, signed)
+	chain := res.Chain
 	vd := Verdict{Pubkey: pubkey, Length: len(chain), InvalidIndex: -1}
 	if len(chain) == 0 {
 		vd.Reason, vd.Stopped = ReasonNoSpawn, "no spawn event"
@@ -217,6 +223,28 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		return vd
 	}
 
+	// The identity's spawn coordinate, where a dead chain leaves it.
+	atSpawn := func() {
+		if at, err := ParseCoord(pubkey); err == nil {
+			verified := at
+			vd.Position, vd.VerifiedPosition = &at, &verified
+		}
+	}
+	// A fork kills the whole chain, whichever branch is valid or signed
+	// first (arkinox, 2026-10-08). Resolution finds it before any validity
+	// is checked, and the identity stands at its spawn coordinate until it
+	// respawns. Only authentic events reach Resolve, so a forged event is
+	// never a branch.
+	if res.ForkedFrom != "" {
+		atSpawn()
+		vd.Reason, vd.InvalidAt, vd.Fork = ReasonFork, res.ForkedFrom, res.Fork
+		if last := len(chain) - 1; chain[last].Event.ID == res.ForkedFrom {
+			vd.InvalidIndex = last
+		}
+		vd.Stopped = fmt.Sprintf("fork: %d chain events name %s as previous (%s)", len(res.Fork), res.ForkedFrom, strings.Join(res.Fork, ", "))
+		return vd
+	}
+
 	spawn := chain[0]
 	if reason, detail := checkSpawn(spawn, pubkey); reason != "" {
 		// The newest spawn wins even when it is invalid, with no fallback
@@ -224,10 +252,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		// its spawn coordinate, the coordinate of its pubkey, frozen until
 		// it publishes another spawn. That position rests on no proof, so
 		// it is also the proof-verified one.
-		if at, err := ParseCoord(pubkey); err == nil {
-			verified := at
-			vd.Position, vd.VerifiedPosition = &at, &verified
-		}
+		atSpawn()
 		return invalid(0, reason, detail)
 	}
 	pos, _ := ParseCoord(spawn.To) // checked by checkSpawn
@@ -239,10 +264,10 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	w := walk{carried: spawn.To, lookback: spawn}
 	for i := 1; i < len(chain); i++ {
 		cur := chain[i]
-		// Exactly one A tag on every event: recognized, skipped, or inside
-		// a bracket (§8.8).
-		if n := countTags(cur.Event, "A", ""); n != 1 {
-			return invalid(i, ReasonATag, fmt.Sprintf("expected exactly one A tag, found %d", n))
+		// Exactly one A tag, with a value, on every event: recognized,
+		// skipped, or inside a bracket (§8.8).
+		if n := countTags(cur.Event, "A", ""); n != 1 || cur.Action == "" {
+			return invalid(i, ReasonATag, fmt.Sprintf("expected exactly one A tag with a value, found %d", n))
 		}
 		if w.bracket == nil && !recognizedActions[cur.Action] {
 			// §8.9: an action this verifier does not recognize is skipped.
@@ -253,7 +278,11 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 			// before the next action for rules that look back (item 4), so
 			// the walk leaves its state untouched. Its id still seeds the
 			// work of the action after it, which the checker reads from that
-			// action's e previous tag (item 3).
+			// action's e previous tag (item 3). Its e genesis and e previous
+			// must each appear exactly once (arkinox, 2026-10-08).
+			if reason, detail := links(cur); reason != "" {
+				return invalid(i, reason, detail)
+			}
 			vd.Skipped = append(vd.Skipped, cur.Event.ID)
 			continue
 		}
@@ -267,10 +296,14 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		// proof-bearing action inside a bracket was refused by step. The
 		// proof tag itself is checked here in every mode: a proof that is
 		// missing or not 32 bytes of lowercase hex cannot verify, whatever
-		// checker is plugged in (§8.4, §8.5, DECK-0001 §3.1, §5.2). As in
-		// the reference, the first proof tag is the one read.
-		if code, bearing := proofOf[cur.Action]; bearing && !isHex32(firstValue(cur.Event, "proof")) {
-			return invalid(i, code, "proof: missing or not a 32-byte lowercase hex value")
+		// checker is plugged in (§8.4, §8.5, DECK-0001 §3.1, §5.2). It must
+		// appear exactly once (arkinox, 2026-10-08), and so must a ride's
+		// mp; a ride's mn may be absent only for the rides DECK-0001 §5.8
+		// lists, which the proof checker knows.
+		if code, bearing := proofOf[cur.Action]; bearing {
+			if why := proofTags(cur); why != "" {
+				return invalid(i, code, why)
+			}
 		}
 		if code, bearing := proofOf[cur.Action]; bearing && proofsHold && v.Proofs != nil {
 			res, why := v.Proofs.Check(prev, cur)
@@ -306,7 +339,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 // computed from it (§8.3, §10).
 func checkSpawn(spawn Move, pubkey string) (string, string) {
 	if n := countTags(spawn.Event, "A", ""); n != 1 {
-		return ReasonATag, fmt.Sprintf("expected exactly one A tag, found %d", n)
+		return ReasonATag, fmt.Sprintf("expected exactly one A tag with a value, found %d", n)
 	}
 	C, err := ParseCoord(spawn.To)
 	if countTags(spawn.Event, "C", "") != 1 || err != nil {
@@ -360,13 +393,17 @@ func (w *walk) step(cur Move) (string, string) {
 	return w.outside(cur)
 }
 
-// links checks that a recognized action carries exactly one e genesis and
-// one e previous tag. Resolution has already followed the first of each.
+// links checks that a chain event, recognized, skipped or virtual, carries
+// exactly one e genesis and one e previous tag (arkinox, 2026-10-08), each
+// holding an event id. Resolution has already followed the first of each.
 func links(cur Move) (string, string) {
 	for _, marker := range []string{"genesis", "previous"} {
 		if n := countTags(cur.Event, "e", marker); n != 1 {
 			return ReasonMalformed, fmt.Sprintf("e %s: expected exactly one, found %d", marker, n)
 		}
+	}
+	if !isHex32(cur.Genesis) || !isHex32(cur.Previous) {
+		return ReasonMalformed, "e genesis and e previous: expected 32-byte lowercase hex event ids"
 	}
 	return "", ""
 }
@@ -391,14 +428,15 @@ func (w *walk) inside(cur Move) (string, string) {
 	if notInBracket[cur.Action] {
 		return ReasonBaseActionInBracket, fmt.Sprintf("%s inside the bracket opened by %s (§8.11.4 rule 3)", cur.Action, b.entry.Event.ID)
 	}
+	if reason, detail := links(cur); reason != "" {
+		return reason, detail
+	}
 	if cur.Action != ActExitVirtual {
 		return "", ""
 	}
 	// The exit-virtual (§8.11.5 step 3): its entry, its C and its sector
-	// tags. Its c is optional and not checked (§8.11.3, rule 4).
-	if reason, detail := links(cur); reason != "" {
-		return reason, detail
-	}
+	// tags. Its c is optional and never read, so no c, a garbled c or two c
+	// tags leave it valid (§8.11.3, rule 4).
 	if n := countTags(cur.Event, "e", "entry"); n != 1 {
 		return ReasonMalformed, fmt.Sprintf("e entry: expected exactly one, found %d", n)
 	}
@@ -483,10 +521,10 @@ func (w *walk) outside(cur Move) (string, string) {
 // from_height is the station within as_of, C is the stop of B) and the ride's
 // proof are the ProofChecker's.
 func ride(look, cur Move) (string, string) {
-	from, okFrom := firstDecimal(cur.Event, "from_height")
-	to, okTo := firstDecimal(cur.Event, "B")
+	from, okFrom := onlyDecimal(cur.Event, "from_height")
+	to, okTo := onlyDecimal(cur.Event, "B")
 	if !okFrom || !okTo {
-		return ReasonMalformed, "from_height and B: expected base-10 block heights (DECK-0001 §5.2)"
+		return ReasonMalformed, "from_height and B: expected exactly one each, a base-10 block height (DECK-0001 §5.2)"
 	}
 	// There is no zero-length ride, the first ride after boarding included,
 	// and no ride is exempt from this (DECK-0001 §5.2, §5.6, §5.8).
@@ -499,32 +537,46 @@ func ride(look, cur Move) (string, string) {
 	if look.Action == ActEnterHyperspace {
 		// The first ride after boarding declares the station set bound,
 		// and the bound is at least the destination (DECK-0001 §4.2).
-		asOf, ok := firstDecimal(cur.Event, "as_of")
+		asOf, ok := onlyDecimal(cur.Event, "as_of")
 		if !ok || asOf.Cmp(to) < 0 {
-			return ReasonHyperjumpAsOf, "the first ride needs an as_of of at least B (DECK-0001 §4.2, §4.3)"
+			return ReasonHyperjumpAsOf, "the first ride needs exactly one as_of, of at least B (DECK-0001 §4.2, §4.3)"
 		}
 		return "", ""
 	}
-	prevB, _ := firstDecimal(look.Event, "B") // checked when that ride was walked
+	prevB, _ := onlyDecimal(look.Event, "B") // checked when that ride was walked
 	if from.Cmp(prevB) != 0 {
 		return ReasonHyperjumpFromHeight, fmt.Sprintf("from_height %s but the previous ride ended at %s (DECK-0001 §4.3)", from, prevB)
 	}
 	return "", ""
 }
 
-// firstValue returns the value of the first tag named name, or "".
-func firstValue(evt nostr.Event, name string) string {
-	if vs := tagValues(evt, name); len(vs) > 0 {
-		return vs[0]
+// proofTags checks the proof tags of a proof-bearing action: exactly one
+// proof holding 32 bytes of lowercase hex, and for a ride exactly one mp with
+// a value and at most one mn, of 16 lowercase hex characters (DECK-0001
+// §5.2). A ride with no mn is invalid unless DECK-0001 §5.8 lists it, which
+// the proof checker decides. It returns why not, or "".
+func proofTags(cur Move) string {
+	if vs := tagValues(cur.Event, "proof"); len(vs) != 1 || !isHex32(vs[0]) {
+		return fmt.Sprintf("proof: expected exactly one 32-byte lowercase hex value, found %d tags", len(vs))
+	}
+	if cur.Action != ActHyperjump {
+		return ""
+	}
+	if vs := tagValues(cur.Event, "mp"); len(vs) != 1 || vs[0] == "" {
+		return fmt.Sprintf("mp: expected exactly one with a value, found %d tags", len(vs))
+	}
+	if vs := tagValues(cur.Event, "mn"); len(vs) > 1 || len(vs) == 1 && !isHexLen(vs[0], 16) {
+		return "mn: expected at most one, of 16 lowercase hex characters"
 	}
 	return ""
 }
 
-// firstDecimal reads the first tag named name as a base-10 height, which may
-// carry leading zeros, as the reference reads it.
-func firstDecimal(evt nostr.Event, name string) (*big.Int, bool) {
+// onlyDecimal reads the one tag named name as a base-10 height, which may
+// carry leading zeros, as the reference reads it. A missing tag, a repeated
+// one or a value that is not decimal gives false.
+func onlyDecimal(evt nostr.Event, name string) (*big.Int, bool) {
 	vs := tagValues(evt, name)
-	if len(vs) == 0 || !isDecimal(vs[0]) {
+	if len(vs) != 1 || !isDecimal(vs[0]) {
 		return nil, false
 	}
 	n, ok := new(big.Int).SetString(vs[0], 10)

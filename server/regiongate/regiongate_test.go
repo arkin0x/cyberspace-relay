@@ -85,8 +85,14 @@ func (b *chainBuilder) move(action, to string, extra ...[]string) nostr.Event {
 // PendingSpec never checks) unless extra gives one.
 func (b *chainBuilder) moveTags(action, to string, sectors [][]string, extra ...[]string) nostr.Event {
 	tags := [][]string{{"c", b.pos}, {"C", to}}
-	if _, bearing := proofOf[action]; bearing && !slices.ContainsFunc(extra, func(t []string) bool { return t[0] == "proof" }) {
+	given := func(name string) bool {
+		return slices.ContainsFunc(extra, func(t []string) bool { return t[0] == name })
+	}
+	if _, bearing := proofOf[action]; bearing && !given("proof") {
 		tags = append(tags, []string{"proof", strings.Repeat("ab", 32)})
+	}
+	if action == ActHyperjump && !given("mp") {
+		tags = append(tags, []string{"mp", strings.Repeat("cd", 32)}, []string{"mn", strings.Repeat("0", 16)})
 	}
 	evt := b.raw(action, append(append(tags, sectors...), extra...)...)
 	b.pos = to
@@ -270,34 +276,44 @@ regions:
 
 // ── chain resolution (§8.7.3) ─────────────────────────────────────────
 
-func TestActiveChainNewestSpawnAndForkRule(t *testing.T) {
+func TestResolveNewestSpawnAndFork(t *testing.T) {
 	s := newSigner(t)
 	old := newChain(t, s)
 	oldHop := old.move(ActHop, offset(t, s.pubkey, 1))
 
 	b := newChain(t, s)
 	b.at = old.at + 100 // a respawn, newer than the old chain
-	b.spawn = s.sign(t, KindMovement, b.at, []string{"A", ActSpawn}, []string{"C", s.pubkey})
+	b.spawn = s.sign(t, KindMovement, b.at, append([][]string{{"A", ActSpawn}, {"C", s.pubkey}}, sectorTags(t, s.pubkey)...)...)
 	b.last, b.pos = b.spawn, s.pubkey
 	h1 := b.move(ActHop, offset(t, s.pubkey, 2))
-	// Fork at h1: the earlier branch continues.
 	b2 := *b
 	early := b.move(ActHop, offset(t, s.pubkey, 3))
 	earlyNext := b.move(ActHop, offset(t, s.pubkey, 4))
-	b2.at = early.CreatedAt + 5
-	late := b2.move(ActHop, offset(t, s.pubkey, 9))
 
 	other := newSigner(t)
 	foreign := newChain(t, other).spawn
+	events := []nostr.Event{earlyNext, oldHop, foreign, early, old.spawn, h1, b.spawn}
 
-	chain := ActiveChain(s.pubkey, []nostr.Event{late, earlyNext, oldHop, foreign, early, old.spawn, h1, b.spawn})
-	var ids []string
-	for _, m := range chain {
-		ids = append(ids, m.Event.ID)
+	ids := func(ms []Move) string {
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.Event.ID)
+		}
+		return strings.Join(out, ",")
 	}
-	want := []string{b.spawn.ID, h1.ID, early.ID, earlyNext.ID}
-	if strings.Join(ids, ",") != strings.Join(want, ",") {
-		t.Fatalf("active chain:\n got %v\nwant %v", ids, want)
+	r := Resolve(s.pubkey, events)
+	if want := []Move{{Event: b.spawn}, {Event: h1}, {Event: early}, {Event: earlyNext}}; ids(r.Chain) != ids(want) || r.ForkedFrom != "" {
+		t.Fatalf("active chain:\n got %s (fork %q)\nwant %s", ids(r.Chain), r.ForkedFrom, ids(want))
+	}
+
+	// A second branch at h1: the chain stops at h1, and the fork is named.
+	b2.at = early.CreatedAt + 5
+	late := b2.move(ActHop, offset(t, s.pubkey, 9))
+	r = Resolve(s.pubkey, append(events, late))
+	branches := []string{early.ID, late.ID}
+	slices.Sort(branches)
+	if ids(r.Chain) != ids([]Move{{Event: b.spawn}, {Event: h1}}) || r.ForkedFrom != h1.ID || !slices.Equal(r.Fork, branches) {
+		t.Fatalf("fork at h1: chain %s, forked from %q, branches %v", ids(r.Chain), r.ForkedFrom, r.Fork)
 	}
 }
 
@@ -749,8 +765,9 @@ func TestProofTagRequiredInStructuralMode(t *testing.T) {
 	jump := b.raw(ActHyperjump, append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "3"}, {"as_of", "3"}}, sectorTags(t, to)...)...)
 	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, board, jump}), ReasonHyperjumpProof, jump, s.pubkey)
 
-	// A well-formed first proof tag passes, whatever follows it.
+	// The proof tag appears exactly once (arkinox, 2026-10-08): a second
+	// one makes the action invalid even when the first is well formed.
 	b = newChain(t, s)
-	hop := b.move(ActHop, offset(t, s.pubkey, 1), []string{"proof", strings.Repeat("cd", 32)}, []string{"proof", "junk"})
-	expectValid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, hop}), hop, offset(t, s.pubkey, 1))
+	hop := b.move(ActHop, offset(t, s.pubkey, 1), []string{"proof", strings.Repeat("cd", 32)}, []string{"proof", strings.Repeat("cd", 32)})
+	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, hop}), ReasonHopProof, hop, s.pubkey)
 }
