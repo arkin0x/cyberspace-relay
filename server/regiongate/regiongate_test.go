@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,24 +69,63 @@ type chainBuilder struct {
 
 func newChain(t *testing.T, s *signer) *chainBuilder {
 	b := &chainBuilder{t: t, s: s, at: 1_750_000_000}
-	b.spawn = s.sign(t, KindMovement, b.at, []string{"A", ActSpawn}, []string{"C", s.pubkey})
+	b.spawn = s.sign(t, KindMovement, b.at, append([][]string{{"A", ActSpawn}, {"C", s.pubkey}}, sectorTags(t, s.pubkey)...)...)
 	b.last, b.pos = b.spawn, s.pubkey
 	return b
 }
 
-// move appends an action to `to` and returns its event; extra tags are added.
+// move appends an action to `to` and returns its event, with the sector tags
+// computed from `to` (§10); extra tags are added.
 func (b *chainBuilder) move(action, to string, extra ...[]string) nostr.Event {
+	return b.moveTags(action, to, sectorTags(b.t, to), extra...)
+}
+
+// moveTags is move with the given sector tags instead of the computed ones.
+// An action that carries a work proof gets a well-formed proof tag (which
+// PendingSpec never checks) unless extra gives one.
+func (b *chainBuilder) moveTags(action, to string, sectors [][]string, extra ...[]string) nostr.Event {
+	tags := [][]string{{"c", b.pos}, {"C", to}}
+	given := func(name string) bool {
+		return slices.ContainsFunc(extra, func(t []string) bool { return t[0] == name })
+	}
+	if _, bearing := proofOf[action]; bearing && !given("proof") {
+		tags = append(tags, []string{"proof", strings.Repeat("ab", 32)})
+	}
+	if action == ActSidestep && !given("mr") {
+		root := strings.Repeat("ef", 32)
+		tags = append(tags, []string{"mr", root + ":" + root + ":" + root}, []string{"mp", "ab"},
+			[]string{"hx", "1"}, []string{"hy", "1"}, []string{"hz", "1"})
+	}
+	if action == ActHyperjump && !given("mp") {
+		tags = append(tags, []string{"mp", strings.Repeat("cd", 32)}, []string{"mn", strings.Repeat("0", 16)})
+	}
+	evt := b.raw(action, append(append(tags, sectors...), extra...)...)
+	b.pos = to
+	return evt
+}
+
+// raw appends an event carrying only its A tag, its links and the given
+// tags: no c, C or sector tags unless given. The carried position is left as
+// it is, as for a virtual action or a skipped one.
+func (b *chainBuilder) raw(action string, tags ...[]string) nostr.Event {
 	b.at += 10
-	tags := [][]string{
+	head := [][]string{
 		{"A", action},
 		{"e", b.spawn.ID, "", "genesis"},
 		{"e", b.last.ID, "", "previous"},
-		{"c", b.pos},
-		{"C", to},
 	}
-	evt := b.s.sign(b.t, KindMovement, b.at, append(tags, extra...)...)
-	b.last, b.pos = evt, to
+	evt := b.s.sign(b.t, KindMovement, b.at, append(head, tags...)...)
+	b.last = evt
 	return evt
+}
+
+// sectorTags are the X, Y, Z and S tags computed from c, worked out here
+// independently of Coord.Sector: each axis shifted right by 30 (§10).
+func sectorTags(t *testing.T, c string) [][]string {
+	t.Helper()
+	p := mustCoord(t, c)
+	sx, sy, sz := new(big.Int).Rsh(p.X, 30), new(big.Int).Rsh(p.Y, 30), new(big.Int).Rsh(p.Z, 30)
+	return [][]string{{"X", sx.String()}, {"Y", sy.String()}, {"Z", sz.String()}, {"S", sx.String() + "-" + sy.String() + "-" + sz.String()}}
 }
 
 func mustCoord(t *testing.T, s string) Coord {
@@ -120,6 +160,9 @@ func cubeAround(t *testing.T, c string, h uint) Box {
 func regionTag(b Box, h uint) []string {
 	return []string{"region", b.Base.Hex(), big.NewInt(int64(h)).String()}
 }
+
+// gameTag is the p tag every enter-virtual carries, naming its game (§8.11.1).
+func gameTag() []string { return []string{"p", strings.Repeat("ab", 32), "", "game"} }
 
 func verifier() Verifier {
 	return Verifier{Proofs: PendingSpec{}, Signature: validation.CheckSignature}
@@ -238,34 +281,44 @@ regions:
 
 // ── chain resolution (§8.7.3) ─────────────────────────────────────────
 
-func TestActiveChainNewestSpawnAndForkRule(t *testing.T) {
+func TestResolveNewestSpawnAndFork(t *testing.T) {
 	s := newSigner(t)
 	old := newChain(t, s)
 	oldHop := old.move(ActHop, offset(t, s.pubkey, 1))
 
 	b := newChain(t, s)
 	b.at = old.at + 100 // a respawn, newer than the old chain
-	b.spawn = s.sign(t, KindMovement, b.at, []string{"A", ActSpawn}, []string{"C", s.pubkey})
+	b.spawn = s.sign(t, KindMovement, b.at, append([][]string{{"A", ActSpawn}, {"C", s.pubkey}}, sectorTags(t, s.pubkey)...)...)
 	b.last, b.pos = b.spawn, s.pubkey
 	h1 := b.move(ActHop, offset(t, s.pubkey, 2))
-	// Fork at h1: the earlier branch continues.
 	b2 := *b
 	early := b.move(ActHop, offset(t, s.pubkey, 3))
 	earlyNext := b.move(ActHop, offset(t, s.pubkey, 4))
-	b2.at = early.CreatedAt + 5
-	late := b2.move(ActHop, offset(t, s.pubkey, 9))
 
 	other := newSigner(t)
 	foreign := newChain(t, other).spawn
+	events := []nostr.Event{earlyNext, oldHop, foreign, early, old.spawn, h1, b.spawn}
 
-	chain := ActiveChain(s.pubkey, []nostr.Event{late, earlyNext, oldHop, foreign, early, old.spawn, h1, b.spawn})
-	var ids []string
-	for _, m := range chain {
-		ids = append(ids, m.Event.ID)
+	ids := func(ms []Move) string {
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.Event.ID)
+		}
+		return strings.Join(out, ",")
 	}
-	want := []string{b.spawn.ID, h1.ID, early.ID, earlyNext.ID}
-	if strings.Join(ids, ",") != strings.Join(want, ",") {
-		t.Fatalf("active chain:\n got %v\nwant %v", ids, want)
+	r := Resolve(s.pubkey, events)
+	if want := []Move{{Event: b.spawn}, {Event: h1}, {Event: early}, {Event: earlyNext}}; ids(r.Chain) != ids(want) || r.ForkedFrom != "" {
+		t.Fatalf("active chain:\n got %s (fork %q)\nwant %s", ids(r.Chain), r.ForkedFrom, ids(want))
+	}
+
+	// A second branch at h1: the chain stops at h1, and the fork is named.
+	b2.at = early.CreatedAt + 5
+	late := b2.move(ActHop, offset(t, s.pubkey, 9))
+	r = Resolve(s.pubkey, append(events, late))
+	branches := []string{early.ID, late.ID}
+	slices.Sort(branches)
+	if ids(r.Chain) != ids([]Move{{Event: b.spawn}, {Event: h1}}) || r.ForkedFrom != h1.ID || !slices.Equal(r.Fork, branches) {
+		t.Fatalf("fork at h1: chain %s, forked from %q, branches %v", ids(r.Chain), r.ForkedFrom, r.Fork)
 	}
 }
 
@@ -312,37 +365,63 @@ func TestVerifyStopsAtInvalidEvent(t *testing.T) {
 	b.pos = offset(t, s.pubkey, 50) // the next event's c will not match h1's C
 	bad := b.move(ActHop, offset(t, s.pubkey, 51))
 	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, bad})
-	if vd.PositionEvent != h1.ID || !strings.Contains(vd.Stopped, "c does not equal") {
+	if vd.Valid() || vd.Reason != ReasonCMismatch || vd.InvalidAt != bad.ID || vd.InvalidIndex != 2 || vd.PositionEvent != h1.ID {
 		t.Fatalf("verdict: %+v", vd)
 	}
 
-	// A spawn whose C is not the pubkey places the identity nowhere.
+	// A spawn whose C is not the pubkey is invalid, and the identity stands
+	// at its spawn coordinate, the pubkey's (§3.2, §8.7.3 rule 1).
 	s2 := newSigner(t)
 	wrong := s2.sign(t, KindMovement, 1, []string{"A", ActSpawn}, []string{"C", offset(t, s2.pubkey, 1)})
-	if vd := verifier().Verify(s2.pubkey, []nostr.Event{wrong}); vd.Position != nil || !vd.HasChain {
+	vd = verifier().Verify(s2.pubkey, []nostr.Event{wrong})
+	if !vd.HasChain || vd.Reason != ReasonSpawnCoordinate || vd.Position == nil || vd.Position.Hex() != s2.pubkey || vd.PositionEvent != "" {
 		t.Fatalf("bad spawn verdict: %+v", vd)
 	}
-	if vd := verifier().Verify(s2.pubkey, nil); vd.HasChain {
+	if vd := verifier().Verify(s2.pubkey, nil); vd.HasChain || vd.Reason != ReasonNoSpawn {
 		t.Fatal("no events means no chain")
 	}
 }
 
-func TestVerifyUnknownActionIsUnverifiableNotInvalid(t *testing.T) {
+func TestVerifyUnknownActionIsSkipped(t *testing.T) {
 	s := newSigner(t)
 	b := newChain(t, s)
 	h1 := b.move(ActHop, offset(t, s.pubkey, 1))
-	b.move("teleport", offset(t, s.pubkey, 2))
-	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, b.last})
-	if vd.PositionEvent != h1.ID || !strings.Contains(vd.Stopped, "§8.9") {
+	carried := b.pos
+	teleport := b.move("teleport", offset(t, s.pubkey, 2))
+
+	// A chain ending on a skipped action is valid; the position is the C of
+	// the last recognized action and the head is the skipped one (§8.9 step 5).
+	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, teleport})
+	if !vd.Valid() || vd.PositionEvent != h1.ID || vd.Position.Hex() != carried || vd.Head != teleport.ID ||
+		len(vd.Skipped) != 1 || vd.Skipped[0] != teleport.ID {
 		t.Fatalf("verdict: %+v", vd)
+	}
+
+	// The next recognized action starts where the chain carries it, not
+	// where the skipped action claimed to go (§8.9 step 2), and links
+	// through the skipped action (step 1).
+	from := *b
+	from.pos = carried
+	hop := from.move(ActHop, offset(t, s.pubkey, 3))
+	vd = verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, teleport, hop})
+	if !vd.Valid() || vd.PositionEvent != hop.ID || vd.Length != 4 {
+		t.Fatalf("hop from the carried position: %+v", vd)
+	}
+	moved := b.move(ActHop, offset(t, s.pubkey, 4)) // its c is the teleport's C
+	vd = verifier().Verify(s.pubkey, []nostr.Event{b.spawn, h1, teleport, moved})
+	if vd.Reason != ReasonCMismatch || vd.InvalidAt != moved.ID || vd.PositionEvent != h1.ID {
+		t.Fatalf("a position change across a skipped action must be invalid: %+v", vd)
 	}
 }
 
 func TestVerifyHyperjumpOrdering(t *testing.T) {
 	s := newSigner(t)
 	b := newChain(t, s)
-	jump := b.move(ActHyperjump, offset(t, s.pubkey, 9))
-	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, jump}); !strings.Contains(vd.Stopped, "DECK-0001") {
+	heights := func(from, to string) [][]string {
+		return [][]string{{"from_height", from}, {"B", to}, {"as_of", to}}
+	}
+	jump := b.move(ActHyperjump, offset(t, s.pubkey, 9), heights("2", "3")...)
+	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, jump}); vd.Reason != ReasonHyperjumpPredecessor {
 		t.Fatalf("hyperjump after spawn must be invalid: %+v", vd)
 	}
 
@@ -351,15 +430,15 @@ func TestVerifyHyperjumpOrdering(t *testing.T) {
 	b = newChain(t, s)
 	box := cubeAround(t, s.pubkey, 10)
 	enterH := b.move(ActEnterHyperspace, s.pubkey)
-	enterV := b.move(ActEnterVirtual, s.pubkey, regionTag(box, 10))
+	enterV := b.move(ActEnterVirtual, s.pubkey, regionTag(box, 10), gameTag())
 	exitV := b.move(ActExitVirtual, s.pubkey, []string{"e", enterV.ID, "", "entry"})
-	jump = b.move(ActHyperjump, offset(t, s.pubkey, 1<<40))
+	jump = b.move(ActHyperjump, offset(t, s.pubkey, 1<<40), heights("2", "3")...)
 	vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enterH, enterV, exitV, jump})
-	if vd.Stopped != "" || vd.PositionEvent != jump.ID {
+	if !vd.Valid() || vd.PositionEvent != jump.ID {
 		t.Fatalf("verdict: %+v", vd)
 	}
 	moved := b.move(ActEnterHyperspace, offset(t, s.pubkey, 5)) // must not move
-	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enterH, enterV, exitV, jump, moved}); vd.PositionEvent != jump.ID {
+	if vd := verifier().Verify(s.pubkey, []nostr.Event{b.spawn, enterH, enterV, exitV, jump, moved}); vd.PositionEvent != jump.ID || vd.Reason != ReasonEnterHyperspaceMoved {
 		t.Fatalf("moving enter-hyperspace must be invalid: %+v", vd)
 	}
 }
@@ -369,83 +448,108 @@ func TestVerifyVirtualBrackets(t *testing.T) {
 	const h = 16
 	box := cubeAround(t, s.pubkey, h)
 	inside := func(dx int64) string { return offset(t, box.Base.Hex(), dx) }
+	entry := func(b *chainBuilder, extra ...[]string) nostr.Event {
+		return b.move(ActEnterVirtual, b.pos, append([][]string{regionTag(box, h), gameTag()}, extra...)...)
+	}
+	exit := func(b *chainBuilder, e nostr.Event, extra ...[]string) nostr.Event {
+		return b.move(ActExitVirtual, e.Tags[3][1], append([][]string{{"e", e.ID, "", "entry"}}, extra...)...)
+	}
 
+	// The entry does not move the identity (C = c); a virtual action carries
+	// whatever the game gives it (§8.11.2).
 	b := newChain(t, s)
-	enter := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
-	act := b.move("shoot", inside(2))
+	enter := entry(b)
+	act := b.raw("shoot", []string{"c", inside(1)}, []string{"C", inside(2)})
 	open := []nostr.Event{b.spawn, enter, act}
 	vd := verifier().Verify(s.pubkey, open)
-	if vd.Stopped != "" || vd.Position.Hex() != s.pubkey {
+	if !vd.Valid() || vd.Position.Hex() != s.pubkey || vd.OpenBracket != enter.ID || len(vd.Skipped) != 0 {
 		t.Fatalf("inside an open bracket the position is the enter's c (rule 7): %+v", vd)
 	}
-	exit := b.move(ActExitVirtual, s.pubkey, []string{"e", enter.ID, "", "entry"})
+	x := exit(b, enter)
 	hop := b.move(ActHop, offset(t, s.pubkey, 1))
-	vd = verifier().Verify(s.pubkey, append(open, exit, hop))
-	if vd.Stopped != "" || vd.PositionEvent != hop.ID {
+	vd = verifier().Verify(s.pubkey, append(open, x, hop))
+	if !vd.Valid() || vd.PositionEvent != hop.ID || vd.OpenBracket != "" {
 		t.Fatalf("closed bracket: %+v", vd)
 	}
 
-	invalid := func(name string, build func(b *chainBuilder) []nostr.Event, wantRule string) {
+	invalid := func(name string, build func(b *chainBuilder) []nostr.Event, wantReason string) {
 		t.Helper()
 		b := newChain(t, s)
 		evs := build(b)
 		vd := verifier().Verify(s.pubkey, append([]nostr.Event{b.spawn}, evs...))
-		if !strings.Contains(vd.Stopped, wantRule) {
-			t.Errorf("%s: want stop mentioning %q, got %q", name, wantRule, vd.Stopped)
+		if vd.Reason != wantReason || vd.InvalidAt != evs[len(evs)-1].ID {
+			t.Errorf("%s: want %s at the last event, got %q: %s", name, wantReason, vd.Reason, vd.Stopped)
 		}
 	}
 	invalid("base action inside", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
-		return []nostr.Event{e, b.move(ActHop, inside(2))}
-	}, "rule 3")
-	invalid("virtual action outside the box", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
-		return []nostr.Event{e, b.move("shoot", offset(t, box.Base.Hex(), 1<<h))}
-	}, "rule 4")
+		e := entry(b)
+		return []nostr.Event{e, b.move(ActHop, offset(t, s.pubkey, 2))}
+	}, ReasonBaseActionInBracket)
+	invalid("entry that moves", func(b *chainBuilder) []nostr.Event {
+		return []nostr.Event{b.move(ActEnterVirtual, inside(1), regionTag(box, h), gameTag())}
+	}, ReasonEnterVirtualMoved)
 	invalid("exit naming the wrong entry", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
+		e := entry(b)
 		return []nostr.Event{e, b.move(ActExitVirtual, s.pubkey, []string{"e", strings.Repeat("a", 64), "", "entry"})}
-	}, "rule 6")
+	}, ReasonExitWrongEntry)
 	invalid("exit not restoring the base position", func(b *chainBuilder) []nostr.Event {
-		e := b.move(ActEnterVirtual, inside(1), regionTag(box, h))
+		e := entry(b)
 		return []nostr.Event{e, b.move(ActExitVirtual, inside(3), []string{"e", e.ID, "", "entry"})}
-	}, "rule 2")
+	}, ReasonExitPosition)
 	invalid("exit with no bracket", func(b *chainBuilder) []nostr.Event {
 		return []nostr.Event{b.move(ActExitVirtual, s.pubkey, []string{"e", b.spawn.ID, "", "entry"})}
-	}, "rule 6")
+	}, ReasonExitWithoutBracket)
 	invalid("misaligned region", func(b *chainBuilder) []nostr.Event {
-		return []nostr.Event{b.move(ActEnterVirtual, inside(1), []string{"region", inside(1), "16"})}
-	}, "§8.11.1")
+		return []nostr.Event{b.move(ActEnterVirtual, s.pubkey, []string{"region", inside(1), "16"}, gameTag())}
+	}, ReasonRegion)
+	invalid("entry naming no game", func(b *chainBuilder) []nostr.Event {
+		return []nostr.Event{b.move(ActEnterVirtual, s.pubkey, regionTag(box, h))}
+	}, ReasonGameTag)
 }
 
 // ── the gate ──────────────────────────────────────────────────────────
 
+// fakeSource is a relay holding events. It answers newest first, as relays
+// do, so a cap drops the oldest events.
 type fakeSource struct {
 	mu     sync.Mutex
 	events []nostr.Event
 	calls  atomic.Int32
 	fail   bool
 	delay  time.Duration
+	// partial makes every answer Partial, as a relay failing part way.
+	partial bool
+	// untagged events are missing from tag queries, as from a relay whose
+	// tag index lost them, but are returned when asked for by id.
+	untagged map[string]bool
 }
 
-func (f *fakeSource) Movement(ctx context.Context, pubkey string, tags map[string][]string, max int) ([]nostr.Event, error) {
+func (f *fakeSource) Movement(ctx context.Context, pubkey string, q ChainQuery) ([]nostr.Event, Coverage, error) {
 	f.calls.Add(1)
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
 	if f.fail {
-		return nil, errors.New("relay down")
+		return nil, Coverage{}, errors.New("relay down")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []nostr.Event
-	flt := nostr.Filter{Authors: []string{pubkey}, Kinds: []int{KindMovement}, Tags: tags}
+	flt := nostr.Filter{Authors: []string{pubkey}, Kinds: []int{KindMovement}, Tags: q.Tags, IDs: q.IDs}
 	for _, e := range f.events {
-		if flt.MatchesEvent(e) {
+		if len(q.IDs) == 0 && f.untagged[e.ID] {
+			continue
+		}
+		if flt.MatchesEvent(e) && (q.Keep == nil || q.Keep(e)) {
 			out = append(out, e)
 		}
 	}
-	return out, nil
+	slices.SortFunc(out, func(a, b nostr.Event) int { return int(b.CreatedAt - a.CreatedAt) })
+	cov := Coverage{Partial: f.partial}
+	if q.Max > 0 && len(out) > q.Max {
+		out, cov.Capped = out[:q.Max], true
+	}
+	return out, cov, nil
 }
 
 func gateFor(t *testing.T, mode Mode, box Box, src Source, exempt ...string) *Gate {
@@ -633,4 +737,42 @@ func TestGateCachingAndFailures(t *testing.T) {
 	if n := down.calls.Load(); n != 2 {
 		t.Fatalf("a failed lookup must not be cached: %d calls", n)
 	}
+}
+
+// Every proof-bearing action carries exactly one proof tag of 32 bytes of
+// lowercase hex (§8.4, §8.5, DECK-0001 §3.1, §5.2), checked in structural
+// mode too, since no checker can verify a proof that is not there. A tag of
+// the wrong form is malformed, as in the reference.
+func TestProofTagRequiredInStructuralMode(t *testing.T) {
+	s := newSigner(t)
+	for _, action := range []string{ActHop, ActSidestep, ActEnterHyperspace} {
+		for name, proof := range map[string][]string{
+			"missing":   nil,
+			"short":     {"proof", "abcd"},
+			"uppercase": {"proof", strings.Repeat("AB", 32)},
+		} {
+			b := newChain(t, s)
+			tags := [][]string{{"c", b.pos}, {"C", b.pos}}
+			if proof != nil {
+				tags = append(tags, proof)
+			}
+			evt := b.raw(action, append(tags, sectorTags(t, b.pos)...)...)
+			expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, evt}), ReasonMalformed, evt, s.pubkey)
+			if t.Failed() {
+				t.Fatalf("%s with a %s proof", action, name)
+			}
+		}
+	}
+
+	b := newChain(t, s)
+	board := b.move(ActEnterHyperspace, s.pubkey)
+	to := offset(t, s.pubkey, 1<<40)
+	jump := b.raw(ActHyperjump, append([][]string{{"c", s.pubkey}, {"C", to}, {"from_height", "2"}, {"B", "3"}, {"as_of", "3"}}, sectorTags(t, to)...)...)
+	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, board, jump}), ReasonMalformed, jump, s.pubkey)
+
+	// The proof tag appears exactly once (arkinox, 2026-10-08): a second
+	// one makes the action invalid even when the first is well formed.
+	b = newChain(t, s)
+	hop := b.move(ActHop, offset(t, s.pubkey, 1), []string{"proof", strings.Repeat("cd", 32)}, []string{"proof", strings.Repeat("cd", 32)})
+	expectInvalid(t, verifier().Verify(s.pubkey, []nostr.Event{b.spawn, hop}), ReasonMalformed, hop, s.pubkey)
 }

@@ -43,7 +43,7 @@ func startRegionGate() {
 				return nil, nil
 			}
 			return db.Query(f, limit)
-		}})
+		}, MaxResults: nostrdb.MaxQueryResults})
 	}
 	if len(cfg.ChainRelays) > 0 {
 		key, err := regiongate.AuthKey(os.Getenv("GRAIN_REGION_AUTH_KEY"))
@@ -72,7 +72,7 @@ func startRegionGate() {
 		httpGuard = speakeasyHTTP
 	}
 	log.RegionGate().Info("Region gate enabled",
-		"mode", cfg.Mode, "gate_reads", *cfg.GateReads, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
+		"chain_rules", regiongate.ChainRulesRevision, "mode", cfg.Mode, "gate_reads", *cfg.GateReads, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
 		"proof_checker", "PendingSpec (no work proofs checked until the spec is ratified)")
 }
 

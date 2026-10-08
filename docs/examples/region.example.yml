@@ -50,4 +50,4 @@ cache_ttl_seconds: 600 # keep an admission this long
 negative_cache_ttl_seconds: 60 # keep a refusal this long
 fetch_timeout_seconds: 8
 max_concurrent_lookups: 16 # chain lookups in flight; extra events get "try again"
-max_chain_events: 5000
+max_chain_events: 5000 # per source per question; a chain over it is refused with "try again"

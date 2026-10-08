@@ -39,8 +39,11 @@ type Config struct {
 	// UseLocalEvents also reads movement events this relay already holds.
 	// Default true.
 	UseLocalEvents *bool `yaml:"use_local_events"`
-	// MaxChainEvents caps how many movement events are fetched per author.
-	// Default 5000.
+	// MaxChainEvents caps how many movement events each source reads per
+	// question about one author. Default 5000. An answer over the cap is
+	// incomplete, and the lookup is refused uncached ("try again"), so an
+	// identity with more events than this since its newest spawn is never
+	// admitted until it is raised.
 	MaxChainEvents int `yaml:"max_chain_events"`
 	// FetchTimeoutSeconds bounds one author's chain fetch. Default 8.
 	FetchTimeoutSeconds int `yaml:"fetch_timeout_seconds"`

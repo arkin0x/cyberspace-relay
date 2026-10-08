@@ -63,7 +63,29 @@ history of old chains costs two small answers:
    redirect the lookup.
 2. `{"authors":[pk],"kinds":[3333],"#e":[newest_spawn_id]}`: every event that
    names it, which includes every event of its chain (they all carry it as
-   `e … genesis`, §8.7.3 step 2).
+   `e … genesis`, §8.7.3 rule 2).
+
+Each source reads at most `max_chain_events` (default 5000) events per
+question, paging remote relays 500 at a time. Only events that count are read
+toward that cap: authentic events by the author, and for the second question
+only those whose `e … genesis` names the newest spawn, so events a third
+party forged cannot push the real chain out of the answer.
+
+The gate judges a chain only when it holds all of it, because relays answer
+newest first and a cut-short answer drops the events right after the spawn
+(or an older branch at a fork), which would resolve to a wrong position:
+
+- **Gaps.** A held chain event whose `e … previous` is neither the spawn nor
+  held is asked for by id (`{"ids":[...]}`), for up to 8 rounds. An event
+  that comes back and is on the chain fills the gap. One that comes back but
+  that resolution never follows closes it, since the branch through it is cut
+  off (§8.7.3): an event that is not authentic, or that is on another chain.
+  Only the event whose id is the hash of its content can close a gap this
+  way, so a forgery borrowing the id cannot cut a chain short.
+- **Refusals that are not cached.** A source that hit the cap
+  (`max_chain_events`), a relay that failed part way through paging (or kept
+  answering the same full page), or a gap that no source could fill, makes
+  the lookup a refusal that says "try again" and is not cached.
 
 Sources are this relay's own store (`use_local_events`) and `chain_relays`.
 `wss://cyberspace.nostr1.com` refuses reads without NIP-42 AUTH; the gate
@@ -75,47 +97,186 @@ the two questions returned 139 events in 5.7 s and verification took 32 ms.
 
 ## Verifying a chain
 
-`regiongate.Verifier` does, in order:
+`regiongate.Verifier` implements the chain rules of revision
+`2026-09-28-virtual-brackets` (CYBERSPACE_V2 §8.12, `regiongate.ChainRulesRevision`,
+logged at startup), with the rulings of 2026-10-07 and the clarifications of
+2026-10-08 that arkin0x/cyberspace #46 (`912f3d7`) folded into that revision.
+It does, in order:
 
-1. Drops events whose id or signature does not verify. This happens **before**
-   fork resolution, or anyone could cut a chain off by publishing an unsigned
-   "older" branch in someone else's name.
-2. Resolves the active chain by §8.7.3: newest spawn (larger id on a tie),
-   only events whose genesis names it, forward through `e … previous`, at a
-   fork the smallest `created_at` (smaller id on a tie), head = first event
-   nothing names as previous.
-3. Walks the chain checking structure:
-   - the spawn's `C` equals the pubkey (§8.3);
-   - every event's `c` equals the previous event's `C`, and `C` is a valid coordinate;
-   - `enter-hyperspace` does not move; a `hyperjump` follows `enter-hyperspace` or a `hyperjump` (DECK-0001 §4.3), looking through brackets;
-   - virtual brackets (§8.11.4): a well-formed, aligned `region`; no base actions inside; every `C` inside the box; the exit names the open entry and restores the base position. Inside a bracket the position is the `enter-virtual`'s `c`.
-   - an action the verifier does not know, outside a bracket, is **unverifiable, never invalid** (§8.9): the walk stops and reports the last position it verified.
-   An invalid event ends the walk; the position is the last valid event's.
-4. Asks the `ProofChecker` about each base action's work proof.
+1. **Discards every event that is not authentic** (§8.7.3): an id that is not
+   the NIP-01 hash, a sig that does not verify (a blank one included; there
+   is no unsigned local chain, §8.2), another author, or another kind than
+   3333. A discarded event is treated as if it never existed, so nobody can
+   end someone else's chain with a forged spawn or a forged "older" branch.
+   An event naming a discarded one as previous is never reached: the branch
+   is cut off, and the head is the event before it. That chain is not
+   invalid, and the identity's next action from that head is not a fork.
+2. **Resolves the active chain** by §8.7.3, from links, `created_at` and ids
+   alone, before any validity check: the newest spawn (larger id on a tie),
+   valid or not, with no fallback to an older spawn; only events whose
+   genesis names it; forward through `e … previous`; head = first event
+   nothing names as previous. Where an event repeats a tag, the first one is
+   followed. An event is a spawn when **any** of its `A` tags is `spawn`,
+   wherever it stands. A spawn is never a link, whatever `e` tags it
+   carries: the newest starts the chain, and older ones are history that
+   never extends or forks it and is never a skipped or virtual action. A
+   spawn with a second `A` tag is an invalid newest spawn. Always mainnet:
+   a `net` tag is informational, and nothing here reads it.
+   **A fork kills the chain** (arkinox, 2026-10-08; spec PR #48): when the
+   walk from the spawn reaches an event that two or more chain events name
+   as `e … previous` (each event's first copy), the whole chain is dead,
+   whichever branch is valid or signed first, and the identity stands at its
+   spawn coordinate (its pubkey's) until it respawns. Reason `fork`; the
+   verdict's chain runs from the spawn to that event, and it is invalid from
+   the spawn. Events the walk never reaches (behind a discarded event, or
+   naming an id nobody holds) make no fork. A forged event is discarded in
+   step 1, so it is never a branch. An event whose first `e … previous` is
+   empty names nothing and drops off the chain.
+3. **Walks the chain from the spawn.** The recognized actions are the base
+   actions (`spawn`, `hop`, `sidestep`, `enter-virtual`, `exit-virtual`) and
+   those of DECK-0001, which is mandatory (`enter-hyperspace`, `hyperjump`).
+   This relay implements no optional DECK.
+   - **Exactly one `A` tag, with a value,** on every event: recognized,
+     skipped, inside a bracket, or the spawn (§8.8). Reason `a-tag`.
+   - **Exactly once, with a value** (arkinox, 2026-10-08): every tag a chain
+     rule reads appears exactly once with a well-formed value. A tag with no
+     value still counts as that tag: a bare `["A"]` is an `A` tag, and
+     invalid, and a bare second `["C"]` is a second `C`. Unread tags are free.
+     The tags read are `A`, `c`, `C`, the `e` tags (not on the spawn),
+     `region`, the game `p` tag, the sector tags, `proof` on every
+     proof-bearing action, `mr` (three roots), `mp`, `hx`, `hy` and `hz` on a
+     sidestep, and `from_height`, `B` and `mp` on a ride, plus `as_of` on the
+     first ride after boarding (missing there: `hyperjump-as-of`; present
+     but repeated or not decimal: `malformed`; on later rides unread). `mn`
+     may be absent on a sidestep or a ride, because the exemption lists
+     (§6.16, DECK-0001 §5.8) name events with none, but not repeated; a
+     missing `mn` on an unlisted event is the proof checker's. A tag of the
+     wrong form is `malformed`. On a ride the heights come first, then
+     DECK-0001 §5.6 (zero-length), then the other ride tags. Inside a
+     bracket only `A` and the `e` tags are constrained; on skipped actions
+     only `A` and the `e` tags; on an exit also `C`, the sector tags and
+     `e … entry`.
+   - **Exactly one `e … genesis` and one `e … previous`** on every chain
+     event, recognized, skipped or virtual, each an event id, and exactly
+     one `e … entry` on an exit. Reason `malformed`.
+   - The spawn's `C` equals the pubkey (§8.3).
+   - **Sector tags** (§10): every recognized action outside a bracket, and
+     the spawn and the exit, carries `X`, `Y`, `Z` and `S` exactly once each,
+     equal to the values computed from its `C` (base-10, no sign or leading
+     zeros; `S` = `sx-sy-sz`). Missing, repeated or wrong is invalid. Reason
+     `sector-tags`. Not required on virtual actions or skipped actions.
+   - A recognized action outside a bracket has exactly one `c` and one `C`,
+     each 32 bytes of lowercase hex, and its `c` equals the `C` of the nearest recognized
+     action before it (continuity, §8.9 item 2).
+   - **Unrecognized actions are skipped** (§8.9). Outside a bracket, an action
+     the verifier does not recognize is checked only for being authentic,
+     linked and carrying one `A` tag; its other tags, proofs and sector tags
+     belong to its DECK. It is treated as if it were not on the chain: it
+     does not move the identity, and the walk goes on verifying every
+     recognized action after it. Concretely:
+     - a skipped action that changed the position leaves the next recognized
+       action's `c` mismatched, and the chain is invalid from that action
+       (a move nobody can check is a teleport);
+     - work is still seeded by the **actual previous event**: a hop or
+       sidestep after a skipped action derives its temporal axis from the
+       skipped action's id, which the proof checker reads from the action's
+       own `e … previous` tag;
+     - rules that look back (DECK-0001 §4.3) see through skipped actions to
+       the nearest recognized action;
+     - a chain that ends on skipped actions is valid, and the position is the
+       `C` of the last recognized action. The verdict lists the skipped ids.
+   - `enter-hyperspace` does not move. There is **no zero-length ride**, the
+     first ride from the station included, with nothing grandfathered
+     (DECK-0001 §5.6): `B` equal to `from_height` is invalid. A `hyperjump`
+     looks back to an `enter-hyperspace` or a `hyperjump` (§4.3), through
+     skipped actions and closed brackets; its `from_height` and `B` are
+     base-10 heights; the first ride after boarding carries an `as_of` of at
+     least `B`; a later ride departs from the previous ride's `B`.
+   - **Virtual brackets are opaque** (§8.11). The `enter-virtual` is
+     continuous with the chain and **does not move the identity** (`C` =
+     `c`, reason `enter-virtual-moved`). Its `region` tag (exactly one,
+     aligned, canonical `H`) and its
+     `["p", <game_pubkey>, <relay_hint>, "game"]` tag (exactly one, 32 bytes
+     of lowercase hex) are checked **for form only**: nothing has to lie in
+     the region, the base position included, because a game may be declared
+     anywhere and proximity is the game's to enforce. Inside, an event is
+     checked only for its links, its one `A` tag, and a name that is not
+     reserved: every base and mandatory DECK action is reserved (rule 3 names
+     a category), so a new mandatory DECK added to the recognized actions is
+     reserved with no further change. Its `c`, `C` and sector tags are the
+     game's. The exit names the open entry (exactly one `e … entry`), its
+     `C` restores the base position and carries the sector tags, and its
+     optional `c` is never read: missing, garbled or repeated, it leaves the
+     exit valid. Continuity resumes after the exit. Inside a
+     bracket, and at a head inside an open one, the position is the
+     `enter-virtual`'s `c`; a closed bracket stands for the action before its
+     entry when a later rule looks back.
 
-The verdict carries two positions: `Position` (after the last structurally
-valid event) and `VerifiedPosition` (after the longest prefix whose every
-proof the checker verified). `mode: structural` uses the first, `mode: strict`
-the second.
+   The first event that breaks a rule makes the chain invalid from that event,
+   and the walk stops there. The verdict names the rule with the same reason
+   codes as the reference implementation's golden vectors (`Verdict.Reason`,
+   `InvalidAt`, `InvalidIndex`). An invalid chain is **frozen at its last
+   valid position** (§3.2, §8.7.3): `Position` is where the chain leaves the
+   identity at the last valid event, and nothing published later on that
+   chain moves it; only a respawn does. When the newest spawn itself is
+   invalid, the identity stands at its spawn coordinate, its pubkey's.
+4. Asks the `ProofChecker` about each hop, sidestep, `enter-hyperspace` and
+   `hyperjump` outside a bracket, after its structural checks pass.
+
+The verdict carries two positions: `Position` (where the identity stands,
+valid chain or frozen) and `VerifiedPosition` (after the longest prefix whose
+every proof the checker verified). `mode: structural` uses the first, `mode:
+strict` the second. The gate judges a frozen identity by its frozen position:
+inside the region it stays admitted, and a movement event published on its
+frozen chain is admitted or refused at that position, since it cannot move
+the identity.
+
+### Golden vectors
+
+`server/regiongate/testdata/chain-rules-2026-09-28-virtual-brackets.json` is
+the reference implementation's vector file, copied unchanged from
+arkin0x/cyberspace-cli PR #24 (commit `80ab145`, generated against the spec
+at `912f3d7` with the rulings of 2026-10-08, spec PR #48). Events in it that
+are not NIP-01 shaped are left out, as a relay could not accept them. `TestChainRulesGoldenVectors` runs every vector through the
+verifier, every event checked for authenticity:
+
+- vectors whose verdict rests on structure must match the reference exactly:
+  validity, chain, position, head, open bracket and skipped ids, or the
+  reason code, the invalid event and the frozen position;
+- vectors whose verdict rests on a proof, or on Bitcoin's block data, are
+  marked pending: the test asserts the chain is structurally valid up to that
+  event and the event's proof is reported unchecked, never verified.
+
+`REGIONGATE_VECTORS=<path> go test -run Golden ./server/regiongate/` runs
+another vectors file in place of the one in testdata, without copying it in.
 
 ## The placeholder: what is NOT checked yet
 
-The chain-verification spec is being audited, so proofs are not verified:
-the only `ProofChecker` is `PendingSpec`, which answers `ProofUnchecked` for
-every hop, sidestep, enter-hyperspace and hyperjump.
+Proofs are not verified yet: the only `ProofChecker` is `PendingSpec`, which
+answers `ProofUnchecked` for every hop, sidestep, enter-hyperspace and
+hyperjump.
 
 | Mode | With `PendingSpec` |
 |---|---|
 | `structural` | Position = chain head. Structure is enforced; work is trusted. Someone could sign a structurally valid chain that hops anywhere without doing the work. |
 | `strict` | Position = spawn point. Only identities that spawned inside the region are admitted. |
 
-To plug in the ratified rules, implement `regiongate.ProofChecker`
+To plug in the proof rules, implement `regiongate.ProofChecker`
 (`server/regiongate/verify.go`) and pass it in `server/regiongate_startup.go`
-in place of `PendingSpec{}`. It receives each event and the one before it on
-the active chain. Expected contents, per the current spec: hop proofs (§8.7.1
-or their successor), sidestep Level 1 (§8.7.2) with the `mn` re-roll price
-and `grandfathered-v2-sidesteps.txt`, hyperjump ride openings (DECK-0001 §5.8)
-with `decks/grandfathered-v1-hyperjumps.txt`. Nothing else changes.
+in place of `PendingSpec{}`. It receives each proof-bearing action as `cur`
+and, as `prev`, the action a rule that looks back sees: the nearest recognized
+action before it, with a closed bracket standing for the action before its
+entry. `prev`'s `C` is `cur`'s `c`. The work is seeded by `cur.Previous`, the
+id the action's `e … previous` names, which can be a skipped action or an
+`exit-virtual` and is then not `prev`. Expected contents, per the current spec:
+hop proofs (§8.7.1), sidestep Level 1 (§8.7.2) with the `mn` re-roll price and
+`grandfathered-v2-sidesteps.txt`, entry proofs (DECK-0001 §3.2), and rides at
+Level 1 (DECK-0001 §5.5, §5.8) with `decks/grandfathered-v1-hyperjumps.txt`.
+Rides also need the line's block data for the rules the verifier cannot
+decide from tags: `as_of` is a height on the line, `from_height` is the
+station within `as_of`, and `C` is the stop of `B`. A refusal names its rule
+by starting the reason string with a proof code (`hop-proof`,
+`hyperjump-station`, and so on). Nothing else changes.
 
 ## Region forms
 
@@ -136,4 +297,32 @@ may be listed; any match admits.
   `fetch_timeout_seconds`.
 - Chain relays are trusted for completeness, not for content: events are
   verified, but a relay that hides an author's newest events can make the
-  gate see an older position.
+  gate see an older position. Gaps in the middle of a chain are caught (see
+  Looking up a chain), but missing events past the head cannot be seen, and
+  neither can an older fork branch that no source returns. A chain relay
+  that fails outright is left out of the answer, as if it held nothing.
+- An identity with more than `max_chain_events` events since its newest
+  spawn, its own fork branches included, is refused ("try again") on every
+  lookup until the operator raises `max_chain_events` or the identity
+  respawns. The cap bounds the cost of one lookup.
+- An identity whose chain names a previous event that no source holds (its
+  client published an event but never its parent) is refused ("try again")
+  until the parent is published somewhere the gate reads, or the identity
+  respawns. Without the parent nobody can tell whether it would win a fork
+  or extend the chain.
+- **A fork kills the chain** (arkinox, 2026-10-08). Two chain events naming
+  the same previous, where the walk from the spawn reaches it, make the
+  chain dead at the spawn coordinate. This closes
+  the frozen-chain rewind: without it, an identity that had left the region
+  could sign one invalid event backdated to just after an old event inside
+  the region, win the fork by signing time, freeze the chain there and be
+  admitted again for free. A rewind needs a fork, and a fork is now death,
+  not a choice of branch. A chain that is invalid without a fork still
+  stands frozen at its last valid position.
+- A second branch the gate has not seen yet (published on a relay the gate
+  does not read, or after the last lookup) changes the verdict at the next
+  lookup: at once for a movement event published here, which is always
+  judged afresh, and otherwise once the cached verdict expires, after
+  `cache_ttl_seconds` (600 by default) for an admission and
+  `negative_cache_ttl_seconds` (60) for a refusal. Until then a forked
+  identity that was admitted stays admitted.

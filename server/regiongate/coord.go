@@ -2,10 +2,11 @@
 // movement chain places them inside the relay's configured region.
 //
 // The gate resolves each author's active chain (CYBERSPACE_V2 §8.7.3),
-// checks it structurally (signatures, links, coordinates, virtual brackets
-// per §8.11) and asks a ProofChecker about the work proofs. Until the chain
-// verification spec is ratified, the only ProofChecker is PendingSpec, which
-// checks no proofs; see proofs.go and docs/region-gate.md.
+// checks it structurally under the chain rules of ChainRulesRevision
+// (signatures, links, coordinates, skipped actions per §8.9, virtual brackets
+// per §8.11) and asks a ProofChecker about the work proofs. Until a checker
+// for those proofs is built, the only ProofChecker is PendingSpec, which
+// checks no proofs; see verify.go and docs/region-gate.md.
 package regiongate
 
 import (
@@ -63,6 +64,14 @@ func (c Coord) Hex() string {
 	out := make([]byte, 32)
 	v.FillBytes(out)
 	return hex.EncodeToString(out)
+}
+
+// Sector returns the sector indexes of the coordinate as the decimal strings
+// its X, Y and Z tags carry (§10): each axis shifted right by SectorBits.
+func (c Coord) Sector() (sx, sy, sz string) {
+	return new(big.Int).Rsh(c.X, SectorBits).String(),
+		new(big.Int).Rsh(c.Y, SectorBits).String(),
+		new(big.Int).Rsh(c.Z, SectorBits).String()
 }
 
 // Equal reports whether two coordinates are the same point.

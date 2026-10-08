@@ -17,7 +17,8 @@ import (
 
 // authRelay is a relay that, like wss://cyberspace.nostr1.com, refuses
 // every REQ until the connection answers its AUTH challenge, and caps pages.
-func authRelay(t *testing.T, events []nostr.Event, pageCap int) string {
+// With failFrom > 0 it drops the connection at that REQ, counting from 1.
+func authRelay(t *testing.T, events []nostr.Event, pageCap int, failFrom ...int) string {
 	t.Helper()
 	srv := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
 		send := func(v ...interface{}) {
@@ -27,6 +28,7 @@ func authRelay(t *testing.T, events []nostr.Event, pageCap int) string {
 		const challenge = "chal-123"
 		send("AUTH", challenge)
 		authed := false
+		reqs := 0
 		for {
 			var msg string
 			if websocket.Message.Receive(ws, &msg) != nil {
@@ -55,6 +57,9 @@ func authRelay(t *testing.T, events []nostr.Event, pageCap int) string {
 				if !authed {
 					send("CLOSED", id, "auth-required: you must auth")
 					continue
+				}
+				if reqs++; len(failFrom) > 0 && reqs >= failFrom[0] {
+					return
 				}
 				var f map[string]interface{}
 				_ = json.Unmarshal(arr[2], &f)
@@ -92,12 +97,12 @@ func TestRelaySourceAuthsAndPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := RelaySource{Relays: []string{authRelay(t, events, 10)}, Timeout: 10 * time.Second, AuthKey: key}
-	got, err := src.Movement(context.Background(), s.pubkey, nil, 5000)
+	got, cov, err := src.Movement(context.Background(), s.pubkey, ChainQuery{Max: 5000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != len(events) {
-		t.Fatalf("fetched %d of %d events through auth + paging", len(got), len(events))
+	if len(got) != len(events) || cov.Truncated() {
+		t.Fatalf("fetched %d of %d events through auth + paging (%+v)", len(got), len(events), cov)
 	}
 	vd := verifier().Verify(s.pubkey, got)
 	if vd.Length != len(events) || vd.PositionEvent != b.last.ID {
@@ -105,7 +110,7 @@ func TestRelaySourceAuthsAndPages(t *testing.T) {
 	}
 
 	// Without a key the relay's refusal is an error, not an empty chain.
-	if _, err := (RelaySource{Relays: src.Relays, Timeout: 5 * time.Second}).Movement(context.Background(), s.pubkey, nil, 10); err == nil {
+	if _, _, err := (RelaySource{Relays: src.Relays, Timeout: 5 * time.Second}).Movement(context.Background(), s.pubkey, ChainQuery{Max: 10}); err == nil {
 		t.Fatal("an auth-required refusal must surface as an error")
 	}
 }
