@@ -1,0 +1,39 @@
+# ONOSENDAI default relay on one droplet: grain (this fork, profile
+# onosendai) behind Caddy, which holds the TLS certificate for
+# relay.onosendai.tech. From the repo root on the droplet:
+#   GRAIN_OWNER_PUBKEY=<npub> docker compose -f deploy/onosendai/docker-compose.yml up -d --build
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      args:
+        PROFILE: onosendai
+    restart: unless-stopped
+    environment:
+      GRAIN_DATA_DIR: /data
+      # Claims ownership at first boot, so nobody can claim /setup before the operator.
+      GRAIN_OWNER_PUBKEY: ${GRAIN_OWNER_PUBKEY:?set GRAIN_OWNER_PUBKEY to the operator npub}
+    volumes:
+      - relay-data:/data
+    expose:
+      - "8181"
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - relay
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

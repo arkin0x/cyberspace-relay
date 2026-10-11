@@ -1,0 +1,34 @@
+# ONOSENDAI default relay: who and what may publish (arkinox, 2026-10-11).
+# Anyone may publish these kinds; every other kind is refused with
+# "not allowed: event kind is not whitelisted". To accept a new kind, add it
+# here (grain hot-reloads this file) and to the table in deploy/onosendai/README.md.
+
+pubkey_whitelist:
+  enabled: false # anyone may publish the kinds below
+  pubkeys: []
+  npubs: []
+  cache_refresh_minutes: 60
+
+kind_whitelist:
+  enabled: true
+  kinds:
+    # Cyberspace
+    - "3333"   # movement chain (spawn, hops, sidesteps, hyperspace)
+    - "33330"  # hidden bags (h tag is a height, never a NIP-29 group)
+    - "33331"  # objects (SNO shards)
+    - "11333"  # avatars
+    - "23330"  # ephemeral chat (not stored)
+    - "23333"  # ephemeral presence (not stored)
+    # Nostr plumbing ONOSENDAI publishes
+    - "0"      # profiles (agents carry bot + operator here)
+    - "5"      # deletions (NIP-09): retract objects, derezz, cleanup
+    - "7"      # reactions
+    - "1111"   # comments (NIP-22) on hops, objects, bags
+    - "10002"  # relay lists (NIP-65)
+    - "10063"  # Blossom server lists
+    - "30003"  # bookmark sets (starred places)
+
+domain_whitelist:
+  enabled: false
+  domains: []
+  cache_refresh_minutes: 120
