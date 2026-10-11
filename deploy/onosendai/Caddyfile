@@ -1,0 +1,6 @@
+# TLS for the ONOSENDAI default relay. Caddy obtains and renews the
+# certificate once the DNS A record for relay.onosendai.tech points here.
+relay.onosendai.tech {
+	encode zstd gzip
+	reverse_proxy relay:8181
+}

@@ -56,3 +56,4 @@ server/db/nostrdb/include/
 # Deploy profiles ship their configs
 !deploy/*/config.yml
 !deploy/*/relay_metadata.json
+!deploy/*/whitelist.yml
