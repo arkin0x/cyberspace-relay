@@ -17,16 +17,16 @@ kind_whitelist:
     - "33330"  # hidden bags (h tag is a height, never a NIP-29 group)
     - "33331"  # objects (SNO shards)
     - "11333"  # avatars
-    - "23330"  # ephemeral chat (not stored)
-    - "23333"  # ephemeral presence (not stored)
+    - "23330"  # ephemeral chat envelope (not stored); its 23333 line rides inside, never bare
+    - "321"    # block anchors (DECK-0001), from the NTH publisher: the hyperspace stops
     # Nostr plumbing ONOSENDAI publishes
     - "0"      # profiles (agents carry bot + operator here)
     - "5"      # deletions (NIP-09): retract objects, derezz, cleanup
     - "7"      # reactions
     - "1111"   # comments (NIP-22) on hops, objects, bags
     - "10002"  # relay lists (NIP-65)
+    - "10050"  # DM inbox relay lists (NIP-17): agents copy their operator's
     - "10063"  # Blossom server lists
-    - "30003"  # bookmark sets (starred places)
 
 domain_whitelist:
   enabled: false
