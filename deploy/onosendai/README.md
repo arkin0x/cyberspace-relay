@@ -12,8 +12,9 @@ region.)
 | Kinds | What | Who |
 |---|---|---|
 | 3333, 33330, 33331, 11333 | movement chain, hidden bags, objects, avatars | anyone |
-| 23330, 23333 | ephemeral chat and presence (relayed, never stored) | anyone |
-| 0, 5, 7, 1111, 10002, 10063, 30003 | profiles, deletions, reactions, comments, relay lists, Blossom lists, bookmark sets | anyone |
+| 321 | block anchors, the hyperspace stops (DECK-0001), from the NTH publisher | anyone |
+| 23330 | ephemeral chat envelope (relayed, never stored); its 23333 line rides inside it, never bare | anyone |
+| 0, 5, 7, 1111, 10002, 10050, 10063 | profiles, deletions, reactions, comments, relay lists, DM inbox lists, Blossom lists | anyone |
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
 
 Reads are open. NIP-70 protected events need NIP-42 AUTH from their author.
