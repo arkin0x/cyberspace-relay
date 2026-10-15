@@ -6,70 +6,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	nostr "github.com/0ceanslim/grain/server/types"
 )
 
-// SerializeEvent manually constructs the JSON string for event serialization according to NIP-01
+// SerializeEvent returns the NIP-01 serialization an event id is the hash
+// of. It used to be json.Marshal with a find-and-replace undoing some of
+// Go's HTML escapes, which missed U+2028 and U+2029 (refused as a bad
+// signature) and mangled content that literally contained the text
+// "\u0026"; nostr.Event.IDPreimage escapes exactly what NIP-01 escapes.
 func SerializeEvent(evt nostr.Event) string {
-	eventData := []interface{}{
-		0,
-		evt.PubKey,
-		evt.CreatedAt,
-		evt.Kind,
-		evt.Tags,
-		evt.Content,
-	}
-
-	// Use Go's standard JSON marshaling first
-	jsonBytes, err := json.Marshal(eventData)
-	if err != nil {
-		clog().Error("Failed to serialize event",
-			"event_id", evt.ID,
-			"pubkey", evt.PubKey,
-			"kind", evt.Kind,
-			"error", err)
-		return ""
-	}
-
-	// Convert to NIP-01 compliant format
-	jsonStr := string(jsonBytes)
-	jsonStr = normalizeJSONForNIP01(jsonStr)
-
-	// Only log at debug level for very important events or when troubleshooting
-	if evt.Kind == 0 || evt.Kind == 3 {
-		clog().Debug("Event serialized",
-			"event_id", evt.ID,
-			"kind", evt.Kind,
-			"size_bytes", len(jsonStr))
-	}
-
-	return jsonStr
-}
-
-// normalizeJSONForNIP01 converts Go's JSON output to NIP-01 compliant format
-func normalizeJSONForNIP01(jsonStr string) string {
-	// Go's json.Marshal escapes some characters that NIP-01 says should NOT be escaped
-	// We need to unescape Unicode sequences like \u0026 back to their original form
-
-	// Replace common Unicode escapes that Go adds but NIP-01 doesn't require
-	replacements := map[string]string{
-		"\\u0026": "&", // Ampersand
-		"\\u003c": "<", // Less than
-		"\\u003e": ">", // Greater than
-		"\\u003d": "=", // Equals sign
-		"\\u002b": "+", // Plus sign
-		"\\u0027": "'", // Single quote (apostrophe)
-		"\\u002f": "/", // Forward slash
-	}
-
-	result := jsonStr
-	for escaped, unescaped := range replacements {
-		result = strings.ReplaceAll(result, escaped, unescaped)
-	}
-
-	return result
+	return evt.IDPreimage()
 }
 
 // DeserializeEvent deserializes JSON bytes to an event
