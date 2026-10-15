@@ -5,7 +5,7 @@
 //                            [--kinds 3333,33330,...] [--authors <hex>,<hex>] [--since <unix>] [--until <unix>]
 //                            [--limit 5000] [--from-jsonl archive.ndjson ...] [--dry-run]
 //   node migrate.mjs compact [--in work/events.jsonl] [--out work/import.jsonl] [--manifest work/counts.json]
-//                            [--one-anchor-per-height]
+//                            [--one-anchor-per-height] [--cyberspace-only]
 //   node migrate.mjs publish --target wss://relay.onosendai.tech [--in work/import.jsonl] [--state work] [--rate 1]
 //   node migrate.mjs count   --relay <url> [--kinds ...] [--authors ...] [--since ...] [--until ...] [--json out.json]
 //
@@ -25,6 +25,10 @@
 // replaceable or addressable event is kept. --one-anchor-per-height also keeps
 // only the newest kind 321 per publisher and block height (the B tag): the
 // old relay holds 3 to 8 copies of early blocks from a publisher restart bug.
+// --cyberspace-only keeps a plumbing event (kinds 0, 5, 7, 1111, 10002, 10050,
+// 10063) only when its author has a cyberspace event (3333, 33330, 33331,
+// 11333, 321) or it references one by e/E or a/A: the old relay also holds
+// general Nostr traffic (hundreds of thousands of unrelated reactions).
 // It writes the file grain imports and a manifest of counts per kind.
 //
 // publish sends the compacted file to a live relay, paced under grain's rate
@@ -197,12 +201,20 @@ async function compactCmd() {
   const delAddr = new Map() // "kind:pubkey:d" -> newest deletion time
   const winner = new Map() // replace key -> { id, created_at }
   const onePerHeight = flag('one-anchor-per-height')
+  const cyberOnly = flag('cyberspace-only')
+  const CYBER = new Set([3333, 33330, 33331, 11333, 321])
+  const cyberAuthors = new Set()
+  const cyberRefs = new Set() // ids and addresses of cyberspace events
   const anchorKey = (ev) => `321:${ev.pubkey}:${ev.tags.find((t) => t[0] === 'B')?.[1] ?? ''}`
   const keyOf = (ev) => (isAddressable(ev.kind) ? `${ev.kind}:${ev.pubkey}:${dTag(ev)}` : `${ev.kind}:${ev.pubkey}`)
   let total = 0
   for await (const l of lines(inp)) {
     const ev = JSON.parse(l)
     total++
+    if (cyberOnly && CYBER.has(ev.kind)) {
+      cyberAuthors.add(ev.pubkey); cyberRefs.add(ev.id)
+      if (isAddressable(ev.kind)) cyberRefs.add(`${ev.kind}:${ev.pubkey}:${dTag(ev)}`)
+    }
     if (ev.kind === 5) for (const t of ev.tags) {
       if (t[0] === 'e' && t[1]) delIds.set(t[1], ev.pubkey)
       if (t[0] === 'a' && t[1]) { const [, pk] = t[1].split(':'); if (pk === ev.pubkey) delAddr.set(t[1], Math.max(delAddr.get(t[1]) ?? 0, ev.created_at)) }
@@ -216,12 +228,14 @@ async function compactCmd() {
   }
   // Pass 2: write what survives.
   const counts = {}
-  const dropped = { deleted: 0, superseded: 0, ephemeral: 0, duplicate_anchor: 0 }
+  const dropped = { deleted: 0, superseded: 0, ephemeral: 0, duplicate_anchor: 0, not_cyberspace: 0 }
+  const related = (ev) => cyberAuthors.has(ev.pubkey) || ev.tags.some((t) => ['e', 'E', 'a', 'A'].includes(t[0]) && cyberRefs.has(t[1]))
   const w = createWriteStream(out)
   let written = 0
   for await (const l of lines(inp)) {
     const ev = JSON.parse(l)
     if (isEphemeral(ev.kind)) { dropped.ephemeral++; continue }
+    if (cyberOnly && !CYBER.has(ev.kind) && !related(ev)) { dropped.not_cyberspace++; continue }
     if (ev.kind !== 5 && delIds.get(ev.id) === ev.pubkey) { dropped.deleted++; continue }
     if (isReplaceable(ev.kind) || isAddressable(ev.kind)) {
       const key = keyOf(ev)

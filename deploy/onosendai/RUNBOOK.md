@@ -22,10 +22,13 @@ measured" at the end).
 
 ## 1. Droplet and DNS (DigitalOcean)
 
-1. Create a droplet: Ubuntu 24.04 LTS, **2 GB RAM** (grain's config caps itself
-   at 2 GB RSS and the anchors make the database about 1 to 2 GB; a 1 GB
-   droplet works for the relay alone but is tight for the import), any region,
-   your SSH key. Note its IPv4 address as `IP`.
+1. Create a droplet: Ubuntu 24.04 LTS, **2 GB RAM / 50 GB SSD** (the $12
+   Basic plan), any region, your SSH key. Note its IPv4 address as `IP`.
+   Sizing, from the dry run (see "Storage" below): the database for the full
+   history is about **5.5 GB** (about 3.5 GB with `--cyberspace-only`), the
+   import file about 2.5 GB while it is copied in, Docker and the OS about
+   5 GB: about 13 GB at the peak, so 50 GB leaves roughly 4x headroom for
+   growth. 25 GB is the floor. grain caps itself at 2 GB of RAM.
 2. DNS: add an **A record** `relay.onosendai.tech` -> `IP` (TTL 300 is fine).
 3. Wait for it: `dig +short relay.onosendai.tech` prints `IP`.
 
@@ -71,8 +74,16 @@ node migrate.mjs export --state work --kinds 321 \
   --from-jsonl /data/projects/nth/archive/relay-mirror.ndjson \
   --from-jsonl /data/projects/nth/archive/published.tip.ndjson
 # apply deletions, keep the newest replaceable versions, one anchor per block
-node migrate.mjs compact --state work --one-anchor-per-height
+node migrate.mjs compact --state work --one-anchor-per-height [--cyberspace-only]
 ```
+
+**Decide first: `--cyberspace-only` or not.** The old relay also holds general
+Nostr traffic: 687,396 reactions, 292,371 deletions, 135,093 relay lists and
+36,124 profiles, most unrelated to cyberspace. Without the flag everything is
+copied. With it, a profile, deletion, reaction, comment or relay list is kept
+only when its author has a cyberspace event (3333, 33330, 33331, 11333, 321)
+or it points at one. Recommendation: use it; the relay is for cyberspace, and
+the old relay keeps the rest.
 
 `export` verifies every signature and drops anything outside the whitelist;
 it is resumable (re-run the same command after an interruption). Write down
@@ -142,6 +153,33 @@ as done.
 
 Nothing on the old relay is changed or deleted by any step. To roll back,
 point `DEFAULT_RELAY` (and XOR, NTH) back at `wss://cyberspace.nostr1.com`.
+
+## Storage and timing (measured 2026-10-15, for sizing)
+
+Source, `wss://cyberspace.nostr1.com`, counted read-only (dry run):
+
+| Kind | Events | | Kind | Events |
+|---|---|---|---|---|
+| 321 anchors (NTH archive) | 1,933,786 (1,856,188 one per height) | | 5 | 292,371 |
+| 3333 | 210,572 | | 7 | 687,396 |
+| 0 | 36,124 | | 1111 | 9,812 |
+| 33330 | 81 | | 10002 | 135,093 |
+| 33331 | 71 | | 10050 | 3,606 |
+| 11333 | 3 | | 10063 | 257 |
+
+Total with one anchor per height: **3,231,574 events.**
+
+| Measure | Value |
+|---|---|
+| Database (nostrdb/LMDB) per event | **1,660 B** (anchors, 1,756,715 stored), **1,801 B** (mixed cyberspace kinds) |
+| JSON per event (import file) | 765 B (anchors), 895 B (mixed) |
+| Projected database, everything | **about 5.5 GB** (3.23M x ~1.7 KB) |
+| Projected database, `--cyberspace-only` | about 3.5 GB (anchors 3.1 GB plus the cyberspace kinds; the exact count is printed by `compact`) |
+| Projected import file | about 2.5 GB (1.4 GB of it anchors) |
+| Scratch on agent-hub during export | about 5 GB (events.jsonl and import.jsonl) |
+| Export time | about 65 min: non-anchor kinds 44 min (kind 3333 alone 35 min), anchors from the archive 17 min to verify plus 2 min to compact |
+| Import time (`--import`) | 1,440 events/s for the anchors on a heavily loaded machine (load 77 on 16 cores), so about 37 min for everything at worst; 18,000 to 22,000 events/s on small files |
+| Live `publish` (catch-up only) | about 3.6 events/s, paced under grain's rate limits |
 
 ## What the dry run measured (2026-10-15, local grain, read-only on the old relay)
 
