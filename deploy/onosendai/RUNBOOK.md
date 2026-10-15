@@ -74,23 +74,26 @@ node migrate.mjs export --state work --kinds 321 \
   --from-jsonl /data/projects/nth/archive/relay-mirror.ndjson \
   --from-jsonl /data/projects/nth/archive/published.tip.ndjson
 # apply deletions, keep the newest replaceable versions, one anchor per block
-node migrate.mjs compact --state work --one-anchor-per-height [--cyberspace-only]
+node migrate.mjs compact --state work --one-anchor-per-height --cyberspace-only
 ```
 
-**Decide first: `--cyberspace-only` or not.** The old relay also holds general
-Nostr traffic: 687,396 reactions, 292,371 deletions, 135,093 relay lists and
-36,124 profiles, most unrelated to cyberspace. Without the flag everything is
-copied. With it, a profile, deletion, reaction, comment or relay list is kept
-only when its author has a cyberspace event (3333, 33330, 33331, 11333, 321)
-or it points at one. Recommendation: use it; the relay is for cyberspace, and
-the old relay keeps the rest.
+**Decided (arkinox, 2026-10-15): `--cyberspace-only`.** The old relay also
+holds general Nostr traffic: 687,396 reactions, 292,371 deletions, 135,093
+relay lists and 36,124 profiles, most unrelated to cyberspace. With the flag, a
+profile, deletion, reaction, comment or relay list is kept only when its author
+has a cyberspace event (3333, 33330, 33331, 11333, 321) or it points at one.
+The old relay keeps the rest.
 
 `export` verifies every signature and drops anything outside the whitelist;
 it is resumable (re-run the same command after an interruption). Write down
 the time you started step 4: the catch-up in step 8 copies everything newer.
 
-`--one-anchor-per-height` is a choice: the old relay holds 3 to 8 copies of
-early blocks (an old NTH restart bug). Leave the flag out to copy them all.
+**Decided (arkinox, 2026-10-15): `--one-anchor-per-height`.** The old relay
+holds 3 to 8 copies of early blocks (an old NTH restart bug). The flag keeps
+exactly one anchor per block height across all publishers: the copy from the
+publisher with the most anchors overall (printed by `compact` as the majority
+publisher), or, for a height that publisher never anchored, the newest copy
+from anyone.
 
 ## 5. Import on the droplet
 
@@ -141,7 +144,7 @@ Events that reached the old relay between step 4 and step 7:
 ```sh
 node migrate.mjs export --source wss://cyberspace.nostr1.com --state work-catchup \
   --since <unix time you started step 4, minus 600>
-node migrate.mjs compact --state work-catchup
+node migrate.mjs compact --state work-catchup --one-anchor-per-height --cyberspace-only
 node migrate.mjs publish --target wss://relay.onosendai.tech --state work-catchup
 ```
 

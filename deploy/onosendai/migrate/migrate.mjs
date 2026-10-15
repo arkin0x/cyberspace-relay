@@ -23,8 +23,11 @@
 // compact applies what the history itself says: an event its author deleted
 // (kind 5, by e or by a) is dropped, and only the newest version of a
 // replaceable or addressable event is kept. --one-anchor-per-height also keeps
-// only the newest kind 321 per publisher and block height (the B tag): the
-// old relay holds 3 to 8 copies of early blocks from a publisher restart bug.
+// ONE kind 321 per block height (the B tag), across all publishers: the old
+// relay holds 3 to 8 copies of early blocks from a publisher restart bug. The
+// copy kept is the one from the publisher with the most anchors overall (the
+// majority publisher, counted in a first pass); a height that publisher never
+// anchored keeps the newest copy from anyone (arkinox, 2026-10-15).
 // --cyberspace-only keeps a plumbing event (kinds 0, 5, 7, 1111, 10002, 10050,
 // 10063) only when its author has a cyberspace event (3333, 33330, 33331,
 // 11333, 321) or it references one by e/E or a/A: the old relay also holds
@@ -205,7 +208,25 @@ async function compactCmd() {
   const CYBER = new Set([3333, 33330, 33331, 11333, 321])
   const cyberAuthors = new Set()
   const cyberRefs = new Set() // ids and addresses of cyberspace events
-  const anchorKey = (ev) => `321:${ev.pubkey}:${ev.tags.find((t) => t[0] === 'B')?.[1] ?? ''}`
+  const anchorKey = (ev) => `321:${ev.tags.find((t) => t[0] === 'B')?.[1] ?? ''}`
+  // Pass 0, only for anchors: who published the most of them. Its copy of a
+  // height wins over anyone else's.
+  let majority = null
+  if (onePerHeight) {
+    const perPubkey = new Map()
+    for await (const l of lines(inp)) {
+      const ev = JSON.parse(l)
+      if (ev.kind === 321) perPubkey.set(ev.pubkey, (perPubkey.get(ev.pubkey) ?? 0) + 1)
+    }
+    for (const [pk, n] of perPubkey) if (!majority || n > perPubkey.get(majority) || (n === perPubkey.get(majority) && pk < majority)) majority = pk
+    if (majority) console.log(`anchors: majority publisher ${majority} (${perPubkey.get(majority)} of ${[...perPubkey.values()].reduce((a, b) => a + b, 0)} from ${perPubkey.size} publishers)`)
+  }
+  // One anchor per height: the majority publisher's, then the newest, then the lowest id.
+  const anchorBeats = (ev, prev) => {
+    const mine = ev.pubkey === majority
+    if (mine !== (prev.pubkey === majority)) return mine
+    return ev.created_at > prev.created_at || (ev.created_at === prev.created_at && ev.id < prev.id)
+  }
   const keyOf = (ev) => (isAddressable(ev.kind) ? `${ev.kind}:${ev.pubkey}:${dTag(ev)}` : `${ev.kind}:${ev.pubkey}`)
   let total = 0
   for await (const l of lines(inp)) {
@@ -222,8 +243,12 @@ async function compactCmd() {
     if (isReplaceable(ev.kind) || isAddressable(ev.kind) || (onePerHeight && ev.kind === 321)) {
       const key = ev.kind === 321 ? anchorKey(ev) : keyOf(ev)
       const prev = winner.get(key)
-      // NIP-01: newest wins; on a tie, the lowest id.
-      if (!prev || ev.created_at > prev.created_at || (ev.created_at === prev.created_at && ev.id < prev.id)) winner.set(key, { id: ev.id, created_at: ev.created_at })
+      if (ev.kind === 321) {
+        if (!prev || anchorBeats(ev, prev)) winner.set(key, { id: ev.id, created_at: ev.created_at, pubkey: ev.pubkey })
+      } else if (!prev || ev.created_at > prev.created_at || (ev.created_at === prev.created_at && ev.id < prev.id)) {
+        // NIP-01: newest wins; on a tie, the lowest id.
+        winner.set(key, { id: ev.id, created_at: ev.created_at })
+      }
     }
   }
   // Pass 2: write what survives.
