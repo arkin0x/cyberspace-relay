@@ -1,0 +1,15 @@
+{
+  "name": "onosendai-relay-migrate",
+  "private": true,
+  "type": "module",
+  "description": "Copy the cyberspace history to relay.onosendai.tech, and check the relay before clients point at it. See ../RUNBOOK.md.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "migrate": "node migrate.mjs",
+    "acceptance": "node acceptance.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "nostr-tools": "2.17.0"
+  }
+}

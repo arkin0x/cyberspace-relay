@@ -62,13 +62,13 @@ func noteToEvent(note *C.struct_ndb_note) (nostr.Event, error) {
 }
 
 // eventToJSON serializes a Go Event to JSON for feeding into ndb_process_event.
-// nostrdb expects the raw event JSON (not wrapped in ["EVENT", ...]).
+// nostrdb expects the raw event JSON (not wrapped in ["EVENT", ...]), and it
+// recomputes the id from it, so the strings must be escaped exactly as
+// NIP-01 escapes them. json.Marshal escaped &, < and > (\u0026 and so on),
+// nostrdb hashed a different preimage, and dropped the event after the
+// relay had already answered OK (arkinox, 2026-10-15).
 func eventToJSON(evt nostr.Event) (string, error) {
-	data, err := json.Marshal(evt)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal event: %w", err)
-	}
-	return string(data), nil
+	return evt.NIP01JSON(), nil
 }
 
 // noteToEventDirect converts a nostrdb note to Event by reading fields directly.

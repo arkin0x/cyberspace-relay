@@ -35,8 +35,12 @@ protected events refused without AUTH and accepted with it, deletions effective.
    ```
    It installs Docker, opens only SSH, 80 and 443, builds this repo with the
    `onosendai` profile, and starts grain behind Caddy (TLS).
-3. Run the acceptance harness against `wss://relay.onosendai.tech` with a
-   fresh throwaway key before any client points at it.
+3. Run the acceptance check against `wss://relay.onosendai.tech` before any
+   client points at it: `node migrate/acceptance.mjs --target wss://relay.onosendai.tech`.
+
+The whole move, history copy included, is [RUNBOOK.md](RUNBOOK.md); the tools
+are in [migrate/](migrate/) (`migrate.mjs` export, compact, publish, count;
+`acceptance.mjs`).
 
 `GRAIN_OWNER_PUBKEY` claims the relay at first boot, so nobody can claim
 `/setup` before the operator.
