@@ -55,6 +55,27 @@ test('compact applies deletions, keeps the newest replaceable, and one anchor pe
   assert.ok(!one.includes(anc1.id) && one.includes(anc2.id) && one.includes(anc3.id), 'newest anchor per height')
 })
 
+test('one anchor per height prefers the majority publisher across publishers (arkinox, 2026-10-15)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'compact-anc-'))
+  const nth = generateSecretKey(); const stray = generateSecretKey()
+  const ev = (sk, created_at, height) => finalizeEvent({ kind: 321, created_at, tags: [['B', String(height)]], content: '' }, sk)
+  // The majority publisher anchors heights 1 to 3, height 1 twice (the restart bug).
+  const n1a = ev(nth, 10, 1); const n1b = ev(nth, 11, 1); const n2 = ev(nth, 12, 2); const n3 = ev(nth, 13, 3)
+  // Another publisher anchors height 2 later than the majority did, and height 9 alone.
+  const s2 = ev(stray, 99, 2); const s9 = ev(stray, 100, 9)
+  const inp = join(dir, 'events.jsonl')
+  writeFileSync(inp, [n1a, s2, n1b, n2, n3, s9].map((e) => JSON.stringify(e)).join('\n') + '\n')
+  execFileSync('node', ['migrate.mjs', 'compact', '--in', inp, '--out', join(dir, 'out.jsonl'), '--manifest', join(dir, 'm.json'), '--one-anchor-per-height'], { cwd: new URL('.', import.meta.url).pathname, stdio: 'pipe' })
+  const ids = readFileSync(join(dir, 'out.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).id)
+  assert.equal(ids.length, 4, 'one per height: 1, 2, 3, 9')
+  assert.ok(ids.includes(n1b.id) && !ids.includes(n1a.id), 'the majority publisher\'s newest copy of height 1')
+  assert.ok(ids.includes(n2.id) && !ids.includes(s2.id), 'the majority publisher wins height 2 though the other copy is newer')
+  assert.ok(ids.includes(n3.id), 'height 3')
+  assert.ok(ids.includes(s9.id), 'a height only the other publisher anchored is kept')
+  const m = JSON.parse(readFileSync(join(dir, 'm.json'), 'utf8'))
+  assert.equal(m.dropped.duplicate_anchor, 2)
+})
+
 test('compact --cyberspace-only keeps plumbing from cyberspace authors or about cyberspace events', () => {
   const dir = mkdtempSync(join(tmpdir(), 'compact-cs-'))
   const me = generateSecretKey(); const other = generateSecretKey()
