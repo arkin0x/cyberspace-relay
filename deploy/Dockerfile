@@ -34,7 +34,10 @@ RUN mkdir -p www/static/mill \
 RUN mkdir -p docs/openapi && [ -s docs/openapi/swagger.json ] \
     || echo '{"swagger":"2.0","info":{"title":"grain","version":"fork"},"paths":{}}' > docs/openapi/swagger.json
 
-RUN CGO_ENABLED=1 go build -buildvcs=false -o /out/grain .
+# musl gives new threads a small default stack (128 KB); nostrdb's threads overflow it
+# (grain --import segfaulted on the droplet, 2026-11-04). Ask the linker for 8 MB,
+# which musl uses as the default for every thread it creates.
+RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags "-linkmode external -extldflags -Wl,-z,stack-size=8388608" -o /out/grain .
 
 # ── runtime ────────────────────────────────────────────────────────
 FROM alpine:3.20
