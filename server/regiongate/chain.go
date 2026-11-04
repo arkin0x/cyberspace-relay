@@ -13,8 +13,11 @@ const KindMovement = 3333
 
 // ChainRulesRevision names the chain rules this verifier implements (§8.12).
 // A verifier states the revision it runs so that two verifiers that disagree
-// about a chain can see whether they are running the same rules.
-const ChainRulesRevision = "2026-09-28-virtual-brackets"
+// about a chain can see whether they are running the same rules. This is
+// 2026-09-28-virtual-brackets with hop proofs of version 2, residue openings
+// (§5.9 to §5.13): a hop carries its seal in proof and its mn and mp tags, and
+// a version 1 hop stands only when its id is listed in grandfathered-v1-hops.txt.
+const ChainRulesRevision = "2026-10-08-residue-openings"
 
 // Action names (§8.8, DECK-0001, §8.11).
 const (
