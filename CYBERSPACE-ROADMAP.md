@@ -18,7 +18,7 @@ Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/sp
 
 | Step | Status |
 |---|---|
-| Decisions D1 to D7 | open (asked one at a time) |
+| Decisions D1 to D7 | D1 to D5 ruled 2026-11-04 (separate DB per speakeasy; NWC read-only; strict names + reserved; forever; relay owner moderates); D6, D7 open |
 | Verifier current with the chain rules (hop proof v2, epoch 2), golden vectors shared with ONOSENDAI | not started (prerequisite) |
 | Incremental chain cache plus bounded queue | not started |
 | Path routing, per-path NIP-11 and AUTH, separate storage | not started |
@@ -28,6 +28,8 @@ Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/sp
 | ONOSENDAI: show a region's speakeasy and offer to add it | not started |
 
 ## Later
+
+- Region picker: an interface for choosing a speakeasy region without knowing its hex string (owner, 2026-11-04; plan later).
 
 - Payer moderation of their own speakeasy (NIP-86 per path), if D5 allows it.
 - Lifetime or renewal rules for speakeasies (D4).

@@ -68,11 +68,11 @@ Per pubkey, store:
 
 | # | Decision | Options | Recommendation (to argue when asked) |
 |---|---|---|---|
-| D1 | How speakeasy events are kept apart | (a) a separate nostrdb database per speakeasy; (b) one database plus an internal speakeasy tag and index, filtered on every read; (c) a separate grain process per speakeasy | (a): isolation by construction, so no filter can leak; small speakeasies cost little |
-| D2 | How payment is verified | LNURL-verify (LUD-21) on hosaka@getalby.com; NWC to the receiving wallet; Alby webhooks | LNURL-verify if Alby supports it for that address (no wallet secrets on the relay); otherwise NWC with a read-only connection |
-| D3 | Name rules | First paid wins; allowed characters and length; reserved words; can a name change regions | Lowercase letters, digits and dashes, 3 to 40 characters; a reserved list (onosendai, cyberspace, hosaka, admin, api, static...); a name is bound to one region for life |
-| D4 | Lifetime | One payment forever; yearly renewal; forever but purged if unused | Forever for now; revisit if storage grows |
-| D5 | Who runs a speakeasy | Nobody (pure protocol rules); the payer gets moderation (NIP-86 for that path); the relay owner only | The relay owner only at first; payer moderation later |
+| D1 | How speakeasy events are kept apart (**RULED 2026-11-04: separate nostrdb database per speakeasy, opened on demand, closed when idle, capped number open; 1 ingest thread each**) | (a) a separate nostrdb database per speakeasy; (b) one database plus an internal speakeasy tag and index, filtered on every read; (c) a separate grain process per speakeasy | (a): isolation by construction, so no filter can leak; small speakeasies cost little |
+| D2 | How payment is verified (**RULED 2026-11-04: NWC, read-only scope**) | LNURL-verify (LUD-21) on hosaka@getalby.com; NWC to the receiving wallet; Alby webhooks | LNURL-verify if Alby supports it for that address (no wallet secrets on the relay); otherwise NWC with a read-only connection |
+| D3 | Name rules (**RULED 2026-11-04: strict + reserved**) | First paid wins; allowed characters and length; reserved words; can a name change regions | Lowercase letters, digits and dashes, 3 to 40 characters; a reserved list (onosendai, cyberspace, hosaka, admin, api, static...); a name is bound to one region for life |
+| D4 | Lifetime (**RULED 2026-11-04: forever**) | One payment forever; yearly renewal; forever but purged if unused | Forever for now; revisit if storage grows |
+| D5 | Who runs a speakeasy (**RULED 2026-11-04: relay owner only**) | Nobody (pure protocol rules); the payer gets moderation (NIP-86 for that path); the relay owner only | The relay owner only at first; payer moderation later |
 | D6 | Kinds a speakeasy accepts | The relay's whitelist (cyberspace kinds); any kind (as the old `deploy/cyberspace` profile did) | Any kind except the relay's blacklist: a speakeasy is a private room, and chat or notes are its point |
 | D7 | Region string format | A hex prefix as in ONOSENDAI's `/C/`; a full coordinate plus size | Exactly ONOSENDAI's `/C/` prefix form, with shared test vectors |
 
@@ -89,3 +89,15 @@ Per pubkey, store:
 | 7 | ONOSENDAI: show a region's speakeasy and offer to add it as a relay | small |
 
 Each PR gets an independent adversarial review. PR 5 and anything that touches money gets a test with real sats before release.
+
+## Rulings
+
+- **D1 (2026-11-04):** a separate nostrdb database per speakeasy, opened on first use, closed when idle, with a cap on how many are open at once, and 1 ingest thread each. The owner asked about the real cost first: the map size is virtual address space, RAM is only the touched pages (reclaimable file cache), and about 2 threads per open database, so the cost follows activity, not the number sold.
+- **D2 (2026-11-04):** NWC to the HOSAKA wallet, limited to make_invoice and lookup_invoice (no pay permissions). The connection string is a secret on the droplet: stored outside the repo and the data volume's public files, never logged, and rotatable. The relay makes the invoice itself through NWC (not LNURL to hosaka@getalby.com), so it knows the payment hash to look up.
+- **D3 (2026-11-04):** lowercase letters, digits and dashes, 3 to 40 characters; first paid wins; a reserved list (onosendai, cyberspace, hosaka, admin, api, static, and the relay's own paths); a name stays bound to its region for life. A name must not look like a region hex string.
+- **D4 (2026-11-04):** one payment, kept forever. Revisit only if storage becomes a problem.
+- **D5 (2026-11-04):** only the relay owner moderates (NIP-86 and admin, for abuse). Access is otherwise purely by protocol rules. Payer moderation stays a possible later feature.
+
+## Later: a region picker (owner, 2026-11-04)
+
+An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.
