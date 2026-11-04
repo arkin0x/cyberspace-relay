@@ -1,6 +1,6 @@
 # Speakeasies on relay.onosendai.tech: design (2026-11-04)
 
-Status: **idea captured, not started.** The owner's vision is from 2026-11-04. Seven decisions are open (section 6), to be asked one at a time before any build.
+Status: **all 7 decisions ruled 2026-11-04; not started.** The owner's vision is from 2026-11-04. Build starts with the prerequisites (section 5), then the PR plan (section 7).
 
 ## 1. The owner's vision (his words, 2026-11-04)
 
@@ -73,8 +73,8 @@ Per pubkey, store:
 | D3 | Name rules (**RULED 2026-11-04: strict + reserved**) | First paid wins; allowed characters and length; reserved words; can a name change regions | Lowercase letters, digits and dashes, 3 to 40 characters; a reserved list (onosendai, cyberspace, hosaka, admin, api, static...); a name is bound to one region for life |
 | D4 | Lifetime (**RULED 2026-11-04: forever**) | One payment forever; yearly renewal; forever but purged if unused | Forever for now; revisit if storage grows |
 | D5 | Who runs a speakeasy (**RULED 2026-11-04: relay owner only**) | Nobody (pure protocol rules); the payer gets moderation (NIP-86 for that path); the relay owner only | The relay owner only at first; payer moderation later |
-| D6 | Kinds a speakeasy accepts | The relay's whitelist (cyberspace kinds); any kind (as the old `deploy/cyberspace` profile did) | Any kind except the relay's blacklist: a speakeasy is a private room, and chat or notes are its point |
-| D7 | Region string format | A hex prefix as in ONOSENDAI's `/C/`; a full coordinate plus size | Exactly ONOSENDAI's `/C/` prefix form, with shared test vectors |
+| D6 | Kinds a speakeasy accepts (**RULED 2026-11-04: any kind except the relay blacklist**) | The relay's whitelist (cyberspace kinds); any kind (as the old `deploy/cyberspace` profile did) | Any kind except the relay's blacklist: a speakeasy is a private room, and chat or notes are its point |
+| D7 | Region string format (**RULED 2026-11-04: ONOSENDAI's /C/ prefix form, shared test vectors**) | A hex prefix as in ONOSENDAI's `/C/`; a full coordinate plus size | Exactly ONOSENDAI's `/C/` prefix form, with shared test vectors |
 
 ## 7. PR plan (after the decisions)
 
@@ -97,6 +97,8 @@ Each PR gets an independent adversarial review. PR 5 and anything that touches m
 - **D3 (2026-11-04):** lowercase letters, digits and dashes, 3 to 40 characters; first paid wins; a reserved list (onosendai, cyberspace, hosaka, admin, api, static, and the relay's own paths); a name stays bound to its region for life. A name must not look like a region hex string.
 - **D4 (2026-11-04):** one payment, kept forever. Revisit only if storage becomes a problem.
 - **D5 (2026-11-04):** only the relay owner moderates (NIP-86 and admin, for abuse). Access is otherwise purely by protocol rules. Payer moderation stays a possible later feature.
+- **D6 (2026-11-04):** any kind except kinds the relay blocks outright. A speakeasy is a private room, and access is already gated by location.
+- **D7 (2026-11-04):** the region in the URL is exactly ONOSENDAI's `/C/` hex-prefix form, so relay.onosendai.tech/<hex> is the same cube as www.onosendai.tech/C/<hex>. One shared test-vector file keeps the two in step.
 
 ## Later: a region picker (owner, 2026-11-04)
 
