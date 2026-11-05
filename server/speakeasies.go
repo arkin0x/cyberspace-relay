@@ -46,12 +46,12 @@ import (
 // to the root: a client that took /<region> for a speakeasy would post its
 // private room to the public relay.
 
-// speakeasyRegionPath reads a path segment as a region (speakeasy.RegionPath).
-// It stays nil until regiongate.ParseRegionPath merges (the region string
-// parser, with the vectors shared with ONOSENDAI); then it is set to it, and
-// paths are looked up canonically and every entry's cube is checked against
-// its path.
-var speakeasyRegionPath speakeasy.RegionPath
+// speakeasyRegionPath reads a request path as a region:
+// regiongate.ParseRegionPath, with the vectors shared with ONOSENDAI (#18).
+// Every spelling ONOSENDAI reads as a region leads to its speakeasy's one
+// URL, an entry's region is the one its path names, and no name can be a
+// string it reads as a region (ruling D3). Tests may swap it.
+var speakeasyRegionPath speakeasy.RegionPath = speakeasy.ParseRegionPath
 
 // speakeasyRuntime is the open speakeasies of one server instance.
 type speakeasyRuntime struct {
@@ -332,7 +332,7 @@ func (rt *speakeasyRuntime) List([]any) (any, string) {
 
 func (rt *speakeasyRuntime) Add(params []any) (any, string) {
 	if len(params) != 1 {
-		return nil, "params: [{\"id\": <region path>, \"region\": {\"base\": <coord>, \"height\": <H>}}]"
+		return nil, "params: [{\"id\": <region path>}] (the region is the one the path names)"
 	}
 	raw, err := json.Marshal(params[0])
 	if err != nil {

@@ -150,22 +150,28 @@ func (r *Registry) check(e Entry) (*Speakeasy, error) {
 			return nil, fmt.Errorf("name: %w", err)
 		}
 	}
-	box, err := e.Region.Box()
-	if err != nil {
-		return nil, fmt.Errorf("region: %w", err)
-	}
 	fixed := len(e.ID) == fullCoordLen
+	var named PathRegion
 	if r.parse != nil {
-		canonical, named, ok := r.parse("/" + e.ID)
+		canonical, region, ok := r.parse("/" + e.ID)
 		switch {
 		case !ok:
 			return nil, fmt.Errorf("id is not a region path")
 		case canonical != e.ID:
 			return nil, fmt.Errorf("id is not in its canonical spelling %q", canonical)
-		case !sameAxes(box, named) || named.PlaneFixed && box.Base.Plane != named.Base.Plane:
-			return nil, fmt.Errorf("region is not the one the id names")
 		}
-		fixed = named.PlaneFixed
+		named, fixed = region, region.PlaneFixed
+		// The path names the region: an entry may leave it out.
+		if e.Region.Base == "" && e.Region.Height == nil && e.Region.Heights == nil {
+			e.Region = regionJSON(named)
+		}
+	}
+	box, err := e.Region.Box()
+	if err != nil {
+		return nil, fmt.Errorf("region: %w", err)
+	}
+	if r.parse != nil && (!sameAxes(box, named) || named.PlaneFixed && box.Base.Plane != named.Base.Plane) {
+		return nil, fmt.Errorf("region is not the one the id names")
 	}
 	return &Speakeasy{Entry: e, Regions: inPlanes(box, fixed, r.planes)}, nil
 }
@@ -253,7 +259,7 @@ func (r *Registry) Add(e Entry) (*Speakeasy, error) {
 	if err := r.clash(s); err != nil {
 		return nil, err
 	}
-	if err := r.save(append(r.entriesLocked(), e)); err != nil {
+	if err := r.save(append(r.entriesLocked(), s.Entry)); err != nil {
 		return nil, err
 	}
 	r.insert(s)

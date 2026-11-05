@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -73,27 +72,6 @@ func (k key) spawn(t *testing.T) nostr.Event {
 	sx, sy, sz := c.Sector()
 	return k.sign(t, regiongate.KindMovement, "", []string{"A", "spawn"}, []string{"C", k.pub},
 		[]string{"X", sx}, []string{"Y", sy}, []string{"Z", sz}, []string{"S", sx + "-" + sy + "-" + sz})
-}
-
-// cubeOf is the aligned cube of height h holding k's spawn coordinate.
-func cubeOf(t *testing.T, k key, h uint) speakeasy.RegionJSON {
-	t.Helper()
-	c, _ := regiongate.ParseCoord(k.pub)
-	al := func(v *big.Int) *big.Int { return new(big.Int).Lsh(new(big.Int).Rsh(v, h), h) }
-	return speakeasy.RegionJSON{Base: regiongate.Coord{X: al(c.X), Y: al(c.Y), Z: al(c.Z), Plane: c.Plane}.Hex(), Height: &h}
-}
-
-// inside reports whether k's spawn lies in the region in either plane: a
-// speakeasy region spans both (planes: [0, 1]).
-func inside(t *testing.T, k key, r speakeasy.RegionJSON) bool {
-	t.Helper()
-	b, err := r.Box()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, _ := regiongate.ParseCoord(k.pub)
-	c.Plane = b.Base.Plane
-	return regiongate.NewRegions(b).Contains(c)
 }
 
 // ── a websocket client ───────────────────────────────────────────────
@@ -383,12 +361,31 @@ func startRelay(t *testing.T, parse speakeasy.RegionPath, speakeasiesYML string)
 	return r
 }
 
-func (r *relayUnderTest) register(t *testing.T, id string, region speakeasy.RegionJSON) {
+// register adds a speakeasy as the relay owner does, by its path alone: the
+// path names the region.
+func (r *relayUnderTest) register(t *testing.T, id string) {
 	t.Helper()
-	params := map[string]any{"id": id, "region": map[string]any{"base": region.Base, "height": *region.Height}}
-	if _, msg := r.rt.Add([]any{params}); msg != "" {
+	if _, msg := r.rt.Add([]any{map[string]any{"id": id}}); msg != "" {
 		t.Fatalf("register %s: %s", id, msg)
 	}
+}
+
+// inRegion reports whether k's spawn (its pubkey's coordinate) lies in the
+// region a path's string names: its hex starts with the string, on either
+// plane.
+func inRegion(k key, id string) bool { return strings.HasPrefix(k.pub, id) }
+
+// letters reports whether the first n hex characters of k's pubkey are all
+// letters, so that their case can be changed.
+func letters(k key, n int) bool { return strings.Trim(k.pub[:n], "abcdef") == "" }
+
+// pct percent-encodes s's first character, once or twice.
+func pct(s string, double bool) string {
+	e := fmt.Sprintf("%%%02X", s[0])
+	if double {
+		e = "%25" + e[1:]
+	}
+	return e + s[1:]
 }
 
 // storeRoot puts events in the root database (where the gate reads chains)
@@ -431,43 +428,33 @@ func nip11(t *testing.T, url string) (int, map[string]any, http.Header) {
 	return resp.StatusCode, doc, resp.Header
 }
 
-// stubParser stands in for regiongate.ParseRegionPath (cyberspace-relay
-// #18) until it merges: it reads the registered ids, in any case, with or
-// without 0x and trailing slashes, as their regions.
-func stubParser(regions map[string]speakeasy.RegionJSON) speakeasy.RegionPath {
-	return func(path string) (string, speakeasy.PathRegion, bool) {
-		s := strings.ToLower(strings.TrimRight(strings.TrimPrefix(path, "/"), "/"))
-		s = strings.TrimPrefix(s, "0x")
-		r, ok := regions[s]
-		if !ok {
-			return "", speakeasy.PathRegion{}, false
-		}
-		b, _ := r.Box()
-		return s, speakeasy.PathRegion{Base: b.Base, HX: b.HX, HY: b.HY, HZ: b.HZ}, true
-	}
-}
-
 // ── the test ─────────────────────────────────────────────────────────
 
-// Two speakeasies and the root on one relay: A is the cube of height 84
-// around kAB's spawn, B the cube of height 83 inside it. kAB stands in both,
-// kA in A only, kOut in neither. Each step below fails if the behaviour it
-// names is removed.
+// Two speakeasies and the root on one relay, through the real region parser
+// (regiongate.ParseRegionPath): A is the region named by the first hex
+// character of kAB's spawn coordinate (its pubkey), B by the first two, so B
+// lies inside A. kAB stands in both, kA in A only, kOut in neither. Each step
+// below fails if the behaviour it names is removed.
 func TestSpeakeasiesOnOneRelay(t *testing.T) {
-	kAB := newKey(t)
-	regA, regB := cubeOf(t, kAB, 84), cubeOf(t, kAB, 83)
-	var kA, kOut key
-	for kA.pub == "" || !inside(t, kA, regA) || inside(t, kA, regB) {
+	var kAB, kA, kOut key
+	for kAB.pub == "" || !letters(kAB, 2) {
+		kAB = newKey(t)
+	}
+	idA, idB := kAB.pub[:1], kAB.pub[:2]
+	for kA.pub == "" || !inRegion(kA, idA) || inRegion(kA, idB) {
 		kA = newKey(t)
 	}
-	for kOut.pub == "" || inside(t, kOut, regA) {
+	for kOut.pub == "" || inRegion(kOut, idA) {
 		kOut = newKey(t)
 	}
-	const idA, idB = "0a", "0b"
-	parse := stubParser(map[string]speakeasy.RegionJSON{idA: regA, idB: regB})
-	r := startRelay(t, parse, "enabled: true\nmax_open_databases: 1\nmax_connections_per_path: 3\nmap_size_mb: 32\nplanes: [0, 1]\n")
-	r.register(t, idA, regA)
-	r.register(t, idB, regB)
+	r := startRelay(t, speakeasyRegionPath, "enabled: true\nmax_open_databases: 1\nmax_connections_per_path: 3\nmap_size_mb: 32\nplanes: [0, 1]\n")
+	r.register(t, idA)
+	r.register(t, idB)
+	for _, bad := range []string{strings.ToUpper(kAB.pub[:3]), "0x" + kAB.pub[:3], "fiatjafs-speakeasy"} {
+		if _, msg := r.rt.Add([]any{map[string]any{"id": bad}}); msg == "" {
+			t.Fatalf("registered %q: only a canonical region path is an id", bad)
+		}
+	}
 	r.storeRoot(t, kAB.spawn(t), kA.spawn(t), kOut.spawn(t))
 	urlA, urlB := r.wsRoot+"/"+idA, r.wsRoot+"/"+idB
 
@@ -486,18 +473,38 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 		if _, err := dial(t, r.wsRoot+"/abcdef"); err == nil {
 			t.Fatal("a websocket to an unregistered path was served")
 		}
-		// Other spellings of a region: NIP-11 redirects to the one URL,
-		// websocket is refused (its AUTH would name the wrong URL).
-		code, _, h := nip11(t, r.root+"/0X0A/")
-		if code != http.StatusMovedPermanently || h.Get("Location") != "/"+idA {
-			t.Fatalf("other spelling NIP-11: want 301 to /%s, got %d %q", idA, code, h.Get("Location"))
+		// Other spellings of a region (ParseRegionPath: case, 0x, trailing
+		// slashes, one percent-decoding): NIP-11 redirects to the one URL,
+		// a websocket is refused naming it (its AUTH would name the wrong URL).
+		up := strings.ToUpper(idB)
+		mixed := strings.ToUpper(idB[:1]) + idB[1:]
+		for _, sp := range []string{up, mixed, "0x" + idB, "0X" + up, idB + "/", idB + "//", pct(idB, false), "0x" + pct(mixed, false) + "/"} {
+			code, _, h := nip11(t, r.root+"/"+sp)
+			if code != http.StatusMovedPermanently || h.Get("Location") != "/"+idB {
+				t.Fatalf("/%s NIP-11: want 301 to /%s, got %d %q", sp, idB, code, h.Get("Location"))
+			}
+			resp, err := http.DefaultClient.Do(func() *http.Request {
+				q, _ := http.NewRequest(http.MethodGet, r.root+"/"+sp, nil)
+				q.Header.Set("Upgrade", "websocket")
+				q.Header.Set("Connection", "Upgrade")
+				return q
+			}())
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), urlB) {
+				t.Fatalf("/%s websocket: want 400 naming %s, got %d %q", sp, urlB, resp.StatusCode, body)
+			}
+			if _, err := dial(t, r.wsRoot+"/"+sp); err == nil {
+				t.Fatalf("a websocket to /%s was served", sp)
+			}
 		}
-		if _, err := dial(t, r.wsRoot+"/0A"); err == nil {
-			t.Fatal("a websocket to another spelling of a speakeasy was served")
-		}
-		// Matched on the path as sent: what http.ServeMux would clean and
-		// redirect to /0a is not a relay.
-		for _, p := range []string{"//0a", "/x/../0a", "/0a/."} {
+		// Decoded once, as ONOSENDAI decodes once: a double encoding is not
+		// the region. And matched on the path as sent: what http.ServeMux
+		// would clean and redirect to /<id> is not a relay either.
+		for _, p := range []string{"/" + pct(idB, true), "//" + idA, "/x/../" + idA, "/" + idA + "/."} {
 			req, _ := http.NewRequest(http.MethodGet, r.root+"/", nil)
 			req.URL.RawPath, req.URL.Path = p, p
 			req.Header.Set("Accept", "application/nostr+json")

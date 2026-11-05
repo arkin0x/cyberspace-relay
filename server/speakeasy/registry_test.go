@@ -1,6 +1,7 @@
 package speakeasy
 
 import (
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -269,5 +270,101 @@ func TestCheckName(t *testing.T) {
 	}
 	if CheckName("fiatjafs-speakeasy", nil) == nil {
 		t.Fatal("without the region parser no name may be accepted")
+	}
+}
+
+// Through the real parser (regiongate.ParseRegionPath, #18): the owner's
+// example region, owner-written with no cube (the path names it), found by
+// every spelling ONOSENDAI reads as it, under one canonical path.
+func TestRegistryWithParseRegionPath(t *testing.T) {
+	const id = "0fe6b3deeb67e952f852e8c1df15"
+	path := filepath.Join(t.TempDir(), "registry.json")
+	r, _, _ := LoadRegistry(path, ParseRegionPath, both, writeFile)
+	for _, bad := range []string{"0FE6B3DEEB67E952F852E8C1DF15", "0x" + id} {
+		if _, err := r.Add(Entry{ID: bad}); err == nil {
+			t.Fatalf("a non-canonical id %q was registered", bad)
+		}
+	}
+	if _, err := r.Add(Entry{ID: id, Region: cube(t, 1, 40)}); err == nil {
+		t.Fatal("an entry whose region is not its path's was registered")
+	}
+	sp, err := r.Add(Entry{ID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The region is every coordinate whose hex starts with the id, on both
+	// planes (a prefix never fixes the plane).
+	for _, c := range []string{id + strings.Repeat("0", 36), id + strings.Repeat("f", 36), id + strings.Repeat("0", 35) + "1"} {
+		if !sp.Regions.Contains(mustCoord(t, c)) {
+			t.Fatalf("%s is not inside region %s", c, id)
+		}
+	}
+	if sp.Regions.Contains(mustCoord(t, "0fe6b3deeb67e952f852e8c1df16"+strings.Repeat("0", 36))) {
+		t.Fatal("a neighbouring region is inside")
+	}
+	// The derived region is what the registry stores.
+	r2, bad, _ := LoadRegistry(path, ParseRegionPath, both, writeFile)
+	if len(bad) != 0 || r2.Get(id) == nil || r2.Get(id).Region.Base == "" {
+		t.Fatalf("reload: %v %+v", bad, r2.List())
+	}
+
+	pct := func(s string, double bool) string { // percent-encode the first character
+		e := fmt.Sprintf("%%%02X", s[0])
+		if double {
+			e = "%25" + e[1:]
+		}
+		return "/" + e + s[1:]
+	}
+	for _, spelling := range []string{
+		"/" + id, "/" + strings.ToUpper(id), "/0x" + id, "/0X" + strings.ToUpper(id), "/" + id + "/", "/" + id + "///",
+		"/0F" + id[2:], pct(id, false),
+	} {
+		got, canonical := r2.Lookup(spelling)
+		if got == nil || got.ID != id || canonical != "/"+id {
+			t.Fatalf("%s: want %s at /%s, got %v %q", spelling, id, id, got, canonical)
+		}
+	}
+	// Decoded once, as ONOSENDAI decodes once: a double encoding is not the
+	// region, and neither are the paths ServeMux would clean into it.
+	for _, notIt := range []string{pct(id, true), "//" + id, "/x/../" + id, "/" + id + "/.", "/" + id + "0"} {
+		if got, _ := r2.Lookup(notIt); got != nil {
+			t.Fatalf("%s led to the speakeasy", notIt)
+		}
+	}
+}
+
+// Ruling D3 through the real parser: a name must not look like a region.
+func TestCheckNameWithParseRegionPath(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"fiatjafs-speakeasy": true, "gibson-9": true, "chiba-city": true,
+		"cafe": false, "0xabc": false, "deadbeef": false, "abc": false, "0x0fe6": false, "facade": false,
+	} {
+		if err := CheckName(name, ParseRegionPath); (err == nil) != ok {
+			t.Errorf("%q: want accepted %v, got %v", name, ok, err)
+		}
+	}
+}
+
+func mustCoord(t *testing.T, s string) regiongate.Coord {
+	t.Helper()
+	c, err := regiongate.ParseCoord(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Through the real parser, a 64-character region is one gibson on its own
+// plane, even with both planes configured.
+func TestRegistryFullCoordinateWithParseRegionPath(t *testing.T) {
+	full := "0fe6b3deeb67e952f852e8c1df15" + strings.Repeat("0", 35) + "1" // plane 1
+	r, _, _ := LoadRegistry(filepath.Join(t.TempDir(), "registry.json"), ParseRegionPath, both, writeFile)
+	sp, err := r.Add(Entry{ID: full})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := mustCoord(t, full[:63]+"0")
+	if !sp.Regions.Contains(mustCoord(t, full)) || sp.Regions.Contains(other) {
+		t.Fatal("a full coordinate must be its own gibson on its own plane")
 	}
 }

@@ -138,16 +138,18 @@ NIP-86 at `/` (NIP-98 auth, signer = relay owner):
 | Method | Params | Does |
 |---|---|---|
 | `grain_speakeasy_list` | none | every speakeasy, its URL, whether its database is open, its connections |
-| `grain_speakeasy_add` | `[{"id": <region>, "region": {"base": <coord>, "height": H} or {"base", "heights": [hx, hy, hz]}, "name"?, "description"?, "note"?}]` | registers it |
+| `grain_speakeasy_add` | `[{"id": <region string, canonical>, "name"?, "description"?, "note"?}]` | registers it; the path names the region, which the registry stores (an entry may also give `"region": {"base", "heights"}`, which must be that region) |
 | `grain_speakeasy_remove` | `[<id>]` | unregisters it at once (open connections included); its database stays on disk, and adding it again serves it again |
 | `grain_speakeasy_deleteevent` | `[<id>, <event id>]` | deletes one event from that speakeasy (ruling D5) |
 
 They exist (and `supportedmethods` lists them) only while speakeasies are on.
-Each entry's region is checked against its id by the region parser
-(`regiongate.ParseRegionPath`, arkin0x/cyberspace-relay #18) once it is wired
-in `server/speakeasies.go` (`speakeasyRegionPath`); until then a path is
-looked up exactly as spelled and the owner's region is trusted. An entry that
-fails its checks at load is left out and logged; its path is then not a relay.
+Paths are read by `regiongate.ParseRegionPath` (arkin0x/cyberspace-relay #18,
+the vectors shared with ONOSENDAI), given the path as sent: it decodes it
+once, so `/%2530a` (a double encoding) is not region `0a`, while `/0A`,
+`/0x0a`, `/0a/` and `/%30a` are, and are sent to `/0a`. An id must be a
+region string in its canonical spelling, and an entry's region is the one its
+id names. An entry that fails its checks at load is left out and logged; its
+path is then not a relay.
 Names (step 6) are refused for now; `speakeasy.CheckName` is the rule they
 will pass (ruling D3: 3 to 40 of `a-z0-9-`, not reserved, and never a string
 the region parser reads as a region, such as `cafe` or `0xabc`).

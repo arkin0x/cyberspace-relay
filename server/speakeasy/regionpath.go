@@ -66,3 +66,19 @@ func inPlanes(b regiongate.Box, fixed bool, planes []uint) *regiongate.Regions {
 	}
 	return regiongate.NewRegions(boxes...)
 }
+
+// ParseRegionPath is regiongate.ParseRegionPath as a RegionPath: the region
+// string's canonical spelling and its region, for any spelling ONOSENDAI
+// reads as that region (case, 0x, trailing slashes, one percent-decoding).
+func ParseRegionPath(escapedPath string) (string, PathRegion, bool) {
+	r, err := regiongate.ParseRegionPath(escapedPath)
+	if err != nil {
+		return "", PathRegion{}, false
+	}
+	return r.Hex, PathRegion{Base: r.Base, HX: r.HX, HY: r.HY, HZ: r.HZ, PlaneFixed: r.PlaneFixed}, true
+}
+
+// regionJSON is a path region in the registry's form.
+func regionJSON(r PathRegion) RegionJSON {
+	return RegionJSON{Base: r.Base.Hex(), Heights: []uint{r.HX, r.HY, r.HZ}}
+}

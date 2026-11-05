@@ -63,15 +63,23 @@ func TestSpeakeasiesE2E(t *testing.T) {
 	}
 	snap("started")
 
-	// Throwaway keys: kAB stands in every cube around its spawn, kA in A
-	// only, kOut in none of them.
-	kAB := newKey(t)
-	cubes := map[string]uint{"0a": 84, "0b": 83, "0c": 82, "0d": 81, "0e": 80}
-	var kA, kOut key
-	for kA.pub == "" || !inside(t, kA, cubeOf(t, kAB, 84)) || inside(t, kA, cubeOf(t, kAB, 83)) {
+	// Throwaway keys: the five active speakeasies are the regions named by
+	// the first 1 to 5 hex characters of kAB's spawn coordinate (its
+	// pubkey), so kAB stands in all of them; kA stands in A only, kOut in
+	// none.
+	var kAB, kA, kOut key
+	for kAB.pub == "" || !letters(kAB, 2) {
+		kAB = newKey(t)
+	}
+	var active []string
+	for n := 1; n <= 5; n++ {
+		active = append(active, kAB.pub[:n])
+	}
+	idA, idB := active[0], active[1]
+	for kA.pub == "" || !inRegion(kA, idA) || inRegion(kA, idB) {
 		kA = newKey(t)
 	}
-	for kOut.pub == "" || inside(t, kOut, cubeOf(t, kAB, 84)) {
+	for kOut.pub == "" || inRegion(kOut, idA) {
 		kOut = newKey(t)
 	}
 	root := mustDial(t, wsBase)
@@ -85,13 +93,13 @@ func TestSpeakeasiesE2E(t *testing.T) {
 	if _, msg := nip86(t, base, kOut, "grain_speakeasy_list", nil); !strings.Contains(msg, "403") {
 		t.Fatalf("a non-owner listed speakeasies: %q", msg)
 	}
-	for id, h := range cubes {
-		r := cubeOf(t, kAB, h)
-		if _, msg := nip86(t, base, owner, "grain_speakeasy_add", map[string]any{"id": id, "region": map[string]any{"base": r.Base, "height": h}}); msg != "" {
+	for _, id := range active {
+		if _, msg := nip86(t, base, owner, "grain_speakeasy_add", map[string]any{"id": id}); msg != "" {
 			t.Fatalf("register %s: %s", id, msg)
 		}
 	}
-	urlA, urlB := wsBase+"/0a", wsBase+"/0b"
+	urlA, urlB := wsBase+"/"+idA, wsBase+"/"+idB
+	t.Logf("REGIONS A /%s, B /%s (registered by path alone; the parser names the region)", idA, idB)
 
 	t.Run("admission", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -185,6 +193,19 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		} else {
 			t.Logf("REPLAY a spent AUTH for A on a second connection to A: refused %q", msg)
 		}
+		for _, sp := range []string{strings.ToUpper(idB), "0X" + strings.ToUpper(idB) + "/", "%" + fmt.Sprintf("%02X", idB[0]) + idB[1:]} {
+			code, _, h := nip11(t, base+"/"+sp)
+			if code != http.StatusMovedPermanently || h.Get("Location") != "/"+idB {
+				t.Fatalf("/%s: want 301 to /%s, got %d", sp, idB, code)
+			}
+			if _, err := dial(t, wsBase+"/"+sp); err == nil {
+				t.Fatalf("websocket to /%s served", sp)
+			}
+			t.Logf("SPELLING /%s: NIP-11 301 to /%s; websocket refused", sp, idB)
+		}
+		if code, _, _ := nip11(t, base+"/"+pct(idB, true)); code != 404 {
+			t.Fatalf("double encoding /%s: %d", pct(idB, true), code)
+		}
 		if code := status(t, base+"/abcdef", true); code != 404 {
 			t.Fatalf("unregistered path: %d", code)
 		}
@@ -194,14 +215,15 @@ func TestSpeakeasiesE2E(t *testing.T) {
 	})
 
 	t.Run("resource bounds: 100 registered, 5 active", func(t *testing.T) {
-		for i := 0; i < 95; i++ {
-			id := fmt.Sprintf("%04x", 0x1000+i)
-			h := uint(60)
-			c := key{pub: fmt.Sprintf("%064x", 0x1000+i)}
-			r := cubeOf(t, c, h)
-			if _, msg := nip86(t, base, owner, "grain_speakeasy_add", map[string]any{"id": id, "region": map[string]any{"base": r.Base, "height": h}}); msg != "" {
+		for i, added := 0, 0; added < 95; i++ {
+			id := fmt.Sprintf("%06x", 0x100000+i)
+			if strings.HasPrefix(kAB.pub, id) {
+				continue
+			}
+			if _, msg := nip86(t, base, owner, "grain_speakeasy_add", map[string]any{"id": id}); msg != "" {
 				t.Fatalf("register %s: %s", id, msg)
 			}
+			added++
 		}
 		list, _ := nip86(t, base, owner, "grain_speakeasy_list", nil)
 		if n := len(list.(map[string]any)["speakeasies"].([]any)); n != 100 {
@@ -214,7 +236,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		start := time.Now()
 		busy := 0
 		for round := 0; round < 4; round++ {
-			for id := range cubes {
+			for _, id := range active {
 				url := wsBase + "/" + id
 				c := mustDial(t, url)
 				c.auth(kAB, url, c.challenge)
