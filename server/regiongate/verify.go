@@ -147,8 +147,9 @@ type Verdict struct {
 	PositionEvent string
 	// VerifiedPosition is the position after the longest prefix of the
 	// chain whose every proof the checker verified, and VerifiedEvent the id
-	// of that prefix's last event. With PendingSpec this is the spawn point,
-	// unless the chain carries no proof-bearing action at all.
+	// of that prefix's last event. With a checker that judges nothing
+	// (PendingSpec) this is the spawn point, unless the chain carries no
+	// proof-bearing action at all.
 	VerifiedPosition *Coord
 	VerifiedEvent    string
 	// Head is the id of the active chain's last event, valid or not, which

@@ -8,11 +8,21 @@
 
 enabled: true
 
-# structural: position = chain head; signatures, links, coordinates and
-#   virtual brackets are checked, work proofs are not (yet).
-# strict: position = last proof-verified event. Until the chain-verification
-#   spec is ratified no proof is verified, so this is the spawn point.
-mode: structural
+# Both modes check every chain rule and every work proof at Level 1 (chain
+# rules revision 2026-10-08-residue-openings). They differ only on a proof the
+# gate cannot judge: a ride (no Bitcoin line is configured yet) or a hop taller
+# than max_hop_verify_height.
+# strict (default): such a proof is not trusted; position = the last event
+#   before it. An identity that rode since its last spawn stands where it
+#   boarded.
+# structural: such a proof is trusted; position = chain head (or the frozen
+#   position of an invalid chain). With no line, a ride lands wherever its C
+#   says, so do not run a speakeasy in this mode.
+mode: strict
+
+# The tallest hop (h_max) whose proof is checked; Level 1 costs about 2^h_max
+# word additions per sampled residue. Default 32.
+# max_hop_verify_height: 32
 
 # Speakeasy (default true): reading also requires NIP-42 AUTH as a pubkey
 # inside the region (REQ, COUNT and live events), and every HTTP route except

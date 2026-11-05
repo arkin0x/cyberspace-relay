@@ -2,11 +2,11 @@
 // movement chain places them inside the relay's configured region.
 //
 // The gate resolves each author's active chain (CYBERSPACE_V2 §8.7.3),
-// checks it structurally under the chain rules of ChainRulesRevision
-// (signatures, links, coordinates, skipped actions per §8.9, virtual brackets
-// per §8.11) and asks a ProofChecker about the work proofs. Until a checker
-// for those proofs is built, the only ProofChecker is PendingSpec, which
-// checks no proofs; see verify.go and docs/region-gate.md.
+// checks it under the chain rules of ChainRulesRevision (signatures, links,
+// coordinates, skipped actions per §8.9, virtual brackets per §8.11) and asks
+// a ProofChecker about the work proofs: SpecProofs, which checks every hop,
+// sidestep, boarding and ride at Level 1 (proofs.go, residue.go); see
+// verify.go and docs/region-gate.md.
 package regiongate
 
 import (

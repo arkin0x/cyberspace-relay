@@ -1,7 +1,7 @@
 # Cyberspace region relay. Set regions before deploying: with none, the gate
 # refuses every event (fail closed). See docs/region-gate.md for the forms.
 enabled: true
-mode: structural
+mode: strict # every proof checked; a ride is not trusted until a Bitcoin line is configured
 gate_reads: true # speakeasy: reading needs AUTH as a pubkey inside the region
 regions: []
 chain_relays:

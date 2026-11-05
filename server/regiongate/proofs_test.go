@@ -1,6 +1,11 @@
 package regiongate
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -127,5 +132,92 @@ func TestEmbeddedExemptionLists(t *testing.T) {
 		if len(want.list) != want.n || want.id != "" && !want.list[want.id] {
 			t.Errorf("%s: %d ids, want %d", name, len(want.list), want.n)
 		}
+	}
+}
+
+// seededTree builds the seeded Merkle tree of one sidestep axis (§6.4, §6.5)
+// over the leaves base .. base + 2^h - 1, levels from the leaves up, and
+// returns its root and a function giving a leaf's path.
+func seededTree(prefix []byte, base int64, h int) ([]byte, func(int) []string) {
+	level := make([][]byte, 1<<h)
+	for i := range level {
+		level[i] = sidestepLeaf(prefix, big.NewInt(base+int64(i)))
+	}
+	levels := [][][]byte{level}
+	for len(level) > 1 {
+		next := make([][]byte, len(level)/2)
+		for i := range next {
+			s := sha256.Sum256(append(append([]byte{}, level[2*i]...), level[2*i+1]...))
+			next[i] = s[:]
+		}
+		levels, level = append(levels, next), next
+	}
+	return level[0], func(i int) []string {
+		var path []string
+		for _, lv := range levels[:len(levels)-1] {
+			path = append(path, hex.EncodeToString(lv[i^1]))
+			i >>= 1
+		}
+		return path
+	}
+}
+
+// A sidestep whose openings are true for the G its nonce gives, but whose G
+// misses the re-roll price, is invalid (§6.10, §8.7.2 step 4): the price is
+// what makes redrawing the samples cost work. The same sidestep with a
+// nonce that pays is valid. Built here from scratch, z crossing one wall at
+// height 4 (7 to 8), x and y still.
+func TestSidestepThatMissesThePriceIsInvalid(t *testing.T) {
+	prev := bytes.Repeat([]byte{0x5a}, 32)
+	x, y := big.NewInt(1<<40), big.NewInt(3<<40)
+	from := packCoord(x, y, big.NewInt(7), 0)
+	to := packCoord(x, y, big.NewInt(8), 0)
+	prefix := func(axis byte) []byte {
+		return append(append(append(append([]byte{}, sidestepDomain...), prev...), axis), make([]byte, 9)...)
+	}
+	mx, my := sidestepLeaf(prefix(0), x), sidestepLeaf(prefix(1), y)
+	mz, path := seededTree(prefix(2), 0, 4)
+	price := big.NewInt(2) // ceil(16 leaves / 8)
+	build := func(wantPaid bool) Move {
+		for nonce := uint64(0); ; nonce++ {
+			var nb [8]byte
+			binary.BigEndian.PutUint64(nb[:], nonce)
+			g := sha256.New()
+			g.Write(sidestepGrindDomain)
+			g.Write(nb[:])
+			g.Write(prev)
+			g.Write(mx)
+			g.Write(my)
+			g.Write(mz)
+			G := g.Sum(nil)
+			if meetsPrice(G, price) != wantPaid {
+				continue
+			}
+			segment := strings.Join(path(8), "")
+			for i := 0; i < sidestepSamples; i++ {
+				var ib [4]byte
+				binary.BigEndian.PutUint32(ib[:], uint32(i))
+				s := sha256.Sum256(append(append(append(append([]byte{}, sidestepSampleDomain...), G...), 2), ib[:]...))
+				segment += strings.Join(path(int(new(big.Int).Mod(new(big.Int).SetBytes(s[:]), big.NewInt(16)).Int64())), "")
+			}
+			m := [3]*big.Int{new(big.Int).SetBytes(mx), new(big.Int).SetBytes(my), new(big.Int).SetBytes(mz)}
+			region := cantorPair(new(big.Int), cantorPair(new(big.Int), m[0], m[1]), m[2])
+			toCoord, _ := ParseCoord(hex.EncodeToString(to[:]))
+			proof := doubleSHA256Hex(cantorPair(new(big.Int), region, temporalCantor(prev, terrainK(toCoord))))
+			evt := nostr.Event{ID: strings.Repeat("2", 64), Kind: KindMovement, Tags: [][]string{
+				{"A", "sidestep"}, {"e", strings.Repeat("0", 64), "", "genesis"}, {"e", hex.EncodeToString(prev), "", "previous"},
+				{"c", hex.EncodeToString(from[:])}, {"C", hex.EncodeToString(to[:])}, {"proof", proof},
+				{"mr", hex.EncodeToString(mx) + ":" + hex.EncodeToString(my) + ":" + hex.EncodeToString(mz)},
+				{"mp", "::" + segment}, {"mn", hex.EncodeToString(nb[:])}, {"hx", "0"}, {"hy", "0"}, {"hz", "4"},
+			}}
+			mv, _ := ParseMove(evt)
+			return mv
+		}
+	}
+	if why := verifySidestep(build(true)); why != "" {
+		t.Fatalf("a sidestep that pays its price: %s", why)
+	}
+	if why := verifySidestep(build(false)); !strings.HasPrefix(why, "mn:") {
+		t.Fatalf("a sidestep whose nonce misses the price: want an mn failure, got %q", why)
 	}
 }
