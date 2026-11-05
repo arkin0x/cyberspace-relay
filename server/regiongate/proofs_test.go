@@ -467,7 +467,7 @@ func TestLongComputationsStopOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	residueRootCtx(ctx, big.NewInt(0), 28, hopPrime(make([]byte, 32), 0))
+	residueRootCtx(ctx, big.NewInt(0), 32, hopPrime(make([]byte, 32), 0)) // seconds if it ran
 	if subtreeCantorCtx(ctx, big.NewInt(0), 22) != nil {
 		t.Fatal("a canceled exact tree returned a root")
 	}
