@@ -73,10 +73,24 @@ client could claim any address.
 
 ## Update
 
+One sequence, in this order:
+
 ```sh
-cd /opt/cyberspace-relay && git pull --ff-only && git submodule update --init --recursive
-GRAIN_OWNER_PUBKEY=<operator npub> docker compose -f deploy/onosendai/docker-compose.yml up -d --build
+cd /opt/cyberspace-relay && git pull --ff-only
+
+# 1. Preflight, on the first deploy with the trusted-proxy compose file (see
+#    "Trusted proxy" above): nothing else may use 172.30.0.0/24. If anything
+#    listed here overlaps it, stop and change the range first.
+docker network inspect $(docker network ls -q) | grep -i subnet
+ip route
+
+# 2. Submodules, then 3. the build, which runs only if step 2 succeeded.
+sh deploy/onosendai/sync-submodules.sh \
+  && GRAIN_OWNER_PUBKEY=<operator npub> docker compose -f deploy/onosendai/docker-compose.yml up -d --build
 ```
+
+`sync-submodules.sh` syncs submodule URLs from `.gitmodules`, updates them, and
+stops (so nothing is built) unless nostrdb is at the commit this checkout pins.
 
 The profile's files seed the data volume only on first boot; after that, edit
 `config.yml` and `whitelist.yml` on the volume (or through `/admin`).

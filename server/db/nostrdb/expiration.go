@@ -144,6 +144,10 @@ func (db *NDB) trackIfExpiring(evt nostr.Event) {
 	db.expiration.Track(ts, id32)
 }
 
+// bootstrapPageSize is how many events one BootstrapExpirations page asks
+// for. A variable only so tests can cross page boundaries with a few events.
+var bootstrapPageSize = 5000
+
 // BootstrapExpirations scans the DB once at startup, deletes any events
 // whose expiration has already passed, and populates the in-memory heap
 // with the rest. Pages backwards through created_at to cover the whole
@@ -156,12 +160,12 @@ func (db *NDB) BootstrapExpirations() error {
 	logger := log.DBPurge()
 	logger.Info("Bootstrapping NIP-40 expiration heap")
 
-	const pageSize = 5000
+	pageSize := bootstrapPageSize
 	started := time.Now()
 	now := time.Now().Unix()
+	cursor := NewPageCursor(nil)
 
 	var (
-		until      *time.Time
 		scanned    int
 		tracked    int
 		expiredDel int
@@ -170,26 +174,19 @@ func (db *NDB) BootstrapExpirations() error {
 
 	for {
 		limit := pageSize
-		filter := nostr.Filter{Limit: &limit}
-		if until != nil {
-			filter.Until = until
-		}
+		filter := nostr.Filter{Limit: &limit, Until: cursor.Until()}
 
 		events, err := db.Query([]nostr.Filter{filter}, pageSize)
 		if err != nil {
 			return err
 		}
-		if len(events) == 0 {
-			break
+		fresh, more := cursor.Next(events, pageSize)
+		if len(events) > 0 {
+			pages++
 		}
-		pages++
-		scanned += len(events)
+		scanned += len(fresh)
 
-		oldestTs := events[0].CreatedAt
-		for _, evt := range events {
-			if evt.CreatedAt < oldestTs {
-				oldestTs = evt.CreatedAt
-			}
+		for _, evt := range fresh {
 			ts, ok := expirationFromTags(evt.Tags)
 			if !ok {
 				continue
@@ -214,12 +211,13 @@ func (db *NDB) BootstrapExpirations() error {
 			tracked++
 		}
 
-		if len(events) < pageSize {
+		if !more {
 			break
 		}
-		// Page back: anything strictly older than the oldest we just saw.
-		u := time.Unix(oldestTs-1, 0)
-		until = &u
+	}
+	if cursor.Crowded {
+		logger.Warn("A second filled a whole bootstrap page; expirations in it may be missed",
+			"page_size", pageSize)
 	}
 
 	logger.Info("Bootstrap complete",

@@ -300,56 +300,43 @@ func areFiltersIdentical(filters1, filters2 []nostr.Filter) bool {
 	return hash1 == hash2
 }
 
+// textSearchPageSize is nostrdb's 128-result-per-call fulltext cap. A
+// variable only so tests can cross page boundaries with a few events.
+var textSearchPageSize = 128
+
 // pagedTextSearch runs the NIP-50 search on `f` and pages through the
 // nostrdb 128-result-per-call cap until either the effective REQ limit
-// is filled, the search is exhausted, or the filter's Since bound is
-// crossed. Same Until-cursor pattern as CountFiltered and the
-// expiration bootstrap; same same-second-tie undercount caveat.
+// is filled or the search is exhausted. Same nostrdb.PageCursor as
+// CountFiltered and the expiration bootstrap, so events sharing a second
+// across a page boundary are neither skipped nor sent twice.
 func pagedTextSearch(db *nostrdb.NDB, f nostr.Filter, effectiveLimit int) ([]nostr.Event, error) {
-	const pageSize = 128
+	pageSize := textSearchPageSize
 	remaining := effectiveLimit
 	if f.Limit != nil && *f.Limit > 0 && *f.Limit < remaining {
 		remaining = *f.Limit
 	}
 
 	var acc []nostr.Event
-	cursor := f.Until
+	cursor := nostrdb.NewPageCursor(f.Until)
 	for remaining > 0 {
 		page := f
-		page.Until = cursor
+		page.Until = cursor.Until()
 
-		want := pageSize
-		if remaining < want {
-			want = remaining
-		}
-		events, err := db.TextSearch(f.Search, page, want)
+		// Always ask for a whole page: the cursor can only tell a page that
+		// ran out of matches from one that was cut short when it is full.
+		events, err := db.TextSearch(f.Search, page, pageSize)
 		if err != nil {
 			return nil, err
 		}
-		if len(events) == 0 {
+		fresh, more := cursor.Next(events, pageSize)
+		if len(fresh) > remaining {
+			fresh = fresh[:remaining]
+		}
+		acc = append(acc, fresh...)
+		remaining -= len(fresh)
+		if !more {
 			break
 		}
-		acc = append(acc, events...)
-		remaining -= len(events)
-
-		if len(events) < pageSize {
-			break
-		}
-
-		// Advance cursor strictly older than the oldest result on this
-		// page. nostrdb returns newest-first per the descending order
-		// we set in TextSearch.
-		oldestTs := events[0].CreatedAt
-		for _, e := range events {
-			if e.CreatedAt < oldestTs {
-				oldestTs = e.CreatedAt
-			}
-		}
-		next := time.Unix(oldestTs-1, 0)
-		if f.Since != nil && !next.After(*f.Since) {
-			break
-		}
-		cursor = &next
 	}
 	return acc, nil
 }

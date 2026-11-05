@@ -1,4 +1,4 @@
 [submodule "server/db/nostrdb/c/nostrdb"]
 	path = server/db/nostrdb/c/nostrdb
-	url = https://github.com/0ceanSlim/nostrdb.git
-	branch = master
+	url = https://github.com/arkin0x/nostrdb.git
+	branch = cyberspace/inclusive-until
