@@ -1,6 +1,7 @@
 package regiongate
 
 import (
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/binary"
@@ -40,15 +41,23 @@ type SpecProofs struct {
 	ListedV1Hops map[string]bool
 }
 
-// DefaultMaxHopHeight is the reference's MAX_VERIFY_HEIGHT: Level 1 of a
-// hop costs about 2^h_max word additions per root and sample.
-const DefaultMaxHopHeight = 32
+// DefaultMaxHopHeight is the tallest h_max verified unless configured: Level
+// 1 of a hop costs about 2^h_max word additions per root and sample, about
+// 0.7 s on one core at h24 with three tall axes. It stays at 24 until the
+// incremental chain cache (speakeasy design, PR 2) means a re-sent tall hop
+// is not checked again; the reference's ceiling is 32 and HOSAKA sells hops
+// up to h30. The owner decides the final value.
+const DefaultMaxHopHeight = 24
+
+// MaxHopVerifyHeightLimit is the highest ceiling allowed: above h65 the
+// residue count m (§5.9) no longer fits 64 bits.
+const MaxHopVerifyHeightLimit = 65
 
 // Check implements ProofChecker.
-func (s SpecProofs) Check(prev, cur Move) (ProofResult, string) {
+func (s SpecProofs) Check(ctx context.Context, prev, cur Move) (ProofResult, string) {
 	switch cur.Action {
 	case ActHop:
-		return s.hop(cur)
+		return s.hop(ctx, cur)
 	case ActSidestep:
 		if why := verifySidestep(cur); why != "" {
 			return ProofInvalid, ReasonSidestepProof + ": " + why
@@ -61,12 +70,12 @@ func (s SpecProofs) Check(prev, cur Move) (ProofResult, string) {
 		if s.Line == nil {
 			return ProofUnchecked, "no line: a ride needs Bitcoin's block data (DECK-0001 §5.5)"
 		}
-		return checkRide(s.Line, prev, cur)
+		return checkRide(ctx, s.Line, prev, cur)
 	}
 	return ProofVerified, ""
 }
 
-func (s SpecProofs) hop(cur Move) (ProofResult, string) {
+func (s SpecProofs) hop(ctx context.Context, cur Move) (ProofResult, string) {
 	listed := ListedV1Hops
 	if s.ListedV1Hops != nil {
 		listed = s.ListedV1Hops
@@ -89,7 +98,7 @@ func (s SpecProofs) hop(cur Move) (ProofResult, string) {
 	if ceiling == 0 {
 		ceiling = DefaultMaxHopHeight
 	}
-	why, err := verifyHopLevel1(prev, from, to, tagValues(cur.Event, "proof")[0], first(mn), first(mp), ceiling)
+	why, err := verifyHopLevel1(ctx, prev, from, to, tagValues(cur.Event, "proof")[0], first(mn), first(mp), ceiling)
 	var tall ErrHopTooTall
 	if errors.As(err, &tall) {
 		return ProofUnchecked, err.Error()
@@ -184,6 +193,9 @@ func verifySidestep(cur Move) string {
 	}
 	if mn := tagValues(cur.Event, "mn"); len(mn) == 0 {
 		if !ListedV2Sidesteps[cur.Event.ID] {
+			if sidestepVersion1(tagValues(cur.Event, "mp")[0], heights) {
+				return "mn: missing; a version 1 sidestep (one opening path per axis), invalid since 2026-09-07 (spec §6.15)"
+			}
 			return "mn: missing; a version 2 sidestep not listed in grandfathered-v2-sidesteps.txt (6.16)"
 		}
 	} else if why := sidestepOpenings(prev, src, dst, heights, roots, mn[0], tagValues(cur.Event, "mp")[0]); why != "" {
@@ -200,6 +212,27 @@ func verifySidestep(cur Move) string {
 		return "proof: does not match the proof hash of the claimed roots (6.8)"
 	}
 	return ""
+}
+
+// sidestepVersion1 reports whether a sidestep's mp carries version 1
+// openings (§6.15): one path of h siblings on every axis that moves, where
+// versions 2 and 3 carry nine.
+func sidestepVersion1(mp string, heights [3]int) bool {
+	segments := strings.Split(mp, ":")
+	if len(segments) != 3 {
+		return false
+	}
+	moved := false
+	for i, h := range heights {
+		if h == 0 {
+			continue
+		}
+		moved = true
+		if len(segments[i]) != 64*h {
+			return false
+		}
+	}
+	return moved
 }
 
 func sidestepOpenings(prev []byte, src, dst [3]*big.Int, heights [3]int, roots [3][]byte, mn, mp string) string {
@@ -433,7 +466,7 @@ var (
 // the line and from_height is the station within it (DECK-0001 §4.2, §4.3);
 // then C is the stop of B (§5.5 Level 1 step 2); then the proof (§5.5, §5.8).
 // The walk has already checked everything that reads only tags.
-func checkRide(line Line, look, cur Move) (ProofResult, string) {
+func checkRide(ctx context.Context, line Line, look, cur Move) (ProofResult, string) {
 	from, _ := onlyDecimal(cur.Event, "from_height")
 	to, _ := onlyDecimal(cur.Event, "B")
 	tip := new(big.Int).SetUint64(line.Tip())
@@ -454,7 +487,7 @@ func checkRide(line Line, look, cur Move) (ProofResult, string) {
 	if stop, ok := line.Stop(to.Uint64()); !ok || stop != cur.To {
 		return ProofInvalid, fmt.Sprintf("%s: C is not the stop coordinate of block %s", ReasonHyperjumpStop, to)
 	}
-	if why := verifyRideProof(line, cur, from.Uint64(), to.Uint64()); why != "" {
+	if why := verifyRideProof(ctx, line, cur, from.Uint64(), to.Uint64()); why != "" {
 		return ProofInvalid, ReasonHyperjumpProof + ": " + why
 	}
 	return ProofVerified, ""
@@ -462,7 +495,7 @@ func checkRide(line Line, look, cur Move) (ProofResult, string) {
 
 // verifyRideProof is Level 1 of a ride's openings (DECK-0001 §5.5 steps 3
 // to 6, verify_ride_event). Both heights are on the line.
-func verifyRideProof(line Line, cur Move, fromH, toH uint64) string {
+func verifyRideProof(ctx context.Context, line Line, cur Move, fromH, toH uint64) string {
 	mn := tagValues(cur.Event, "mn")
 	if len(mn) == 0 {
 		if !ListedV1Rides[cur.Event.ID] {
@@ -502,7 +535,11 @@ func verifyRideProof(line Line, cur Move, fromH, toH uint64) string {
 	h = sha256.New()
 	h.Write(hyperspaceGrindDomain)
 	h.Write(seed)
-	h.Write(bytesMin(subtreeCantor(aligned(gBase, rideGrindHeight), rideGrindHeight)))
+	cantorG := subtreeCantorCtx(ctx, aligned(gBase, rideGrindHeight), rideGrindHeight)
+	if cantorG == nil {
+		return "canceled"
+	}
+	h.Write(bytesMin(cantorG))
 	G := h.Sum(nil)
 	price := big.NewInt(int64((n + rideSamples - 1) / rideSamples))
 	if price.Sign() == 0 {
@@ -525,7 +562,11 @@ func verifyRideProof(line Line, cur Move, fromH, toH uint64) string {
 		if !ok {
 			return fmt.Sprintf("block %d has no hash on the line", b)
 		}
-		if !climbs(rideLeaf(prev, b, hash), idx, paths[i], root) {
+		leaf := rideLeaf(ctx, prev, b, hash)
+		if leaf == nil {
+			return "canceled"
+		}
+		if !climbs(leaf, idx, paths[i], root) {
 			return fmt.Sprintf("mp: sample %d (block %d) does not reach the root", i, b)
 		}
 	}
@@ -534,7 +575,7 @@ func verifyRideProof(line Line, cur Move, fromH, toH uint64) string {
 
 // rideLeaf is block b's leaf (DECK-0001 §5.3): a Cantor tree of height
 // K_b + 6 seeded by the rider's previous event id and b.
-func rideLeaf(prev []byte, b uint64, blockHash []byte) []byte {
+func rideLeaf(ctx context.Context, prev []byte, b uint64, blockHash []byte) []byte {
 	d := sha256.Sum256(append(append([]byte{}, hyperspaceTerrainDomain...), blockHash...))
 	height := bits.OnesCount16(uint16(d[0])<<8|uint16(d[1])) + kLine
 	var bb [8]byte
@@ -545,9 +586,13 @@ func rideLeaf(prev []byte, b uint64, blockHash []byte) []byte {
 	s.Write(bb[:])
 	t := new(big.Int).SetBytes(s.Sum(nil))
 	t.And(t, axisMask)
+	cantor := subtreeCantorCtx(ctx, aligned(t, height), height)
+	if cantor == nil {
+		return nil
+	}
 	leaf := sha256.New()
 	leaf.Write(hyperspaceLeafDomain)
 	leaf.Write(bb[:])
-	leaf.Write(bytesMin(subtreeCantor(aligned(t, height), height)))
+	leaf.Write(bytesMin(cantor))
 	return leaf.Sum(nil)
 }

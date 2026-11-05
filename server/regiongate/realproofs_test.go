@@ -1,6 +1,7 @@
 package regiongate
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"sort"
@@ -54,7 +55,7 @@ func TestRealProofs(t *testing.T) {
 		}
 		m, _ := ParseMove(r.Event)
 		start := time.Now()
-		res, why := checker.Check(Move{}, m)
+		res, why := checker.Check(context.Background(), Move{}, m)
 		costs = append(costs, cost{r.Action, r.HMax, time.Since(start)})
 		if got := res == ProofVerified; got != r.OK {
 			t.Errorf("%s %s: gate says %v (%s), the reference %v %v", r.Action, r.Event.ID, got, why, r.OK, r.Failures)

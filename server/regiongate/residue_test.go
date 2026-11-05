@@ -1,6 +1,7 @@
 package regiongate
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
@@ -179,7 +180,7 @@ func TestResidueProverValues(t *testing.T) {
 		if G := hopAttempt(prev, mustHex(t, p.Tags.Proof), p.Nonce); hex.EncodeToString(G) != p.G || !meetsPrice(G, g.price) {
 			t.Errorf("%s: G %x, want %s meeting the price", p.Name, G, p.G)
 		}
-		why, err := verifyHopLevel1(prev, from, to, p.Tags.Proof, p.Tags.Mn, p.Tags.Mp, 32)
+		why, err := verifyHopLevel1(context.Background(), prev, from, to, p.Tags.Proof, p.Tags.Mn, p.Tags.Mp, 32)
 		if why != "" || err != nil {
 			t.Errorf("%s: Level 1 rejects the prover's own tags: %s %v", p.Name, why, err)
 		}
@@ -190,7 +191,7 @@ func TestResidueVerifierVerdicts(t *testing.T) {
 	rv := loadResidueVectors(t)
 	for _, v := range rv.Verifier {
 		prev := mustHex(t, v.PreviousEventID)
-		why, err := verifyHopLevel1(prev, mustCoord(t, v.C1), mustCoord(t, v.C2), v.Tags["proof"], v.Tags["mn"], v.Tags["mp"], 32)
+		why, err := verifyHopLevel1(context.Background(), prev, mustCoord(t, v.C1), mustCoord(t, v.C2), v.Tags["proof"], v.Tags["mn"], v.Tags["mp"], 32)
 		if err != nil {
 			t.Fatalf("%s: %v", v.Name, err)
 		}

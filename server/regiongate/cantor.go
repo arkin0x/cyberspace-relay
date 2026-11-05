@@ -1,6 +1,7 @@
 package regiongate
 
 import (
+	"context"
 	"crypto/sha256"
 	"math/big"
 	"math/bits"
@@ -31,6 +32,12 @@ var bigOne = big.NewInt(1)
 // (height K, at most 16) and the leaves and attempt of a ride (at most 22,
 // DECK-0001 §5.3).
 func subtreeCantor(base *big.Int, height int) *big.Int {
+	return subtreeCantorCtx(context.Background(), base, height)
+}
+
+// subtreeCantorCtx is subtreeCantor that gives up, returning nil, once ctx
+// ends: a ride leaf at h22 takes about a minute.
+func subtreeCantorCtx(ctx context.Context, base *big.Int, height int) *big.Int {
 	if height == 0 {
 		return new(big.Int).Set(base)
 	}
@@ -41,6 +48,9 @@ func subtreeCantor(base *big.Int, height int) *big.Int {
 	stack := make([]node, 0, height+1)
 	leaf := new(big.Int).Set(base)
 	for i := 0; i < 1<<height; i++ {
+		if i&1023 == 1023 && ctx.Err() != nil {
+			return nil
+		}
 		cur, level := new(big.Int).Set(leaf), 0
 		for len(stack) > 0 && stack[len(stack)-1].level == level {
 			left := stack[len(stack)-1].v

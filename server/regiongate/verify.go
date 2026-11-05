@@ -1,6 +1,7 @@
 package regiongate
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -45,8 +46,11 @@ const (
 // With ProofInvalid, the string starts with the code of the rule broken, one
 // of the proof codes in Reasons, optionally followed by ": " and a detail. A
 // string with no proof code is reported under the action's proof code.
+//
+// ctx bounds the work: a checker returns promptly once it is done, with any
+// result, which the verifier then discards (VerifyContext).
 type ProofChecker interface {
-	Check(prev, cur Move) (ProofResult, string)
+	Check(ctx context.Context, prev, cur Move) (ProofResult, string)
 }
 
 // Reason codes name the rule that makes a chain invalid. They are the codes
@@ -188,11 +192,25 @@ func (vd Verdict) Valid() bool { return vd.HasChain && vd.Reason == "" }
 type Verifier struct {
 	Proofs    ProofChecker
 	Signature func(nostr.Event) bool
+	// StopAtUnchecked ends the walk at the first proof the checker cannot
+	// judge, as strict mode needs: nothing after it can move a strict
+	// position, so nothing after it is worth checking. The verdict is then
+	// valid as far as it was walked, with Unchecked counting the events left
+	// and VerifiedPosition where the identity stands. NewGate sets it from
+	// the mode.
+	StopAtUnchecked bool
 }
 
-// Verify resolves and checks a pubkey's chain from the events held for it,
-// under the chain rules of ChainRulesRevision.
+// Verify is VerifyContext with no deadline.
 func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
+	vd, _ := v.VerifyContext(context.Background(), pubkey, events)
+	return vd
+}
+
+// VerifyContext resolves and checks a pubkey's chain from the events held
+// for it, under the chain rules of ChainRulesRevision. When ctx ends first it
+// stops, and returns ctx's error and no verdict.
+func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nostr.Event) (Verdict, error) {
 	// Authentic events only (§8.7.3): every event that is not a valid NIP-01
 	// event by this pubkey is discarded before resolution and treated as if
 	// it never existed. Nobody can end another identity's chain with a
@@ -214,6 +232,9 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		if e.PubKey != pubkey || e.Kind != KindMovement {
 			continue
 		}
+		if i%256 == 0 && ctx.Err() != nil {
+			return Verdict{}, ctx.Err()
+		}
 		if m, _ := ParseMove(e); m.IsSpawn && authentic(e) {
 			signed = append(signed, e)
 			if newest == nil || newer(e, *newest) {
@@ -222,9 +243,12 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		}
 	}
 	if newest != nil {
-		for _, e := range events {
+		for i, e := range events {
 			if e.PubKey != pubkey || e.Kind != KindMovement {
 				continue
+			}
+			if i%256 == 0 && ctx.Err() != nil {
+				return Verdict{}, ctx.Err()
 			}
 			if m, _ := ParseMove(e); !m.IsSpawn && m.Genesis == newest.ID && authentic(e) {
 				signed = append(signed, e)
@@ -236,7 +260,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	vd := Verdict{Pubkey: pubkey, Length: len(chain), InvalidIndex: -1}
 	if len(chain) == 0 {
 		vd.Reason, vd.Stopped = ReasonNoSpawn, "no spawn event"
-		return vd
+		return vd, nil
 	}
 	vd.HasChain = true
 	vd.Chain = make([]string, len(chain))
@@ -244,10 +268,10 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		vd.Chain[i] = m.Event.ID
 	}
 	vd.Head = vd.Chain[len(chain)-1]
-	invalid := func(i int, reason, detail string) Verdict {
+	invalid := func(i int, reason, detail string) (Verdict, error) {
 		vd.Reason, vd.InvalidAt, vd.InvalidIndex = reason, chain[i].Event.ID, i
 		vd.Stopped = fmt.Sprintf("event %s invalid (%s): %s", chain[i].Event.ID, reason, detail)
-		return vd
+		return vd, nil
 	}
 
 	// The identity's spawn coordinate, where a dead chain leaves it.
@@ -268,7 +292,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		// event the branches name, and it is invalid from the spawn.
 		vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Fork = ReasonFork, chain[0].Event.ID, 0, res.Fork
 		vd.Stopped = fmt.Sprintf("fork: %d chain events name %s as previous (%s)", len(res.Fork), res.ForkedFrom, strings.Join(res.Fork, ", "))
-		return vd
+		return vd, nil
 	}
 
 	spawn := chain[0]
@@ -327,7 +351,10 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		// an earlier proof, so an invalid one makes the chain invalid however
 		// much before it was left unchecked.
 		if code, bearing := proofOf[cur.Action]; bearing && v.Proofs != nil {
-			res, why := v.Proofs.Check(prev, cur)
+			res, why := v.Proofs.Check(ctx, prev, cur)
+			if err := ctx.Err(); err != nil {
+				return Verdict{}, err
+			}
 			switch res {
 			case ProofInvalid:
 				if c, _, _ := strings.Cut(why, ":"); proofReasons[c] {
@@ -335,6 +362,14 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 				}
 				return invalid(i, code, "proof: "+why)
 			case ProofUnchecked:
+				if v.StopAtUnchecked {
+					vd.Unchecked = len(chain) - i
+					vd.Stopped = fmt.Sprintf("stopped at event %s, whose proof cannot be judged (%s): nothing after it can move a strict position", cur.Event.ID, why)
+					if w.bracket != nil {
+						vd.OpenBracket = w.bracket.entry.Event.ID
+					}
+					return vd, nil
+				}
 				proofsHold = false
 			}
 		}
@@ -352,7 +387,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	if w.bracket != nil {
 		vd.OpenBracket = w.bracket.entry.Event.ID
 	}
-	return vd
+	return vd, nil
 }
 
 // checkSpawn checks the first event of the active chain: exactly one A tag
@@ -680,6 +715,6 @@ func onlyDecimal(evt nostr.Event, name string) (*big.Int, bool) {
 type PendingSpec struct{}
 
 // Check implements ProofChecker.
-func (PendingSpec) Check(prev, cur Move) (ProofResult, string) {
+func (PendingSpec) Check(ctx context.Context, prev, cur Move) (ProofResult, string) {
 	return ProofUnchecked, "PendingSpec checks no proofs"
 }

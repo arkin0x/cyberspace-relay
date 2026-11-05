@@ -76,8 +76,10 @@ type Config struct {
 	// MaxHopVerifyHeight is the tallest hop (its h_max, §5.9) whose proof
 	// is checked. Level 1 costs about 2^h_max word additions per sampled
 	// residue and root, so a taller hop that passes its form and its
-	// re-roll price is left unchecked (see Mode). Default 32, the reference
-	// verifier's ceiling.
+	// re-roll price is left unchecked (see Mode). Default 24; at most 65.
+	// The reference verifier's ceiling is 32 and HOSAKA sells hops up to h30:
+	// a hop above the ceiling is not trusted in strict mode, so its mover
+	// stands before it until the ceiling is raised.
 	MaxHopVerifyHeight int `yaml:"max_hop_verify_height"`
 
 	boxes  []Box
@@ -151,6 +153,9 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.MaxHopVerifyHeight <= 0 {
 		c.MaxHopVerifyHeight = DefaultMaxHopHeight
+	}
+	if c.MaxHopVerifyHeight > MaxHopVerifyHeightLimit {
+		return nil, fmt.Errorf("region: max_hop_verify_height %d is above %d, where a hop's residue count no longer fits 64 bits", c.MaxHopVerifyHeight, MaxHopVerifyHeightLimit)
 	}
 	if !c.Enabled {
 		return &c, nil

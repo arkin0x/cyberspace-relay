@@ -148,17 +148,6 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
-	// Admission gate last among the policy checks: it can cost network
-	// lookups, so rate limits must bound how often a client reaches it.
-	if EventGate != nil {
-		if ok, msg := EventGate(context.TODO(), evt); !ok {
-			log.Event().Info("Event rejected by event gate",
-				"event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
-			response.SendOK(client, evt.ID, false, msg)
-			return
-		}
-	}
-
 	// Check database availability
 	db := nostrdb.GetDB()
 	if db == nil {
@@ -182,6 +171,19 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		response.SendOK(client, evt.ID, false, "duplicate: already have this event")
 		response.SendNotice(client, fmt.Sprintf("event %s was rejected because the relay already stores it", evt.ID))
 		return
+	}
+
+	// Admission gate last among the policy checks, after the duplicate check:
+	// it can cost network lookups and proof checks, so rate limits must bound
+	// how often a client reaches it, and an event already stored (and so
+	// already judged) must never reach it again.
+	if EventGate != nil {
+		if ok, msg := EventGate(context.TODO(), evt); !ok {
+			log.Event().Info("Event rejected by event gate",
+				"event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
+			response.SendOK(client, evt.ID, false, msg)
+			return
+		}
 	}
 
 	// Reject new writes before the map fills. A full LMDB map makes nostrdb's

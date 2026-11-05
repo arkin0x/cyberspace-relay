@@ -21,8 +21,11 @@ enabled: true
 mode: strict
 
 # The tallest hop (h_max) whose proof is checked; Level 1 costs about 2^h_max
-# word additions per sampled residue. Default 32.
-# max_hop_verify_height: 32
+# word additions per sampled residue (about 0.7 s on one core at h24 with
+# three tall axes). Default 24, at most 65. It stays 24 until the incremental
+# chain cache lands; HOSAKA sells hops up to h30, and in strict mode a hop
+# above the ceiling is not trusted, so its mover stands before it.
+# max_hop_verify_height: 24
 
 # Speakeasy (default true): reading also requires NIP-42 AUTH as a pubkey
 # inside the region (REQ, COUNT and live events), and every HTTP route except

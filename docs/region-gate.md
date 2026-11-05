@@ -297,7 +297,7 @@ instead of giving a verdict:
   `B`, and the hashes of the sampled blocks. `regiongate.Line` is the seam;
   `StaticLine` holds a line in memory (the vectors use it). No production
   source is wired yet, so every ride is unchecked.
-- **A hop taller than `max_hop_verify_height`** (default 32) that passes its
+- **A hop taller than `max_hop_verify_height`** (default 24, at most 65) that passes its
   form and its price. Level 1 costs about 2^h_max word additions per sampled
   residue and root; the price, checked first, costs one attempt.
 
@@ -306,7 +306,19 @@ instead of giving a verdict:
 | `strict` (default) | not trusted: the identity stands where the chain left it before that proof. Someone who rode since their last spawn stands where they boarded. |
 | `structural` | trusted: the identity stands at its head. With no line a ride lands wherever its `C` says, so a speakeasy must not run in this mode. |
 
-An invalid proof makes the chain invalid in both modes.
+An invalid proof makes the chain invalid in both modes. In strict mode the walk
+also stops at the first proof it cannot judge, since nothing after it can move
+a strict position, so nothing after it is checked.
+
+**Bounding the work.** Every check runs under the lookup's deadline
+(`fetch_timeout_seconds + 2`): `VerifyContext` and the proof checkers stop
+once it ends, the lookup slot is freed and the refusal ("try again") is not
+cached. A check longer than that deadline never completes, which is one
+reason the ceiling stays at 24. The relay runs its duplicate check before the
+gate, so an event it already stores is never judged again. A refused event
+can still be sent again and is judged again each time; the incremental chain
+cache (speakeasy design, PR 2), which keeps the point where a chain fails,
+removes that repeat. Until it lands, keep the ceiling at 24.
 
 **Cost.** Measured on the 16-core agent machine under a load average of 14 to
 19, one core per hop below h_max 20:

@@ -1,6 +1,7 @@
 package regiongate
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -246,6 +247,11 @@ func differencesLevel(height int) int {
 // points, so after its difference table is tabulated each further node
 // costs 2^k additions modulo p. Equal to residueTree (TestResidueRootMatchesTree).
 func residueRoot(base *big.Int, height int, p uint64) uint64 {
+	return residueRootCtx(context.Background(), base, height, p)
+}
+
+// residueRootCtx is residueRoot that gives up, returning 0, once ctx ends.
+func residueRootCtx(ctx context.Context, base *big.Int, height int, p uint64) uint64 {
 	b0 := modBig(base, p)
 	if height < 10 {
 		return residueTree(b0, height, p)
@@ -270,6 +276,9 @@ func residueRoot(base *big.Int, height int, p uint64) uint64 {
 	}
 	top := 0
 	for n := 0; n < nodes; n++ {
+		if n&4095 == 4095 && ctx.Err() != nil {
+			return 0
+		}
 		cur, level := D[0], 0
 		for top > 0 && stack[top-1].level == level {
 			top--
@@ -308,9 +317,13 @@ func stepDifferences(a, b []uint64, p uint64) {
 
 // hopResidue is hop_n mod p, without hop_n (§5.9).
 func (g hopGeometry) hopResidue(p uint64) uint64 {
+	return g.hopResidueCtx(context.Background(), p)
+}
+
+func (g hopGeometry) hopResidueCtx(ctx context.Context, p uint64) uint64 {
 	var r [4]uint64
 	for i := range r {
-		r[i] = residueRoot(g.bases[i], g.heights[i], p)
+		r[i] = residueRootCtx(ctx, g.bases[i], g.heights[i], p)
 	}
 	return pairMod(pairMod(pairMod(r[0], r[1], p), r[2], p), r[3], p)
 }
@@ -398,7 +411,12 @@ func (e ErrHopTooTall) Error() string {
 // since the paths are cheap; a hop is invalid when any residue or any path
 // fails, so the verdict is the reference's whichever fails first. From
 // h_max 20 the 16 residues are computed in parallel.
-func verifyHopLevel1(prev []byte, from, to Coord, proof, mn, mp string, ceiling int) (string, error) {
+//
+// ceiling is at most MaxHopVerifyHeightLimit: above it the residue count m no
+// longer fits a machine word. Once ctx ends it returns early, and its answer
+// means nothing.
+func verifyHopLevel1(ctx context.Context, prev []byte, from, to Coord, proof, mn, mp string, ceiling int) (string, error) {
+	ceiling = min(ceiling, MaxHopVerifyHeightLimit)
 	g := newHopGeometry(prev, from, to)
 	if !isLowerHex(proof, 64) {
 		return "proof: not a seal of 64 lowercase hex characters (8.4)", nil
@@ -462,11 +480,16 @@ func verifyHopLevel1(prev []byte, from, to Coord, proof, mn, mp string, ceiling 
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				want[i] = g.hopResidue(hopPrime(prev, idx[i]))
+				if ctx.Err() == nil {
+					want[i] = g.hopResidueCtx(ctx, hopPrime(prev, idx[i]))
+				}
 			}
 		}()
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	for i := 0; i < hopSamples; i++ {
 		if blocks[i][idx[i]%residueBlock] != want[i] {
 			return fmt.Sprintf("mp: opening %d (index %d): residue %d of block %d is not hop_n mod p_%d (5.11)", i, idx[i], idx[i]%residueBlock, idx[i]/residueBlock, idx[i]), nil
