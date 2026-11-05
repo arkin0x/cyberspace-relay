@@ -515,3 +515,59 @@ func TestVersion1SidestepIsNamed(t *testing.T) {
 		t.Fatalf("%d real chains frozen by a sidestep, want 3", n)
 	}
 }
+
+// A check cut short by its context has judged nothing, so it answers
+// ProofUnchecked, never a verdict: a forged hop is not Verified and a valid
+// ride is not Invalid because the caller gave up (a verdict cache builds on
+// these answers).
+func TestCanceledCheckIsUnchecked(t *testing.T) {
+	live := context.Background()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// A forged hop: form and price hold, every residue in its sealed list is wrong.
+	h := newSmallHop(t)
+	junk := make([]uint64, 8)
+	for j := range junk {
+		junk[j] = (h.residues[j] + 1) % hopPrime(h.prev, uint64(j))
+	}
+	proof, mn, mp := h.tags(t, junk, func([]uint64) bool { return true }, nil)
+	forged := hopEvent(strings.Repeat("4", 64), hex.EncodeToString(h.prev), h.from.Hex(), h.to.Hex(),
+		[]string{"proof", proof}, []string{"mn", mn}, []string{"mp", mp})
+	if res, why := (SpecProofs{}).Check(live, Move{}, forged); res != ProofInvalid {
+		t.Fatalf("the forged hop, not canceled: want invalid, got %v %s", res, why)
+	}
+	if res, why := (SpecProofs{}).Check(canceled, Move{}, forged); res != ProofUnchecked {
+		t.Fatalf("the forged hop, canceled: want unchecked, got %v %s", res, why)
+	}
+
+	// A valid ride from the spec's vectors, with its line.
+	vf := loadVectors(t, vectorsFile)
+	line, err := NewStaticLine(vf.Line.Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, vec := range vf.Vectors {
+		if vec.Name != "ride-valid" {
+			continue
+		}
+		byID := map[string]Move{}
+		for _, e := range parseEvents(vec.Events) {
+			m, _ := ParseMove(e)
+			byID[e.ID] = m
+		}
+		board, ride := byID[vec.Expected.Chain[2]], byID[vec.Expected.Chain[3]]
+		if board.Action != ActEnterHyperspace || ride.Action != ActHyperjump {
+			t.Fatalf("unexpected ride-valid chain: %s then %s", board.Action, ride.Action)
+		}
+		checker := SpecProofs{Line: line}
+		if res, why := checker.Check(live, board, ride); res != ProofVerified {
+			t.Fatalf("the valid ride, not canceled: want verified, got %v %s", res, why)
+		}
+		if res, why := checker.Check(canceled, board, ride); res != ProofUnchecked {
+			t.Fatalf("the valid ride, canceled: want unchecked, got %v %s", res, why)
+		}
+		return
+	}
+	t.Fatal("no ride-valid vector")
+}

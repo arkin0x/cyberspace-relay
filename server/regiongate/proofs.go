@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math/big"
 	"math/bits"
@@ -53,8 +52,19 @@ const DefaultMaxHopHeight = 24
 // residue count m (§5.9) no longer fits 64 bits.
 const MaxHopVerifyHeightLimit = 65
 
-// Check implements ProofChecker.
+// Check implements ProofChecker. Once ctx has ended the answer is always
+// ProofUnchecked, whatever the check had reached: a check cut short has
+// judged nothing, and a verdict must never come from one (a cache of
+// verdicts builds on these answers).
 func (s SpecProofs) Check(ctx context.Context, prev, cur Move) (ProofResult, string) {
+	res, why := s.check(ctx, prev, cur)
+	if err := ctx.Err(); err != nil {
+		return ProofUnchecked, "canceled: " + err.Error()
+	}
+	return res, why
+}
+
+func (s SpecProofs) check(ctx context.Context, prev, cur Move) (ProofResult, string) {
 	switch cur.Action {
 	case ActHop:
 		return s.hop(ctx, cur)
@@ -99,8 +109,7 @@ func (s SpecProofs) hop(ctx context.Context, cur Move) (ProofResult, string) {
 		ceiling = DefaultMaxHopHeight
 	}
 	why, err := verifyHopLevel1(ctx, prev, from, to, tagValues(cur.Event, "proof")[0], first(mn), first(mp), ceiling)
-	var tall ErrHopTooTall
-	if errors.As(err, &tall) {
+	if err != nil { // too tall (ErrHopTooTall), or cut short
 		return ProofUnchecked, err.Error()
 	}
 	if why != "" {

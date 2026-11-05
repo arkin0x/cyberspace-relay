@@ -49,6 +49,8 @@ can succeed, so nothing can be read or written.
 NIP-11 advertises `auth_required` and `restricted_writes`. The NIP-11 document
 itself stays public, so the relay's existence, name and description are not secret.
 
+Writes are judged by the event's author, not by who sends it, so anyone can push a member's public events (copied from another relay) into a speakeasy. Clients should mark speakeasy posts protected (NIP-70 `["-"]`), which this relay accepts only from the authenticated author.
+
 Verified over the wire: outsider REQ without AUTH `auth-required`, with AUTH
 `restricted`; member reads its note; member COUNT 1, outsider COUNT refused;
 `GET /`, `/api/v1/events/query`, `/api/v1/relay/stats`, `/static/*` all 404.
