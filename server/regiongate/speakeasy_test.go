@@ -46,6 +46,8 @@ func TestLiveAllowedNeverBlocksAndFollowsMoves(t *testing.T) {
 	b := newChain(t, member)
 	src := &fakeSource{events: []nostr.Event{b.spawn}}
 	g := gateFor(t, ModeStructural, box, src)
+	clock := &testClock{t: time.Now()}
+	g.now = clock.now
 
 	if g.LiveAllowed("") {
 		t.Fatal("an unauthenticated connection must get no live events")
@@ -64,10 +66,7 @@ func TestLiveAllowedNeverBlocksAndFollowsMoves(t *testing.T) {
 	if !g.LiveAllowed(member.pubkey) {
 		t.Fatal("a fresh admitted verdict must hold until it expires")
 	}
-	now := time.Now().Add(601 * time.Second)
-	g.mu.Lock()
-	g.now = func() time.Time { return now }
-	g.mu.Unlock()
+	clock.add(601 * time.Second)
 	if !g.LiveAllowed(member.pubkey) {
 		t.Fatal("an expired verdict keeps answering while it is refreshed")
 	}

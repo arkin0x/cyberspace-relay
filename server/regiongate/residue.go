@@ -416,6 +416,14 @@ func (e ErrHopTooTall) Error() string {
 // longer fits a machine word. Once ctx ends it returns early, and its answer
 // means nothing.
 func verifyHopLevel1(ctx context.Context, prev []byte, from, to Coord, proof, mn, mp string, ceiling int) (string, error) {
+	return verifyHopLevel1Kept(ctx, prev, from, to, proof, mn, mp, ceiling, nil)
+}
+
+// verifyHopLevel1Kept is verifyHopLevel1 that keeps each residue it computes
+// in kept (nil keeps none) and computes only those kept does not hold, so a
+// tall hop whose check its deadline cuts short is finished by the next
+// check rather than started again.
+func verifyHopLevel1Kept(ctx context.Context, prev []byte, from, to Coord, proof, mn, mp string, ceiling int, kept *hopResidues) (string, error) {
 	ceiling = min(ceiling, MaxHopVerifyHeightLimit)
 	g := newHopGeometry(prev, from, to)
 	if !isLowerHex(proof, 64) {
@@ -480,8 +488,17 @@ func verifyHopLevel1(ctx context.Context, prev []byte, from, to Coord, proof, mn
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				if ctx.Err() == nil {
-					want[i] = g.hopResidueCtx(ctx, hopPrime(prev, idx[i]))
+				if ctx.Err() != nil {
+					continue
+				}
+				if r, ok := kept.get(idx[i]); ok {
+					want[i] = r
+					continue
+				}
+				r := g.hopResidueCtx(ctx, hopPrime(prev, idx[i]))
+				if ctx.Err() == nil { // finished before the deadline: a true residue
+					want[i] = r
+					kept.put(idx[i], r)
 				}
 			}
 		}()

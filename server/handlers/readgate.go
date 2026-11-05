@@ -5,6 +5,7 @@ import (
 	"time"
 
 	nostr "github.com/0ceanslim/grain/server/types"
+	"github.com/0ceanslim/grain/server/utils"
 )
 
 // ReadGate, when set, decides whether a connection may read: it is asked
@@ -28,7 +29,7 @@ func readGateRefusal(client nostr.ClientInterface, timeout time.Duration) (strin
 	if pubkey == "" {
 		return "auth-required: this relay only serves readers it can place; authenticate first", true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(gateContext(context.Background(), client), timeout)
 	defer cancel()
 	if ok, msg := ReadGate(ctx, pubkey); !ok {
 		return msg, true
@@ -38,3 +39,22 @@ func readGateRefusal(client nostr.ClientInterface, timeout time.Duration) (strin
 
 // ReadGateTimeout bounds one read-gate decision.
 var ReadGateTimeout = 10 * time.Second
+
+type clientIPKey struct{}
+
+// gateContext is ctx carrying the client's address, which a gate can read
+// with ClientIP to limit the work one address queues.
+func gateContext(ctx context.Context, client nostr.ClientInterface) context.Context {
+	ip := ""
+	if ws := client.GetWS(); ws != nil && ws.Request() != nil {
+		ip = utils.GetClientIP(ws.Request())
+	}
+	return context.WithValue(ctx, clientIPKey{}, ip)
+}
+
+// ClientIP is the client address an EventGate or ReadGate context carries,
+// or "" when it is unknown.
+func ClientIP(ctx context.Context) string {
+	ip, _ := ctx.Value(clientIPKey{}).(string)
+	return ip
+}

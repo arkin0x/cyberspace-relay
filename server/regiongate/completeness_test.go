@@ -32,7 +32,7 @@ func expectRefusedUncached(t *testing.T, g *Gate, evt nostr.Event, reason string
 		t.Fatalf("want refusal %q, got %v %q", reason, ok, msg)
 	}
 	g.mu.Lock()
-	_, cached := g.cache[evt.PubKey]
+	cached := g.chains.get(evt.PubKey, g.rules) != nil
 	g.mu.Unlock()
 	if cached {
 		t.Fatal("an incomplete lookup must not be cached")

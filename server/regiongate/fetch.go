@@ -100,6 +100,9 @@ func (s RelaySource) fetch(ctx context.Context, url, pubkey string, q ChainQuery
 		if len(q.IDs) > 0 {
 			filter["ids"] = q.IDs
 		}
+		if q.Since > 0 {
+			filter["since"] = q.Since
+		}
 		if until > 0 {
 			filter["until"] = until
 		}

@@ -45,6 +45,32 @@ are in [migrate/](migrate/) (`migrate.mjs` export, compact, publish, count;
 `GRAIN_OWNER_PUBKEY` claims the relay at first boot, so nobody can claim
 `/setup` before the operator.
 
+## Trusted proxy (breaking change, cyberspace-relay #15)
+
+From #15 the relay believes `X-Forwarded-For` only from loopback and the
+addresses in `GRAIN_TRUSTED_PROXIES` (IPs or CIDRs), and then only the hop
+the proxy itself wrote. Before, it believed the header from anyone, so any
+client could claim any address.
+
+- **Ship the code and `docker-compose.yml` together.** The compose file puts
+  Caddy at a fixed address, `172.30.0.2` on its own network `edge`
+  (`172.30.0.0/24`, with containers that have no fixed address drawn from
+  `172.30.0.128/25` only, so none can take Caddy's), and sets
+  `GRAIN_TRUSTED_PROXIES: 172.30.0.2` on the relay. New code without it makes
+  every client look like Caddy: grain's per-IP limits (in this profile 30
+  connection attempts per IP per minute, `connection_rate_limit_per_ip`)
+  then apply to the whole relay at once.
+- **Before the first deploy with it**, check on the droplet that nothing
+  already uses that range: `docker network inspect $(docker network ls -q)
+  | grep -i subnet`, and `ip route` for host routes. If `172.30.0.0/24`
+  overlaps anything, pick another private /24 and change the subnet, the
+  ip_range, Caddy's address and `GRAIN_TRUSTED_PROXIES` together.
+- **It breaks every proxied deployment**, not only this one: any grain from
+  this fork behind a reverse proxy must set `GRAIN_TRUSTED_PROXIES` to the
+  address the proxy connects from, the speakeasy profile (`deploy/cyberspace`,
+  `fly.cyberspace.toml`, behind Fly's proxy) included. Read the peer address
+  the relay sees (its logs' `client_ip` before the change) and set it.
+
 ## Update
 
 ```sh

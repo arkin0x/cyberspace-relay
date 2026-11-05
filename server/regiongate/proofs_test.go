@@ -443,9 +443,15 @@ func TestCheckIsCanceledWithItsCaller(t *testing.T) {
 		t.Fatal("want the context's error")
 	}
 
+	// In the gate the check runs under its own deadline (the job's,
+	// check_timeout_seconds), not its caller's: a caller that stops waiting
+	// is told to try again at once, and the check runs on, here until its
+	// own deadline, and is then abandoned. A check cut short by its deadline
+	// keeps nothing, and its worker is free.
 	cfg := &Config{Enabled: true, Mode: ModeStructural, CacheTTLSeconds: 600, NegativeCacheTTLSeconds: 60,
-		MaxConcurrentLookups: 1, boxes: []Box{cubeAround(t, s.pubkey, 40)}, exempt: map[string]bool{}}
-	g := NewGate(cfg, Verifier{Proofs: blockingProofs{entered: make(chan struct{})}, Signature: validation.CheckSignature}, &fakeSource{events: []nostr.Event{b.spawn, hop}})
+		MaxConcurrentLookups: 1, CheckTimeoutSeconds: 1, boxes: []Box{cubeAround(t, s.pubkey, 40)}, exempt: map[string]bool{}}
+	entered := make(chan struct{})
+	g := NewGate(cfg, Verifier{Proofs: blockingProofs{entered: entered}, Signature: validation.CheckSignature}, &fakeSource{events: []nostr.Event{b.spawn, hop}})
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel2()
 	start := time.Now()
@@ -453,11 +459,20 @@ func TestCheckIsCanceledWithItsCaller(t *testing.T) {
 	if ok || msg != errTimeout || time.Since(start) > 2*time.Second {
 		t.Fatalf("want a prompt %q, got %v %q after %v", errTimeout, ok, msg, time.Since(start))
 	}
-	if n := len(g.lookups); n != 0 {
-		t.Fatalf("%d lookup slots still held after the caller timed out", n)
+	<-entered
+	waitFor(t, func() bool {
+		g.queue.mu.Lock()
+		defer g.queue.mu.Unlock()
+		return g.queue.running == 0
+	})
+	if time.Since(start) < 900*time.Millisecond {
+		t.Fatalf("the check was abandoned after %v, before its own deadline", time.Since(start))
 	}
-	if _, hit := g.cache[s.pubkey]; hit {
-		t.Fatal("a timed-out lookup was cached as a verdict")
+	g.mu.Lock()
+	hit := g.chains.get(s.pubkey, g.rules) != nil
+	g.mu.Unlock()
+	if hit {
+		t.Fatal("a timed-out check was cached as a verdict")
 	}
 }
 

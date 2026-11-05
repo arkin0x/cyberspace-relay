@@ -21,15 +21,15 @@ func TestDuplicateCheckRunsBeforeTheGate(t *testing.T) {
 	stored := func(nostr.Event) (bool, error) { return true, nil }
 	fresh := func(nostr.Event) (bool, error) { return false, nil }
 
-	ok, msg, notice := admitNew(evt, stored, gate)
+	ok, msg, notice := admitNew(context.Background(), evt, stored, gate)
 	if ok || msg != "duplicate: already have this event" || notice == "" || gated != 0 {
 		t.Fatalf("a stored event: got %v %q %q, gate asked %d times", ok, msg, notice, gated)
 	}
-	ok, msg, _ = admitNew(evt, fresh, gate)
+	ok, msg, _ = admitNew(context.Background(), evt, fresh, gate)
 	if ok || msg != "restricted: outside" || gated != 1 {
 		t.Fatalf("a new event: got %v %q, gate asked %d times", ok, msg, gated)
 	}
-	if ok, _, _ := admitNew(evt, fresh, nil); !ok {
+	if ok, _, _ := admitNew(context.Background(), evt, fresh, nil); !ok {
 		t.Fatal("no gate: a new event is admitted")
 	}
 }
