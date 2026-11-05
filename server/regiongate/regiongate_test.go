@@ -653,7 +653,7 @@ func TestGateBoundsLookupsAndCache(t *testing.T) {
 	if ok, msg := g.Admit(ctx, other.sign(t, 1, 1)); ok || msg != errBusy {
 		t.Fatalf("want busy refusal, got %v %q", ok, msg)
 	}
-	ok, msg, hit := g.cached(other.pubkey, nil)
+	ok, msg, hit := g.cached(other.pubkey, nil, g.home)
 	if hit && (ok || msg == errBusy) {
 		t.Fatal("a busy refusal must not be cached")
 	}

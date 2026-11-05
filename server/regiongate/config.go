@@ -198,18 +198,54 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 		c.boxes = append(c.boxes, b)
 	}
+	if err := c.finishSources(); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// finishSources checks that a chain can be found somewhere and reads the
+// exempt pubkeys.
+func (c *Config) finishSources() error {
 	if len(c.ChainRelays) == 0 && !*c.UseLocalEvents {
-		return nil, fmt.Errorf("region: no chain_relays and use_local_events is off; no chain could ever be found")
+		return fmt.Errorf("region: no chain_relays and use_local_events is off; no chain could ever be found")
 	}
 	c.exempt = map[string]bool{}
 	for _, pk := range c.ExemptPubkeys {
 		hexKey, err := normalizePubkey(pk)
 		if err != nil {
-			return nil, fmt.Errorf("exempt_pubkeys: %w", err)
+			return fmt.Errorf("exempt_pubkeys: %w", err)
 		}
 		c.exempt[hexKey] = true
 	}
-	return &c, nil
+	return nil
+}
+
+// ParseSharedConfig parses the chain settings of a shared gate
+// (NewSharedGate): every key of region.yml except enabled, regions and
+// gate_reads, which have no meaning there (each speakeasy names its own
+// region and always gates reads). It applies the same defaults and checks.
+func ParseSharedConfig(data []byte) (*Config, error) {
+	var probe struct {
+		Enabled   *bool        `yaml:"enabled"`
+		Regions   []RegionSpec `yaml:"regions"`
+		GateReads *bool        `yaml:"gate_reads"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return nil, fmt.Errorf("parse gate config: %w", err)
+	}
+	if probe.Enabled != nil || probe.Regions != nil || probe.GateReads != nil {
+		return nil, fmt.Errorf("gate: enabled, regions and gate_reads belong in region.yml, not here; each speakeasy has its own region and always gates reads")
+	}
+	c, err := ParseConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	c.Enabled = true
+	if err := c.finishSources(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 func (r RegionSpec) box() (Box, error) {
@@ -246,6 +282,34 @@ func (r RegionSpec) box() (Box, error) {
 	}
 	return Box{}, fmt.Errorf("give base with either height or heights [hx, hy, hz]")
 }
+
+// Regions is a set of regions: a position inside any of them is inside the
+// set. A gate judges each request in the Regions it names, and two requests
+// share an answer only when they name the same set (the same pointer), so a
+// verdict for one speakeasy is never handed to another.
+type Regions struct{ boxes []Box }
+
+// NewRegions is the set of the given boxes; with none, nothing is inside.
+func NewRegions(boxes ...Box) *Regions {
+	return &Regions{boxes: append([]Box(nil), boxes...)}
+}
+
+// Contains reports whether p lies in any of the set's regions.
+func (r *Regions) Contains(p Coord) bool {
+	if r == nil {
+		return false
+	}
+	for _, b := range r.boxes {
+		if b.Contains(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// Box is the region a RegionSpec names (base with height or heights, or a
+// sector), validated.
+func (r RegionSpec) Box() (Box, error) { return r.box() }
 
 // Contains reports whether a position lies in any configured region.
 func (c *Config) Contains(p Coord) bool {
