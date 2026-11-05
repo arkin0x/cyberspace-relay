@@ -16,8 +16,8 @@ enabled: true
 #   before it. A rider waiting for the line stands where they boarded until
 #   the line holds the height; then the chain is checked again at once.
 # structural: such a proof is trusted; position = chain head (or the frozen
-#   position of an invalid chain). A waiting ride lands wherever its C says,
-#   so do not run a speakeasy in this mode.
+#   position of an invalid chain). A ride waiting for the line is the
+#   exception: it is not trusted in either mode.
 mode: strict
 
 # Rides (DECK-0001) are checked against the Bitcoin line built from the block

@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"math/bits"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	nostr "github.com/0ceanslim/grain/server/types"
+	"github.com/0ceanslim/grain/server/validation"
 )
 
 // growingLine is the golden vectors' line as a line that lags: it holds
@@ -60,11 +62,14 @@ type countedSpec struct {
 	asked map[string]int
 	// during, when set, runs on each ride asked about.
 	during func()
+	// members records, per check, whether it ran as a member's.
+	members []bool
 }
 
 func (c *countedSpec) Check(ctx context.Context, prev, cur Move) (ProofResult, string) {
 	c.mu.Lock()
 	c.asked[cur.Event.ID]++
+	c.members = append(c.members, isMemberCheck(ctx))
 	c.mu.Unlock()
 	if c.during != nil && cur.Action == ActHyperjump {
 		c.during()
@@ -223,10 +228,10 @@ func TestALineReorganizingDuringACheckKeepsNothing(t *testing.T) {
 // entry's Known keeps the height a ride waits for.
 func TestCheckpointKeepsTheEntrysLineWait(t *testing.T) {
 	g, _ := cacheGate(t, ModeStrict, cubeAround(t, strings.Repeat("0", 64), 8), SpecProofs{}, &fakeSource{})
-	g.progress["pk"] = &Known{Genesis: "s", Passed: "a"}
+	g.progress["pk"] = &Known{Genesis: "s", Passed: "a", rules: g.rules()}
 	kn := g.knownFor("pk", &chainEntry{known: &Known{Genesis: "s", StopAt: "r", LineWait: 5}})
-	if len(kn) == 0 || kn[0].LineWait != 5 || kn[0].StopAt != "r" {
-		t.Fatalf("merged %+v", kn[0])
+	if len(kn) != 2 || kn[0].Passed != "a" || kn[0].LineWait != 5 || kn[0].StopAt != "r" {
+		t.Fatalf("the checkpoint merged with the entry's Known: %+v", kn)
 	}
 }
 
@@ -433,18 +438,176 @@ func TestCantorTreeResumes(t *testing.T) {
 }
 
 // TestTallLeavesTakeTurns: while one tall leaf is computed, another waits,
-// and gives up at its deadline without starting.
+// and gives up at its deadline without starting. The leaves this must hold
+// for are the real ones: h20 (2.4 s, about 100 MB at its peak) and h22.
 func TestTallLeavesTakeTurns(t *testing.T) {
-	tallLeaves <- struct{}{}
-	defer func() { <-tallLeaves }()
+	if err := tallLeaves.acquire(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	defer tallLeaves.release()
+	for _, height := range []int{20, 22} {
+		rp := NewRideProgress(4)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		start := time.Now()
+		_, err := rideLeafKept(ctx, make([]byte, 32), 7, make([]byte, 32), height, &rideKept{p: rp, id: "x"})
+		cancel()
+		if err != errRideCut || rp.tree != nil || time.Since(start) > 2*time.Second {
+			t.Fatalf("an h%d leaf did not wait its turn: %v, tree kept %v", height, err, rp.tree != nil)
+		}
+	}
+}
+
+// TestMembersGoFirstForTheTallSlot: with the slot busy, a member who comes
+// after strangers is served before them, and a stranger is served once no
+// member waits; a waiter whose deadline ends leaves the queue.
+func TestMembersGoFirstForTheTallSlot(t *testing.T) {
+	slot := &prioritySlot{}
+	if err := slot.acquire(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var order []string
+	var wg sync.WaitGroup
+	wait := func(name string, member bool) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := slot.acquire(context.Background(), member); err != nil {
+				t.Error(err)
+				return
+			}
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			slot.release()
+		}()
+	}
+	queued := func(n int) {
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+			slot.mu.Lock()
+			got := len(slot.members) + len(slot.strangers)
+			slot.mu.Unlock()
+			if got == n {
+				return
+			}
+		}
+		t.Fatalf("%d waiters never queued", n)
+	}
+	wait("stranger 1", false)
+	queued(1)
+	wait("stranger 2", false)
+	queued(2)
+	// A stranger whose deadline ends leaves the queue.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	if err := slot.acquire(ctx, false); err == nil {
+		t.Fatal("a waiter whose deadline ended took the slot")
+	}
+	cancel()
+	queued(2)
+	wait("member", true)
+	queued(3)
+	slot.release()
+	wg.Wait()
+	if strings.Join(order, ", ") != "member, stranger 1, stranger 2" {
+		t.Fatalf("served %v", order)
+	}
+	if slot.busy {
+		t.Fatal("the slot is still held")
+	}
+}
+
+// TestAMembersCheckRunsAsAMembers: the gate marks the checks of a known
+// member, so its tall leaves go first; a stranger's are not marked.
+func TestAMembersCheckRunsAsAMembers(t *testing.T) {
+	ctx := context.Background()
+	events, chain, pubkey, static := rideValid(t)
+	var last nostr.Event
+	var first []nostr.Event
+	for _, e := range events {
+		if e.ID == chain[len(chain)-1] {
+			last = e
+		} else {
+			first = append(first, e)
+		}
+	}
+	proofs := &countedSpec{SpecProofs: SpecProofs{Line: &growingLine{inner: static, tip: 7}, ListedV1Hops: map[string]bool{}}, asked: map[string]int{}}
+	g, _ := cacheGate(t, ModeStrict, cubeAround(t, tagValues(last, "C")[0], 40), proofs, &fakeSource{events: first})
+	if ok, why := g.AdmitPubkey(ctx, pubkey); !ok {
+		t.Fatalf("not admitted: %s", why)
+	}
+	if slices.Contains(proofs.members, true) || len(proofs.members) == 0 {
+		t.Fatalf("a stranger's first check ran as a member's: %v", proofs.members)
+	}
+	n := len(proofs.members)
+	if ok, why := g.Admit(ctx, last); !ok {
+		t.Fatalf("the member's next move refused: %s", why)
+	}
+	if len(proofs.members) != n+1 || !proofs.members[n] {
+		t.Fatalf("the member's check did not run as a member's: %v", proofs.members[n:])
+	}
+}
+
+// TestALaterRideAboveTheTipWaits: a ride after another (no as_of) whose B
+// the line has not reached waits for B; it is not failed.
+func TestALaterRideAboveTheTipWaits(t *testing.T) {
+	events, chain, _, static := rideValid(t)
+	byID := map[string]Move{}
+	for _, e := range events {
+		m, _ := ParseMove(e)
+		byID[e.ID] = m
+	}
+	first, second := byID[chain[3]], byID[chain[4]] // the ride to 3, after the ride to 4
+	for i, tag := range second.Event.Tags {
+		if tag[0] == "B" {
+			second.Event.Tags[i] = []string{"B", "6"}
+		}
+	}
+	line := &growingLine{inner: static, tip: 5}
+	res, why := (SpecProofs{Line: line}).Check(context.Background(), first, second)
+	if h, ok := awaitedHeight(why); res != ProofUnchecked || !ok || h != 6 {
+		t.Fatalf("want a wait for block 6, got %v %q", res, why)
+	}
+}
+
+// TestAKeptTreeIsBounded: a tree in progress larger than the cap is not
+// kept.
+func TestAKeptTreeIsBounded(t *testing.T) {
+	defer func(old int) { maxKeptTreeBytes = old }(maxKeptTreeBytes)
+	maxKeptTreeBytes = 1024
 	rp := NewRideProgress(4)
-	hash := make([]byte, 32)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, err := rideLeafKept(ctx, make([]byte, 32), 7, hash, tallLeafHeight, &rideKept{p: rp, id: "x"})
-	if err != errRideCut || rp.tree != nil || time.Since(start) > 2*time.Second {
-		t.Fatalf("a tall leaf did not wait its turn: %v, tree kept %v", err, rp.tree != nil)
+	k := &rideKept{p: rp, id: "x"}
+	small := &cantorTree{stack: []cantorNode{{v: new(big.Int).Lsh(bigOne, 8*500)}}}
+	k.putTree(1, []byte{1}, small)
+	if rp.tree == nil {
+		t.Fatal("a tree under the cap was not kept")
+	}
+	large := &cantorTree{stack: []cantorNode{{v: new(big.Int).Lsh(bigOne, 8*2000)}}}
+	k.putTree(2, []byte{2}, large)
+	if rp.tree.b != 1 {
+		t.Fatal("a tree over the cap was kept")
+	}
+}
+
+// TestStructuralModeDoesNotTrustAWaitingRide: structural mode trusts a
+// proof it cannot check, but not a ride waiting for the line, so the rider
+// stands where they boarded until the line holds the height.
+func TestStructuralModeDoesNotTrustAWaitingRide(t *testing.T) {
+	events, chain, pubkey, static := rideValid(t)
+	line := &growingLine{inner: static, tip: 4}
+	v := Verifier{Proofs: SpecProofs{Line: line, ListedV1Hops: map[string]bool{}}, Signature: validation.CheckSignature}
+	vd := v.Verify(pubkey, events)
+	var boarded string
+	for _, e := range events {
+		if e.ID == chain[2] {
+			boarded = tagValues(e, "C")[0]
+		}
+	}
+	if !vd.Valid() || vd.Position == nil || vd.Position.Hex() != boarded || vd.PositionEvent != chain[2] {
+		t.Fatalf("structural position %v after %s, want the boarding %s", vd.Position, vd.PositionEvent, boarded)
+	}
+	line.grow(7)
+	if vd := v.Verify(pubkey, events); vd.Unchecked != 0 || vd.Head != chain[len(chain)-1] || vd.PositionEvent != chain[len(chain)-1] {
+		t.Fatalf("once the line holds the blocks: %+v", vd)
 	}
 }
 

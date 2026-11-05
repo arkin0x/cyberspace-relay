@@ -552,7 +552,7 @@ instead of giving a verdict:
 | Mode | A proof the checker cannot judge |
 |---|---|
 | `strict` (default) | not trusted: the identity stands where the chain left it before that proof. Someone who rode since their last spawn stands where they boarded. |
-| `structural` | trusted: the identity stands at its head. A ride the line cannot judge yet lands wherever its `C` says, so a speakeasy must not run in this mode. |
+| `structural` | trusted: the identity stands at its head. A ride waiting for the line is the exception: it is not trusted in either mode (the identity stands where it boarded), or a ride whose `as_of` is far above Bitcoin's tip would be trusted for ever. |
 
 An invalid proof makes the chain invalid in both modes. In strict mode the walk
 also stops at the first proof it cannot judge, since nothing after it can move
@@ -633,11 +633,17 @@ stop of `B` (§5.5 step 2), and the hashes of its sampled blocks (§5.3).
   invalid until Bitcoin reaches the height; this line lags mainnet, so here
   it means only that the answer is not known yet. Only a line that is the
   whole of its world (the golden vectors' synthetic `StaticLine`) says such a
-  ride is invalid, as the reference does.
+  ride is invalid, as the reference does. In both modes the walk stops at a
+  waiting ride: structural mode trusts proofs nobody can check, but not one
+  whose answer is only not known yet.
 - **The work.** Samples on one block are computed once; the sampled blocks
   are computed cheapest first, so a forged root fails on the cheapest leaf;
   squaring is by FFT (`bigfft`) from 8,192 words; one leaf of h20 or more is
-  computed at a time in the whole process; and a check cut short by its
+  computed at a time in the whole process, and known members (an identity
+  whose position is in a region the gate serves) take that slot before any
+  stranger waiting, so strangers' forged rides delay a member by at most the
+  one leaf in progress, and a stranger is never refused, only made to wait;
+  and a check cut short by its
   deadline keeps its G, its finished leaves and the one tall tree in progress
   (`RideProgress`, by event id and block hash), so the next check goes on
   from there.
@@ -684,7 +690,9 @@ shared vectors above lock every rule.
   sampled leaf, and a short ride over the costliest blocks forces those
   leaves (at most about 18.5 s of one core on mainnet): one such check per
   throwaway key, bounded by the work queue and the failed set, as a forged
-  tall hop is.
+  tall hop is. Tall leaves take turns members first, so such a flood slows
+  strangers, not known members. A rider's first check, before the gate knows
+  them as a member, waits with the strangers.
 
 - An admitted author stays admitted for `cache_ttl_seconds` even if they move
   out through another relay. A move published here re-verifies at once.

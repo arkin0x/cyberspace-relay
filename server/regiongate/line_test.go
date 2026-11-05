@@ -389,6 +389,27 @@ func TestAnchorLineUsesOnlyItsPublisher(t *testing.T) {
 	}
 }
 
+// TestAnchorHeightsAreCanonical: a B with a leading zero or a sign is not
+// a height an anchor may carry (a #B filter names heights canonically).
+func TestAnchorHeightsAreCanonical(t *testing.T) {
+	pub := newSigner(t)
+	b := testChain(0, [32]byte{}, 13, 11)[12]
+	for _, bad := range []string{"012", "+12", "-12", "", "1 2"} {
+		e := b.anchor(t, pub, true, 1)
+		for i, tag := range e.Tags {
+			if tag[0] == "B" {
+				e.Tags[i] = []string{"B", bad}
+			}
+		}
+		if _, _, _, _, err := parseAnchor(pub.sign(t, e.Kind, e.CreatedAt, e.Tags...)); err == nil {
+			t.Errorf("B %q accepted", bad)
+		}
+	}
+	if _, _, _, _, err := parseAnchor(b.anchor(t, pub, true, 1)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestAnchorLineGrows: anchors published after the load are linked by the
 // next update.
 func TestAnchorLineGrows(t *testing.T) {

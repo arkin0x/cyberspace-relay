@@ -651,8 +651,85 @@ const (
 	tallLeafHeight = 20
 )
 
-// tallLeaves admits one tall ride leaf at a time.
-var tallLeaves = make(chan struct{}, 1)
+// tallLeaves admits one tall ride leaf at a time, members first: a check
+// for an identity the gate already knows as a member (its position is in a
+// region the gate serves) takes the slot before any stranger waiting, so a
+// flood of strangers' forged rides cannot hold up a real rider for more than
+// the one leaf in progress. A stranger is never refused; it waits, and a
+// check its deadline ends while it waits keeps what it finished.
+var tallLeaves = &prioritySlot{}
+
+// prioritySlot is a one-holder lock whose waiters are served members first,
+// then strangers, each in arrival order.
+type prioritySlot struct {
+	mu                 sync.Mutex
+	busy               bool
+	members, strangers []chan struct{}
+}
+
+// acquire takes the slot, or returns ctx's error once ctx ends first.
+func (p *prioritySlot) acquire(ctx context.Context, member bool) error {
+	p.mu.Lock()
+	if !p.busy {
+		p.busy = true
+		p.mu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{})
+	if member {
+		p.members = append(p.members, ch)
+	} else {
+		p.strangers = append(p.strangers, ch)
+	}
+	p.mu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		p.mu.Lock()
+		queued := false
+		for _, q := range []*[]chan struct{}{&p.members, &p.strangers} {
+			if i := slices.Index(*q, ch); i >= 0 {
+				*q, queued = slices.Delete(*q, i, i+1), true
+			}
+		}
+		p.mu.Unlock()
+		if !queued { // granted as ctx ended: hand it on
+			p.release()
+		}
+		return ctx.Err()
+	}
+}
+
+// release hands the slot to the first member waiting, else the first
+// stranger, else frees it.
+func (p *prioritySlot) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case len(p.members) > 0:
+		close(p.members[0])
+		p.members = p.members[1:]
+	case len(p.strangers) > 0:
+		close(p.strangers[0])
+		p.strangers = p.strangers[1:]
+	default:
+		p.busy = false
+	}
+}
+
+type memberKey struct{}
+
+// WithMember returns ctx marking the check it carries as one for a known
+// member (tallLeaves).
+func WithMember(ctx context.Context, member bool) context.Context {
+	return context.WithValue(ctx, memberKey{}, member)
+}
+
+func isMemberCheck(ctx context.Context) bool {
+	m, _ := ctx.Value(memberKey{}).(bool)
+	return m
+}
 
 var (
 	hyperspaceTerrainDomain = []byte("CYBERSPACE_HYPERSPACE_TERRAIN_V1")
@@ -881,12 +958,10 @@ func rideLeafKept(ctx context.Context, prev []byte, b uint64, blockHash []byte, 
 		tree = newCantorTree(aligned(t, height), height)
 	}
 	if height >= tallLeafHeight {
-		select {
-		case tallLeaves <- struct{}{}:
-			defer func() { <-tallLeaves }()
-		case <-ctx.Done():
+		if tallLeaves.acquire(ctx, isMemberCheck(ctx)) != nil {
 			return nil, errRideCut
 		}
+		defer tallLeaves.release()
 	}
 	cantor, ok := tree.run(ctx)
 	if !ok {
@@ -939,8 +1014,8 @@ type keptTree struct {
 }
 
 // maxKeptTreeBytes bounds the tree in progress that is kept: an h22 leaf's
-// pending roots are under 32 MB.
-const maxKeptTreeBytes = 64 << 20
+// pending roots are under 32 MB. A variable only so a test can lower it.
+var maxKeptTreeBytes = 64 << 20
 
 // NewRideProgress keeps the progress of at most max rides.
 func NewRideProgress(max int) *RideProgress {

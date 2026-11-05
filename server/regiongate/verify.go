@@ -193,7 +193,8 @@ type Verifier struct {
 	Proofs    ProofChecker
 	Signature func(nostr.Event) bool
 	// StopAtUnchecked ends the walk at the first proof the checker cannot
-	// judge, as strict mode needs: nothing after it can move a strict
+	// judge (a ride waiting for the line ends it in either mode), as strict
+	// mode needs: nothing after it can move a strict
 	// position, so nothing after it is worth checking. The verdict is then
 	// valid as far as it was walked, with Unchecked counting the events left
 	// and VerifiedPosition where the identity stands. NewGate sets it from
@@ -239,7 +240,8 @@ type Known struct {
 	// (Verdict.Stopped). A fork is never kept here: resolution decides it
 	// afresh on every walk.
 	FailAt, FailReason, Stopped string
-	// StopAt is the proof strict mode stopped at, which the checker could
+	// StopAt is the proof the walk stopped at (strict mode, or a ride
+	// waiting for the line in either mode), which the checker could
 	// not judge for the reason StopWhy.
 	StopAt, StopWhy string
 	// LineWait, when not 0, is the lowest block height a ride the walk left
@@ -498,12 +500,17 @@ func (k *walker) step(ctx context.Context, i, length int, cur Move) (bool, error
 			}
 			return invalid(code, "proof: "+why)
 		case ProofUnchecked:
-			if h, ok := awaitedHeight(why); ok && (k.lineWait == 0 || h < k.lineWait) {
+			// A ride waiting for the line stops the walk in both modes:
+			// structural mode trusts a proof nobody can check, but not one
+			// whose answer is merely not known yet, or a ride with an as_of
+			// far above Bitcoin's tip would be trusted for ever.
+			h, waiting := awaitedHeight(why)
+			if waiting && (k.lineWait == 0 || h < k.lineWait) {
 				k.lineWait = h
 			}
-			if k.stopAtUnchecked {
+			if k.stopAtUnchecked || waiting {
 				vd.Unchecked = length - i
-				vd.Stopped = fmt.Sprintf("stopped at event %s, whose proof cannot be judged (%s): nothing after it can move a strict position", cur.Event.ID, why)
+				vd.Stopped = fmt.Sprintf("stopped at event %s, whose proof cannot be judged (%s): nothing after it can move the position", cur.Event.ID, why)
 				k.stopAt, k.stopWhy = cur.Event.ID, why
 				k.finish()
 				return true, nil
@@ -578,14 +585,10 @@ func (k *walker) atHead() bool { return k.vd.Reason == "" && k.stopAt == "" }
 
 // knowledge is what this walk established, for a later walk of the same chain.
 func (k *walker) knowledge() *Known {
+	// A walk stops at a ride waiting for the line, so that ride is StopAt,
+	// and a later walk answering from this Known finds the height again in
+	// StopWhy: the wait is never lost.
 	kn := &Known{Genesis: k.genesis, Passed: k.passed, Verified: k.vd.VerifiedEvent, StopAt: k.stopAt, StopWhy: k.stopWhy, LineWait: k.lineWait}
-	// Unchecked answers taken from an earlier walk still wait for what
-	// that walk waited for, until the line holds it (then they were asked
-	// again, and lineWait has what they wait for now).
-	if old := k.known; old != nil && old.Genesis == k.genesis && old.LineWait > 0 && !lineReached(k.proofs, old) &&
-		(kn.LineWait == 0 || old.LineWait < kn.LineWait) {
-		kn.LineWait = old.LineWait
-	}
 	if k.vd.Reason != "" && k.vd.Reason != ReasonFork && k.vd.InvalidIndex > 0 {
 		kn.FailAt, kn.FailReason, kn.Stopped = k.vd.InvalidAt, k.vd.Reason, k.vd.Stopped
 	}

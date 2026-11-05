@@ -334,6 +334,8 @@ func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event, in
 		return ok, reason
 	}
 	rules := g.rules()
+	// A known member's tall ride leaves go before strangers' (tallLeaves).
+	ctx = WithMember(ctx, g.isMember(pubkey))
 	g.mu.Lock()
 	e := g.chains.get(pubkey, rules)
 	g.mu.Unlock()
