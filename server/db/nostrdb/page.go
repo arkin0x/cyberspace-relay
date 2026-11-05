@@ -70,6 +70,11 @@ func (c *PageCursor) Next(page []nostr.Event, pageSize int) (fresh []nostr.Event
 		// second filling the page: asking again would return the same
 		// page. Step past it.
 		c.Crowded = true
+		if oldest <= 0 {
+			// nothing is older than created_at 0, and a negative until
+			// is no bound nostrdb can take
+			return fresh, false
+		}
 		next := time.Unix(oldest-1, 0)
 		c.until, c.seen = &next, nil
 		return fresh, true

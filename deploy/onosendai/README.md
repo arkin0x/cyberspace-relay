@@ -48,9 +48,12 @@ are in [migrate/](migrate/) (`migrate.mjs` export, compact, publish, count;
 ## Update
 
 ```sh
-cd /opt/cyberspace-relay && git pull --ff-only && git submodule update --init --recursive
-GRAIN_OWNER_PUBKEY=<operator npub> docker compose -f deploy/onosendai/docker-compose.yml up -d --build
+cd /opt/cyberspace-relay && git pull --ff-only && sh deploy/onosendai/sync-submodules.sh \
+  && GRAIN_OWNER_PUBKEY=<operator npub> docker compose -f deploy/onosendai/docker-compose.yml up -d --build
 ```
+
+`sync-submodules.sh` syncs submodule URLs from `.gitmodules`, updates them, and
+stops (so nothing is built) unless nostrdb is at the commit this checkout pins.
 
 The profile's files seed the data volume only on first boot; after that, edit
 `config.yml` and `whitelist.yml` on the volume (or through `/admin`).

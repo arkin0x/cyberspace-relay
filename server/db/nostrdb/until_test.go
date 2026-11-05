@@ -275,3 +275,52 @@ func TestPageCursorHandsOutEveryEventOnce(t *testing.T) {
 		}
 	}
 }
+
+// A crowded second at created_at 0 has nothing older to step to: the cursor
+// must stop there, never ask for until = -1.
+func TestPageCursorCrowdedAtZeroStops(t *testing.T) {
+	var all []nostr.Event
+	for i := 0; i < 5; i++ {
+		all = append(all, nostr.Event{ID: fmt.Sprintf("z%d", i), CreatedAt: 0})
+	}
+	c := NewPageCursor(nil)
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("cursor never stopped")
+		}
+		if u := c.Until(); u != nil && u.Unix() < 0 {
+			t.Fatalf("cursor asked for until = %d", u.Unix())
+		}
+		page := all
+		if len(page) > 3 {
+			page = page[:3]
+		}
+		_, more := c.Next(page, 3)
+		if !more {
+			break
+		}
+	}
+	if !c.Crowded {
+		t.Error("a second of 5 against a page of 3 was not reported as Crowded")
+	}
+}
+
+// The same through COUNT on a real db: it must answer, approximately.
+func TestCountCrowdedSecondAtZero(t *testing.T) {
+	db := openTempDB(t)
+	withPageSize(t, &countPageSize, 3)
+	k := newUntilKey(t)
+	var evts []nostr.Event
+	for i := 0; i < 5; i++ {
+		evts = append(evts, signEvent(t, k.priv, k.pub, 1, fmt.Sprintf("zero %d", i), nil, 0))
+	}
+	storeInOrder(t, db, evts)
+
+	got, approx, err := db.CountFiltered([]nostr.Filter{{Kinds: []int{1}}})
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if !approx || got < 3 || got > 5 {
+		t.Errorf("COUNT = %d (approximate %v), want 3 to 5 and approximate", got, approx)
+	}
+}

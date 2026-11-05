@@ -28,6 +28,7 @@ mkdir -p /opt && cd /opt
 [ -d cyberspace-relay ] || git clone --recurse-submodules https://github.com/arkin0x/cyberspace-relay.git
 cd cyberspace-relay
 git pull --ff-only
-git submodule update --init --recursive
+# sync, update, and stop unless nostrdb is at the pinned commit
+sh deploy/onosendai/sync-submodules.sh
 GRAIN_OWNER_PUBKEY="$GRAIN_OWNER_PUBKEY" docker compose -f deploy/onosendai/docker-compose.yml up -d --build
 docker compose -f deploy/onosendai/docker-compose.yml ps

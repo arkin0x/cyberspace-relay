@@ -138,8 +138,10 @@ func (db *NDB) purgeKind(kind int, cutoff int64, whitelistSet map[string]bool, e
 	deleted, failed := 0, 0
 	start := time.Unix(cutoff, 0)
 	// The cursor re-asks for the oldest second of each page and skips what it
-	// already handed out there: whitelisted events kept, and deleted ones,
-	// which are gone anyway. Same-second remainders past a page are reached.
+	// already handed out there, so same-second remainders past a page are
+	// reached. That covers kept (whitelisted) events and deleted ones alike:
+	// DeleteNoteByID only queues the delete for nostrdb's writer, so an event
+	// deleted from one page can still come back on the next until it lands.
 	cursor := NewPageCursor(&start)
 
 	for deleted < budget {
