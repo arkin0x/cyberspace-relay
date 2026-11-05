@@ -182,7 +182,10 @@ func TestChainRulesGoldenVectors(t *testing.T) {
 // (cyberspace-cli 5103c62) under the real exemption lists and no block line;
 // a chain that rides is cut before its first ride. Its "description" field
 // says how it was made. Every vector must reach the reference's verdict with
-// the checker the gate runs in production.
+// the checker the gate runs in production. The canonical copy is at the root
+// of arkin0x/cyberspace (added by arkin0x/cyberspace#87), which every implementation tests
+// against; this copy is byte for byte the same (sha256 54fc6318...). To
+// update it, regenerate it there and copy it here unchanged.
 const realVectorsFile = "testdata/chain-rules-2026-10-08-residue-openings-real.json"
 
 func TestRealChainVectors(t *testing.T) {

@@ -262,7 +262,7 @@ Beside them, from the real network and the spec:
 
 | Test | File | What |
 |---|---|---|
-| `TestRealChainVectors` | `chain-rules-2026-10-08-residue-openings-real.json` | 12 real chains read from `wss://cyberspace.nostr1.com` on 2026-11-04 (9 valid, 3 frozen by unlisted version 1 sidesteps), each with the reference verifier's verdict under the real lists and no line; a chain that rides is cut before its first ride. Each vector names its identity. |
+| `TestRealChainVectors` | `chain-rules-2026-10-08-residue-openings-real.json` | 12 real chains read from `wss://cyberspace.nostr1.com` on 2026-11-04 (9 valid, 3 frozen by unlisted version 1 sidesteps), each with the reference verifier's verdict under the real lists and no line; a chain that rides is cut before its first ride. Each vector names its identity. Copied unchanged from the root of arkin0x/cyberspace (arkin0x/cyberspace#87, sha256 `54fc6318…`), which is canonical: every implementation tests against that one file (owner ruling 2026-11-05). |
 | `TestRealProofs` | `real-proofs-2026-11-04.json` | 124 real proof-bearing events (version 2 hops at every h_max seen, every sidestep with `mn`, every boarding, one of which is invalid), each with the reference's verdict. `REGIONGATE_REAL_PROOFS=<path>` runs the full set of 553 in its place. |
 | `TestResidue*` | `hop-residue-vectors.json` | the spec's machine-readable vectors of residue openings (§5.10): primes, roots modulo p, residues, attempts, prices, sizes and 26 Level 1 verdicts. |
 | `TestRealChainCost` | (`REGIONGATE_REAL_CHAINS=<jsonl>`) | logs what verifying each identity's whole history costs; skipped without the variable. |
