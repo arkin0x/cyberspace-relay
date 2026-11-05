@@ -387,6 +387,7 @@ Beside them, from the real network and the spec:
 | `TestRealChainVectors` | `chain-rules-2026-10-08-residue-openings-real.json` | 12 real chains read from `wss://cyberspace.nostr1.com` on 2026-11-04 (9 valid, 3 frozen by unlisted version 1 sidesteps), each with the reference verifier's verdict under the real lists and no line; a chain that rides is cut before its first ride. Each vector names its identity. Copied unchanged from the root of arkin0x/cyberspace (arkin0x/cyberspace#87, sha256 `54fc6318…`), which is canonical: every implementation tests against that one file (owner ruling 2026-11-05). |
 | `TestRealProofs` | `real-proofs-2026-11-04.json` | 124 real proof-bearing events (version 2 hops at every h_max seen, every sidestep with `mn`, every boarding, one of which is invalid), each with the reference's verdict. `REGIONGATE_REAL_PROOFS=<path>` runs the full set of 553 in its place. |
 | `TestResidue*` | `hop-residue-vectors.json` | the spec's machine-readable vectors of residue openings (§5.10): primes, roots modulo p, residues, attempts, prices, sizes and 26 Level 1 verdicts. |
+| `TestParseRegionPathVectors` | `region-prefix-vectors.json` | 48 region strings (29 valid), each with its box (per-axis min, max, height and size, and the plane or none) and points inside and outside it: what `relay.onosendai.tech/<hex>` names, which is exactly what `www.onosendai.tech/C/<hex>` names (speakeasy ruling D7). Written from ONOSENDAI's own route code (origin/v2 `366e9df`, `src/lib/coordRoute.ts`) by `onosendai-region-vectors.ts`. Copied unchanged from the root of arkin0x/cyberspace (arkin0x/cyberspace#88), which is canonical; `TestRegionVectorsAreTheSpecCopy` holds the copy to its sha256 (`eaeec282…`). |
 | `TestRealChainCost` | (`REGIONGATE_REAL_CHAINS=<jsonl>`) | logs what verifying each identity's whole history costs; skipped without the variable. |
 
 The tools that made and cross-check these files are in
@@ -394,7 +395,9 @@ The tools that made and cross-check these files are in
 throwaway AUTH key), `build-real-vectors.py` and `real-proofs.py` (expected
 verdicts from the reference verifier), `reference-verdicts.py` (the reference
 over any vectors file) and `onosendai-run-vectors.ts` (ONOSENDAI's own chain
-review, `buildChain` and `firstBreak` from origin/v2, over any vectors file).
+review, `buildChain` and `firstBreak` from origin/v2, over any vectors file), and `onosendai-region-vectors.ts` (writes
+`region-prefix-vectors.json` from ONOSENDAI's `parseCoordRoute` and
+`prefixRegion`).
 
 ## Proofs
 
@@ -474,6 +477,16 @@ one as genesis): on the owner's history that skips 9,476 of 11,311.
 
 `base` must be aligned (the low H bits of each axis zero). Several regions
 may be listed; any match admits.
+
+A speakeasy path names its region by a region string, `ParseRegionPath` in
+`regionpath.go` (not routed yet): `/<hex>` is exactly ONOSENDAI's
+`/C/<hex>`. The hex is the top 4n bits of a coordinate (§2.2), so the region
+is every coordinate whose 64-hex form starts with it: a hint box whose
+heights are equal only when n is a multiple of 3. A prefix of 1 to 63
+characters leaves the plane bit open, so the box is the same in both planes;
+64 characters name one gibson in its own plane. Case, a leading `0x`,
+trailing slashes and percent-encoding are read as ONOSENDAI reads them; the
+shared vectors above lock every rule.
 
 ## Known limits
 
