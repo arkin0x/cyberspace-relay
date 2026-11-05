@@ -3,7 +3,8 @@
 # "not allowed: event kind is not whitelisted". To accept a new kind, add it
 # here and to the table in deploy/onosendai/README.md. grain reloads this file
 # when it is written in place (README.md, "Changing the config on the droplet").
-# Refused on purpose: 1, 4, 1059, 9735, 30023 (DMs go to inbox relays).
+# Refused on purpose: 1 (never, see the ruling below), 4, 1059, 9735, 30023
+# (DMs go to inbox relays).
 # config/deploy_onosendai_test.go checks this file.
 
 pubkey_whitelist:
@@ -14,6 +15,11 @@ pubkey_whitelist:
 
 kind_whitelist:
   enabled: true
+  # RULED (arkinox, 2026-11-05): "ALL cyberspace and onosendai events must be
+  # accepted by our relay. Add them. But, we never want to accept bare kind
+  # 1s." So every kind a Cyberspace or ONOSENDAI client publishes belongs on
+  # this list: when a client starts publishing a new kind, add it here in the
+  # same change. Kind 1 is never added; notes ride sealed inside bags only.
   kinds:
     # Cyberspace
     - "3333"   # movement chain (spawn, hops, sidesteps, hyperspace)

@@ -20,6 +20,10 @@ region.)
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
 
 Refused on purpose: 1, 4, 1059, 9735 and 30023; DMs go to inbox relays.
+RULED (arkinox, 2026-11-05): "ALL cyberspace and onosendai events must be
+accepted by our relay. Add them. But, we never want to accept bare kind 1s."
+A kind a Cyberspace or ONOSENDAI client starts publishing is added to
+`whitelist.yml` and this table in the same change; kind 1 never is.
 Reads are open. NIP-70 protected events need NIP-42 AUTH from their author.
 NIP-09 deletions by the author are honored. To accept a new kind, add it to
 `whitelist.yml` here and on the droplet's volume (see "Changing the config on
@@ -107,14 +111,54 @@ client could claim any address.
 
 ## Update
 
+One sequence, in this order. Each step runs only if the one before it
+succeeded; stop at the first failure.
+
 ```sh
-cd /opt/cyberspace-relay && git pull --ff-only && git submodule update --init --recursive
-GRAIN_OWNER_PUBKEY=<operator npub> docker compose -f deploy/onosendai/docker-compose.yml up -d --build
+C="docker compose -f deploy/onosendai/docker-compose.yml"
+B=/root/relay-config-backup; mkdir -p $B; S=$(date +%Y%m%d-%H%M%S)
+
+# 1. Preflight, on the first deploy with the trusted-proxy compose file (see
+#    "Trusted proxy" above): nothing else may use 172.30.0.0/24. If anything
+#    listed here overlaps it, stop and change the range first.
+docker network inspect $(docker network ls -q) | grep -i subnet
+ip route
+
+# 2. Pull.
+cd /opt/cyberspace-relay && git pull --ff-only
+
+# 3. Submodules, then 4. the build, which runs only if step 3 succeeded.
+sh deploy/onosendai/sync-submodules.sh \
+  && GRAIN_OWNER_PUBKEY=<operator npub> $C up -d --build
+
+# 5. Config, written in place on the volume (see "Changing the config" below).
+#    a. Keep what is live now, and see how it differs from the repo.
+for f in whitelist.yml config.yml; do $C exec -T relay cat /data/$f > $B/$f.$S; done
+diff -u $B/whitelist.yml.$S deploy/onosendai/whitelist.yml
+diff -u $B/config.yml.$S deploy/onosendai/config.yml
+#    If a diff shows more than the change you are applying (a setting changed
+#    through /admin or by hand lives only on the volume), stop and carry it
+#    into the repo file first, or it is lost.
+#    b. The whitelist, then config.yml, one at a time.
+$C exec -T relay sh -c 'cat > /data/whitelist.yml' < deploy/onosendai/whitelist.yml
+sleep 8; $C logs --since 20s relay | grep -E 'triggering restart|Whitelist configuration loaded|Server instance started|Failed'
+$C exec -T relay sh -c 'cat > /data/config.yml' < deploy/onosendai/config.yml
+sleep 8; $C logs --since 20s relay | grep -E 'triggering restart|Rate limiters configured|Server instance started|Failed'
+
+# 6. Log checks: the relay is up on the new build and the new config.
+$C ps
+$C logs --since 2m relay | grep -E 'Server instance started|Rate limiters configured|Failed|ERROR'
 ```
 
+`sync-submodules.sh` syncs submodule URLs from `.gitmodules`, updates them, and
+stops (so nothing is built) unless nostrdb is at the commit this checkout pins.
+
 The profile's files seed the data volume only on first boot (the entrypoint
-never overwrites a file already there), so a rebuild does not change the
-config. Change it on the volume as below.
+never overwrites a file already there), so step 4 does not change the config;
+step 5 does. Each write in step 5 should log `Config file change debounced,
+triggering restart`, then `Server instance started successfully`; the
+config.yml write also logs `Rate limiters configured (per-client)` with
+ws_limit 60 and req_limit 20. With no config change to apply, skip step 5.
 
 ## Changing the config on the droplet
 
@@ -123,38 +167,8 @@ file it opened at start is written. It does not see a file that was replaced:
 `docker cp`, `mv`, `sed -i`, an editor that saves by rename, and every save
 through `/admin` put a new file in its place, and from then on that file is
 not watched until the relay restarts. So write the files in place, with
-`cat >`, one at a time, and check the log after each.
-
-As root on the droplet:
-
-```sh
-cd /opt/cyberspace-relay && git pull --ff-only
-C="docker compose -f deploy/onosendai/docker-compose.yml"
-B=/root/relay-config-backup; mkdir -p $B; S=$(date +%Y%m%d-%H%M%S)
-
-# 1. Keep what is live now, and see how it differs from the repo.
-for f in whitelist.yml config.yml; do $C exec -T relay cat /data/$f > $B/$f.$S; done
-diff -u $B/whitelist.yml.$S deploy/onosendai/whitelist.yml
-diff -u $B/config.yml.$S deploy/onosendai/config.yml
-```
-
-If a diff shows more than the change you are applying (a setting changed
-through `/admin` or by hand lives only on the volume), stop and carry it into
-the repo file first, or it is lost.
-
-```sh
-# 2. The whitelist, in place; then the reload in the log.
-$C exec -T relay sh -c 'cat > /data/whitelist.yml' < deploy/onosendai/whitelist.yml
-sleep 8; $C logs --since 20s relay | grep -E 'triggering restart|Whitelist configuration loaded|Server instance started|Failed'
-
-# 3. The same for config.yml.
-$C exec -T relay sh -c 'cat > /data/config.yml' < deploy/onosendai/config.yml
-sleep 8; $C logs --since 20s relay | grep -E 'triggering restart|Rate limiters configured|Server instance started|Failed'
-```
-
-Each write should log `Config file change debounced, triggering restart`,
-then `Server instance started successfully`; step 3 also logs
-`Rate limiters configured (per-client)` with ws_limit 60 and req_limit 20.
+`cat >`, one at a time, and check the log after each, as in step 5 above.
+Step 4 recreates the container, so right after it the watchers are fresh.
 
 - **No `triggering restart` line:** the watcher lost the file (it was
   replaced earlier, see above). The file on the volume is right, so

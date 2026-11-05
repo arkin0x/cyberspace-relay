@@ -106,7 +106,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 func TestOnosendaiWhitelistRefusesWhatTheOwnerRefused(t *testing.T) {
 	kinds := onosendaiKinds(t)
 	// arkinox: notes, legacy DMs, gift wraps, zap receipts and long-form are
-	// refused on purpose; DMs go to inbox relays.
+	// refused on purpose; DMs go to inbox relays. RULED 2026-11-05: "we never
+	// want to accept bare kind 1s".
 	for _, k := range []int{1, 4, 1059, 9735, 30023} {
 		if kinds[k] {
 			t.Errorf("whitelist.yml accepts kind %d, which the owner refused", k)
