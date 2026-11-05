@@ -72,6 +72,9 @@ func (rp *RelayPool) acquire(url string, openTimeout time.Duration, bypassBackof
 	if !ok {
 		return nil, fmt.Errorf("invalid relay url: %q", url)
 	}
+	if err := CheckDial(url); err != nil {
+		return nil, err
+	}
 	url = normalized
 
 	for {

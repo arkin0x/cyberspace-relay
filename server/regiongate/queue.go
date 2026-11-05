@@ -26,6 +26,9 @@ type workQueue struct {
 	workers, max, perIP, perPubkey int
 	timeout                        time.Duration
 	run                            func(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string)
+	// runIn, when set, is used instead of run: it is also told the region
+	// set the request is judged in (submitIn), which a shared gate needs.
+	runIn func(ctx context.Context, pubkey string, incoming *nostr.Event, in *Regions) (bool, string)
 	// member, when set, reports whether a pubkey is a known member (an
 	// admitted cached entry). Members' jobs are taken before anyone
 	// else's, so fresh keys building costly chains cannot starve players.
@@ -63,9 +66,11 @@ type job struct {
 	running bool
 }
 
-// waiter is one request: a reader (incoming nil) or a movement event.
+// waiter is one request: a reader (incoming nil) or a movement event, judged
+// in the region set in.
 type waiter struct {
 	incoming *nostr.Event
+	in       *Regions
 	ip       string
 	network  string
 	class    int
@@ -86,7 +91,14 @@ func newWorkQueue(workers, max, perIP, perPubkey int, timeout time.Duration,
 // (a reader), for the client at ip ("" when unknown: no per-address limit),
 // and waits for its answer until ctx ends.
 func (q *workQueue) submit(ctx context.Context, ip, pubkey string, incoming *nostr.Event) (bool, string) {
-	w, refusal := q.enqueue(ip, pubkey, incoming)
+	return q.submitIn(ctx, ip, pubkey, incoming, nil)
+}
+
+// submitIn is submit for a request judged in the region set in. Requests
+// for one pubkey still share one job whatever their region: the check is the
+// same, and each waiter is answered in its own set.
+func (q *workQueue) submitIn(ctx context.Context, ip, pubkey string, incoming *nostr.Event, in *Regions) (bool, string) {
+	w, refusal := q.enqueue(ip, pubkey, incoming, in)
 	if refusal != "" {
 		return false, refusal
 	}
@@ -111,7 +123,7 @@ func (q *workQueue) pending(pubkey string) bool {
 	return q.jobs[pubkey] != nil
 }
 
-func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, string) {
+func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event, in *Regions) (*waiter, string) {
 	network := networkBucket(ip)
 	ip = addressBucket(ip)
 	class := 1
@@ -174,7 +186,7 @@ func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, 
 			}
 		}
 	}
-	w := &waiter{incoming: incoming, ip: ip, network: network, class: class, units: units, done: make(chan struct{})}
+	w := &waiter{incoming: incoming, in: in, ip: ip, network: network, class: class, units: units, done: make(chan struct{})}
 	q.hold(w)
 	if j == nil {
 		q.seq++
@@ -271,17 +283,27 @@ func (q *workQueue) work() {
 			ok     bool
 			reason string
 		}
-		byEvent := map[string]answer{}
+		// The same event sent again is answered once per region set: an
+		// answer for one set is never another's.
+		type asked struct {
+			id string
+			in *Regions
+		}
+		byEvent := map[asked]answer{}
 		for _, w := range batch {
 			if w.incoming != nil {
-				if a, done := byEvent[w.incoming.ID]; done {
+				if a, done := byEvent[asked{w.incoming.ID, w.in}]; done {
 					w.ok, w.reason = a.ok, a.reason
 					continue
 				}
 			}
-			w.ok, w.reason = q.run(ctx, j.pubkey, w.incoming)
+			if q.runIn != nil {
+				w.ok, w.reason = q.runIn(ctx, j.pubkey, w.incoming, w.in)
+			} else {
+				w.ok, w.reason = q.run(ctx, j.pubkey, w.incoming)
+			}
 			if w.incoming != nil {
-				byEvent[w.incoming.ID] = answer{w.ok, w.reason}
+				byEvent[asked{w.incoming.ID, w.in}] = answer{w.ok, w.reason}
 			}
 		}
 		cancel()

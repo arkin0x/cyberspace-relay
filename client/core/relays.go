@@ -220,6 +220,9 @@ func NewRelayPool(config *Config) *RelayPool {
 
 // Connect establishes a connection to a relay
 func (rp *RelayPool) Connect(url string) error {
+	if err := CheckDial(url); err != nil {
+		return err
+	}
 	normalized, ok := normalizeRelayURL(url)
 	if !ok {
 		return fmt.Errorf("invalid relay url: %q", url)

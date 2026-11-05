@@ -142,7 +142,7 @@ func dispatchNIP86(req nip86Request, signer string) (any, string) {
 
 	// ─── reads ─────────────────────────────────────────────────
 	case "supportedmethods":
-		return supportedNIP86Methods(), ""
+		return supportedNIP86(), ""
 	case "listallowedpubkeys":
 		return listAllowedPubkeysNIP86(), ""
 	case "listbannedpubkeys":
@@ -241,6 +241,11 @@ func dispatchNIP86(req nip86Request, signer string) (any, string) {
 		return gatherStatsOverview(), ""
 
 	default:
+		if a := currentSpeakeasyAdmin(); a != nil {
+			if run, ok := speakeasyMethods(a)[req.Method]; ok {
+				return run(req.Params, signer)
+			}
+		}
 		return nil, "method not supported: " + req.Method
 	}
 }
@@ -298,6 +303,16 @@ func supportedNIP86Methods() []string {
 		"grain_blacklistconfig",
 		"grain_stats_overview",
 	}
+}
+
+// supportedNIP86 is supportedNIP86Methods plus the speakeasy methods when
+// speakeasies are on.
+func supportedNIP86() []string {
+	out := supportedNIP86Methods()
+	if currentSpeakeasyAdmin() != nil {
+		out = append(out, speakeasyMethodNames...)
+	}
+	return out
 }
 
 // listAllowedPubkeysNIP86 returns grain's *configured* whitelist — the

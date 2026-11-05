@@ -134,13 +134,23 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 	// Advisory only (sent after every rejection path): the query still runs.
 	sendPrefixMatchNotice(client, filters)
 
-	// Query database for historical events
-	db := nostrdb.GetDB()
-	if db == nil {
+	// Query database for historical events: the scope's own, or the root's.
+	// A speakeasy's database is held only while the queries run, not while
+	// the events are sent.
+	scope := ScopeOf(client)
+	db, release, err := acquireDB(scope)
+	if err != nil {
+		if scope != nil {
+			log.Req().Warn("Speakeasy database not available", "sub_id", subID, "path", scope.Path, "error", err)
+			client.DeleteSubscription(subID)
+			response.SendClosed(client, subID, "error: "+err.Error())
+			return
+		}
 		log.Req().Error("Database not available", "sub_id", subID)
 		response.SendClosed(client, subID, "error: database not available")
 		return
 	}
+	defer release()
 
 	// Determine effective limit from config
 	effectiveLimit := 1000
@@ -185,6 +195,7 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 		}
 		queriedEvents = append(queriedEvents, evts...)
 	}
+	release()
 
 	// Send historical events to client. Use SendMessageBlocking so the
 	// producer (this loop) stays in step with the writeLoop consumer —

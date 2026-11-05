@@ -22,6 +22,9 @@ var LiveReadGate func(pubkey string) bool
 // always needs AUTH, whatever auth.required says, so the gate cannot be
 // opened by a config slip.
 func readGateRefusal(client nostr.ClientInterface, timeout time.Duration) (string, bool) {
+	if s := ScopeOf(client); s != nil {
+		return scopeReadRefusal(client, s, timeout)
+	}
 	if ReadGate == nil {
 		return "", false
 	}
@@ -57,4 +60,23 @@ func gateContext(ctx context.Context, client nostr.ClientInterface) context.Cont
 func ClientIP(ctx context.Context) string {
 	ip, _ := ctx.Value(clientIPKey{}).(string)
 	return ip
+}
+
+// scopeReadRefusal is readGateRefusal on a scope's connection: AUTH always,
+// then the scope's own read gate. A scope with no read gate refuses (it
+// would be an open door into a speakeasy).
+func scopeReadRefusal(client nostr.ClientInterface, s *Scope, timeout time.Duration) (string, bool) {
+	pubkey := GetAuthedPubkey(client)
+	if pubkey == "" {
+		return scopeAuthRequired, true
+	}
+	if s.Read == nil {
+		return "restricted: this speakeasy is not serving readers", true
+	}
+	ctx, cancel := context.WithTimeout(gateContext(context.Background(), client), timeout)
+	defer cancel()
+	if ok, msg := s.Read(ctx, pubkey); !ok {
+		return msg, true
+	}
+	return "", false
 }

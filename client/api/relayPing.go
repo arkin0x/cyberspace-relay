@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0ceanslim/grain/client/core"
 	"github.com/0ceanslim/grain/server/utils/log"
 	"golang.org/x/net/websocket"
 )
@@ -135,7 +136,9 @@ func pingSpecificURL(url string) int64 {
 	go func() {
 		origin := "http://localhost/"
 		var err error
-		conn, err = websocket.Dial(url, "", origin)
+		if err = core.CheckDial(url); err == nil {
+			conn, err = websocket.Dial(url, "", origin)
+		}
 		done <- err
 	}()
 

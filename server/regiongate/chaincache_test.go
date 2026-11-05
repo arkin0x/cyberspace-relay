@@ -1606,7 +1606,7 @@ func TestMembersPastTheCapAreBounded(t *testing.T) {
 	waitFor(t, func() bool { q.mu.Lock(); defer q.mu.Unlock(); return q.running == 1 && len(q.rings[1]) == 0 })
 	admitted := 0
 	for i := 0; i < 200; i++ {
-		if w, refusal := q.enqueue(fmt.Sprintf("10.%d.%d.1", i/200, i%200), fmt.Sprintf("m%d", i), nil); refusal == "" && w != nil {
+		if w, refusal := q.enqueue(fmt.Sprintf("10.%d.%d.1", i/200, i%200), fmt.Sprintf("m%d", i), nil, nil); refusal == "" && w != nil {
 			admitted++
 		}
 	}
