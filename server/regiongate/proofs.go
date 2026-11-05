@@ -655,16 +655,22 @@ const (
 // for an identity the gate already knows as a member (its position is in a
 // region the gate serves) takes the slot before any stranger waiting, so a
 // flood of strangers' forged rides cannot hold up a real rider for more than
-// the one leaf in progress. A stranger is never refused; it waits, and a
-// check its deadline ends while it waits keeps what it finished.
+// the one leaf in progress. Members-first is bounded as the work queue's is
+// (unknownEvery): while a stranger waits, at least every fourth grant is a
+// stranger's, so members keep three of every four and no stranger starves.
+// A stranger is never refused; it waits, and a check its deadline ends while
+// it waits keeps what it finished.
 var tallLeaves = &prioritySlot{}
 
 // prioritySlot is a one-holder lock whose waiters are served members first,
-// then strangers, each in arrival order.
+// then strangers, each in arrival order, but a waiting stranger at least
+// every unknownEvery-th grant.
 type prioritySlot struct {
 	mu                 sync.Mutex
 	busy               bool
 	members, strangers []chan struct{}
+	// memberRun counts the grants to members since the last to a stranger.
+	memberRun int
 }
 
 // acquire takes the slot, or returns ctx's error once ctx ends first.
@@ -672,6 +678,7 @@ func (p *prioritySlot) acquire(ctx context.Context, member bool) error {
 	p.mu.Lock()
 	if !p.busy {
 		p.busy = true
+		p.granted(member)
 		p.mu.Unlock()
 		return nil
 	}
@@ -702,19 +709,31 @@ func (p *prioritySlot) acquire(ctx context.Context, member bool) error {
 }
 
 // release hands the slot to the first member waiting, else the first
-// stranger, else frees it.
+// stranger, else frees it; but to a waiting stranger once members have had
+// unknownEvery-1 grants in a row.
 func (p *prioritySlot) release() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	strangerTurn := len(p.strangers) > 0 && p.memberRun >= unknownEvery-1
 	switch {
-	case len(p.members) > 0:
+	case len(p.members) > 0 && !strangerTurn:
 		close(p.members[0])
 		p.members = p.members[1:]
+		p.granted(true)
 	case len(p.strangers) > 0:
 		close(p.strangers[0])
 		p.strangers = p.strangers[1:]
+		p.granted(false)
 	default:
 		p.busy = false
+	}
+}
+
+func (p *prioritySlot) granted(member bool) {
+	if member {
+		p.memberRun++
+	} else {
+		p.memberRun = 0
 	}
 }
 

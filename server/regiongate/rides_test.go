@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"math/bits"
 	"os"
@@ -544,6 +545,85 @@ func TestAMembersCheckRunsAsAMembers(t *testing.T) {
 	}
 	if len(proofs.members) != n+1 || !proofs.members[n] {
 		t.Fatalf("the member's check did not run as a member's: %v", proofs.members[n:])
+	}
+}
+
+// slotWaiters is how many members and strangers wait for slot.
+func slotWaiters(slot *prioritySlot) (int, int) {
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	return len(slot.members), len(slot.strangers)
+}
+
+func waitForWaiters(t *testing.T, slot *prioritySlot, members, strangers int) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if m, s := slotWaiters(slot); m == members && s == strangers {
+			return
+		}
+	}
+	m, s := slotWaiters(slot)
+	t.Fatalf("waiting: %d members and %d strangers, want %d and %d", m, s, members, strangers)
+}
+
+// TestAStrangerGetsEveryFourthTallLeaf: members-first is bounded as the
+// work queue's is, so a stranger waiting behind a run of members gets the
+// slot after three of them.
+func TestAStrangerGetsEveryFourthTallLeaf(t *testing.T) {
+	slot := &prioritySlot{}
+	slot.acquire(context.Background(), false)
+	var mu sync.Mutex
+	var order []string
+	var wg sync.WaitGroup
+	wait := func(name string, member bool) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			slot.acquire(context.Background(), member)
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			slot.release()
+		}()
+	}
+	wait("stranger", false)
+	waitForWaiters(t, slot, 0, 1)
+	for i := 1; i <= 6; i++ {
+		wait(fmt.Sprintf("m%d", i), true)
+		waitForWaiters(t, slot, i, 1)
+	}
+	slot.release()
+	wg.Wait()
+	if got := strings.Join(order, " "); got != "m1 m2 m3 stranger m4 m5 m6" {
+		t.Fatalf("served %s", got)
+	}
+}
+
+// TestAMembersRideReachesTheSlotAsAMember: a tall leaf computed for a
+// member's check waits with the members, a stranger's with the strangers,
+// so members-first cannot fall back to arrival order unseen.
+func TestAMembersRideReachesTheSlotAsAMember(t *testing.T) {
+	if err := tallLeaves.acquire(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	defer tallLeaves.release()
+	for _, member := range []bool{true, false} {
+		ctx, cancel := context.WithCancel(WithMember(context.Background(), member))
+		done := make(chan error, 1)
+		go func() {
+			_, err := rideLeafKept(ctx, make([]byte, 32), 7, make([]byte, 32), tallLeafHeight, nil)
+			done <- err
+		}()
+		if member {
+			waitForWaiters(t, tallLeaves, 1, 0)
+		} else {
+			waitForWaiters(t, tallLeaves, 0, 1)
+		}
+		cancel()
+		if err := <-done; err != errRideCut {
+			t.Fatalf("member %v: %v", member, err)
+		}
+		waitForWaiters(t, tallLeaves, 0, 0)
 	}
 }
 

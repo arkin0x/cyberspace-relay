@@ -642,7 +642,9 @@ stop of `B` (§5.5 step 2), and the hashes of its sampled blocks (§5.3).
   computed at a time in the whole process, and known members (an identity
   whose position is in a region the gate serves) take that slot before any
   stranger waiting, so strangers' forged rides delay a member by at most the
-  one leaf in progress, and a stranger is never refused, only made to wait;
+  one leaf in progress, bounded as the work queue's members-first is (while
+  a stranger waits, at least every fourth grant is a stranger's, so none
+  starves), and a stranger is never refused, only made to wait;
   and a check cut short by its
   deadline keeps its G, its finished leaves and the one tall tree in progress
   (`RideProgress`, by event id and block hash), so the next check goes on
