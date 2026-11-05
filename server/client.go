@@ -67,7 +67,15 @@ type Client struct {
 	// Message monitoring
 	messagesSent int64
 	mu           sync.RWMutex // Protects lastActivity
+
+	// scope is the speakeasy this connection reached, or nil for the root
+	// relay. Set before the connection's first message and never changed.
+	scope *handlers.Scope
 }
+
+// Scope is the connection's speakeasy, or nil for the root relay
+// (handlers.ScopeOf reads it).
+func (c *Client) Scope() *handlers.Scope { return c.scope }
 
 // clientOutgoingBuffer is the per-client outbound queue capacity. 1024
 // leaves headroom for both REQ historical-fulfillment runs (up to
@@ -146,6 +154,12 @@ func PrintStats(ctx context.Context) {
 }
 
 func ClientHandler(ws *websocket.Conn) {
+	clientHandler(ws, nil)
+}
+
+// clientHandler serves one websocket connection, to the root relay (scope
+// nil) or to a speakeasy.
+func clientHandler(ws *websocket.Conn, scope *handlers.Scope) {
 	cfg := config.GetConfig()
 
 	// Enforce max connections. The per-rejection WARN was replaced in
@@ -193,6 +207,8 @@ func ClientHandler(ws *websocket.Conn) {
 		userAgent:   userAgent,
 		origin:      origin,
 		connectedAt: time.Now(),
+
+		scope: scope,
 	}
 
 	clientsMu.Lock()
@@ -897,10 +913,50 @@ func BroadcastEvent(evt nostr.Event) {
 		if !c.IsConnected() {
 			continue
 		}
+		// The root's events never reach a speakeasy's connections.
+		if c.scope != nil {
+			continue
+		}
 		if protected && !handlers.CanServeProtectedEvent(evt, handlers.GetAuthedPubkey(c)) {
 			continue
 		}
 		if handlers.LiveReadGate != nil && !handlers.LiveReadGate(handlers.GetAuthedPubkey(c)) {
+			continue
+		}
+		c.ForEachSubscription(func(subID string, filters []nostr.Filter) {
+			for _, f := range filters {
+				if f.MatchesEvent(evt) {
+					c.SendMessage([]interface{}{"EVENT", subID, evt})
+					break
+				}
+			}
+		})
+	}
+}
+
+// broadcastScoped pushes an event stored in speakeasy id to that
+// speakeasy's connections (any of its paths) whose subscriptions match and
+// whose authenticated pubkey live allows. Nothing else receives it.
+func broadcastScoped(id string, evt nostr.Event, live func(pubkey string) bool) {
+	clientsMu.Lock()
+	snapshot := make([]*Client, 0, len(clients))
+	for _, c := range clients {
+		if c.scope != nil && c.scope.ID == id {
+			snapshot = append(snapshot, c)
+		}
+	}
+	clientsMu.Unlock()
+
+	protected := config.IsDMProtectedKind(evt.Kind)
+	for _, c := range snapshot {
+		if !c.IsConnected() {
+			continue
+		}
+		pubkey := handlers.GetAuthedPubkey(c)
+		if protected && !handlers.CanServeProtectedEvent(evt, pubkey) {
+			continue
+		}
+		if live == nil || !live(pubkey) {
 			continue
 		}
 		c.ForEachSubscription(func(subID string, filters []nostr.Filter) {

@@ -1,0 +1,42 @@
+# speakeasies.yml: many speakeasies on one relay (docs/region-gate.md,
+# "Speakeasies at their own paths"). Put it in the data directory beside
+# config.yml. Once this file exists, only / is the root relay: a registered
+# path is its speakeasy, and every other path answers a websocket, NIP-11 or
+# NIP-86 request with 404, also when this file is invalid or enabled is false.
+enabled: true
+
+# The relay's public websocket URL, without a path. A speakeasy's one URL
+# is public_url/<region>, and its NIP-42 AUTH must name exactly that.
+# Default: auth.relay_url from config.yml. auth.relay_url_match must be
+# "strict" while speakeasies are on.
+# public_url: "wss://relay.onosendai.tech"
+
+# Databases: one nostrdb database per speakeasy (ruling D1), under
+# <data dir>/speakeasies/db/<region>, opened on first use and closed after
+# idle_close_seconds unused, at most max_open_databases at once (past it the
+# least recently used idle one is closed; when all are in use: "busy, try
+# again"). 1 ingest thread each. map_size_mb is address space, not memory or
+# disk.
+max_open_databases: 16
+idle_close_seconds: 300
+map_size_mb: 4096
+
+# Websocket connections to one speakeasy at once. server.max_connections
+# still caps the relay.
+max_connections_per_path: 200
+
+# A region string shorter than a full coordinate never fixes the plane, so
+# a speakeasy spans both planes, as ONOSENDAI draws its region. [0] or [1]
+# keeps every speakeasy to one plane (owner decision pending).
+planes: [0, 1]
+
+# The chain settings every speakeasy is judged with: the keys of region.yml
+# except enabled, regions and gate_reads. One chain cache and one work queue
+# serve them all.
+gate:
+  mode: strict
+  chain_relays: []
+  use_local_events: true
+  # exempt_pubkeys: []      # read and write in every speakeasy
+  # always_allow_kinds: [5] # deletions by their own author, after leaving
+  max_hop_verify_height: 24

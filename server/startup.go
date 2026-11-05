@@ -20,6 +20,7 @@ import (
 	relay "github.com/0ceanslim/grain/server/api"
 	"github.com/0ceanslim/grain/server/db/nostrdb"
 	"github.com/0ceanslim/grain/server/handlers"
+	"github.com/0ceanslim/grain/server/speakeasy"
 	"github.com/0ceanslim/grain/server/utils"
 	"github.com/0ceanslim/grain/server/utils/log"
 	"github.com/0ceanslim/grain/server/validation"
@@ -163,6 +164,11 @@ func startConfigWatchers(restartChan chan<- struct{}) {
 	if _, err := os.Stat(config.ConfigPath(regionConfigFile)); err == nil {
 		watchFiles = append(watchFiles, regionConfigFile)
 	}
+	// speakeasies.yml likewise (the registry beside it is data, written by
+	// the relay itself, and needs no restart).
+	if _, err := os.Stat(config.ConfigPath(speakeasy.ConfigFile)); err == nil {
+		watchFiles = append(watchFiles, speakeasy.ConfigFile)
+	}
 
 	for _, file := range watchFiles {
 		go config.WatchConfigFile(config.ConfigPath(file), restartChan)
@@ -225,6 +231,11 @@ func runServerInstance(shutdownChan <-chan struct{}, restartChan <-chan struct{}
 		log.Startup().Error("Failed to initialize subsystems", "error", err)
 		return
 	}
+
+	// Speakeasies (speakeasies.yml): their databases are closed before the
+	// instance is gone, so the next instance can open them.
+	stopSpeakeasies := startSpeakeasies(ctx, cfg)
+	defer stopSpeakeasies()
 
 	// Tear down the client subsystem on instance stop. ctx cancellation stops
 	// the periodic client goroutines; this closes the core relay pool itself,
@@ -341,6 +352,11 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 	// Optional admission gate (region.yml).
 	startRegionGate()
 
+	// With speakeasies.yml, the built-in client (its connections are shared
+	// by every visitor) never connects to a speakeasy path. Installed before
+	// the client starts dialing.
+	installSpeakeasyDialGuard()
+
 	// Initialize client package with server configuration. This must happen
 	// BEFORE InitializePubkeyCache because the initial blacklist refresh
 	// fetches per-author NIP-65 mute lists via the core client; without it
@@ -373,7 +389,7 @@ func setupHTTPServer(cfg *cfgType.ServerConfig) *http.Server {
 
 	server := &http.Server{
 		Addr:         cfg.Server.Port,
-		Handler:      httpGuard(mux),
+		Handler:      speakeasyRoutes(httpGuard(mux)),
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
 		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,

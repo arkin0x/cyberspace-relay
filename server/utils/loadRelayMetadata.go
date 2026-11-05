@@ -440,6 +440,13 @@ func LoadRelayMetadata(filename string) error {
 }
 
 func RelayInfoHandler(w http.ResponseWriter, r *http.Request) {
+	RelayInfoHandlerFor(w, r, nil)
+}
+
+// RelayInfoHandlerFor is RelayInfoHandler with edit applied to the document
+// last (after the version and the limitation overlay), so a speakeasy can
+// serve the relay's document as its own. A nil edit is RelayInfoHandler.
+func RelayInfoHandlerFor(w http.ResponseWriter, r *http.Request, edit func(*RelayMetadata)) {
 	clientIP := GetClientIP(r)
 
 	if r.Header.Get("Accept") != "application/nostr+json" {
@@ -479,6 +486,9 @@ func RelayInfoHandler(w http.ResponseWriter, r *http.Request) {
 	// the relay actually enforces, not the (often stale/zero) values on disk.
 	if LimitationProvider != nil {
 		LimitationProvider(&response.Limitation)
+	}
+	if edit != nil {
+		edit(&response)
 	}
 
 	err := json.NewEncoder(w).Encode(response)

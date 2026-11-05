@@ -116,6 +116,16 @@ type Gate struct {
 	rules string
 
 	queue *workQueue
+	// home is the region set of the gate's own config, the one Admit,
+	// AdmitPubkey and LiveAllowed judge in. shared marks a gate that judges
+	// in the region set each request names (NewSharedGate): one chain cache
+	// and one queue serve every speakeasy, since a chain's head is the same
+	// whatever region asks.
+	home   *Regions
+	shared bool
+	// memberIn, on a shared gate, reports whether a position lies in any
+	// region the gate serves (SetMemberRegions); nil: none.
+	memberIn func(Coord) bool
 
 	mu     sync.Mutex
 	chains *chainCache
@@ -142,11 +152,27 @@ func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 		rules:  fmt.Sprintf("%s mode=%s max_hop_verify_height=%d", ChainRulesRevision, cfg.Mode, orDefault(cfg.MaxHopVerifyHeight, DefaultMaxHopHeight)),
 		chains: newChainCache(orDefault(cfg.MaxCachedChains, 4096)),
 		failed: newFailedSet(), progress: map[string]*Known{},
+		home: NewRegions(cfg.boxes...),
 	}
 	g.verifier.failed = g.failedEvent
 	g.queue = newWorkQueue(orDefault(cfg.MaxConcurrentLookups, defaultLookups()), orDefault(cfg.MaxQueuedLookups, 256),
-		orDefault(cfg.MaxQueuedPerIP, 8), maxQueuedPerPubkey, time.Duration(orDefault(cfg.CheckTimeoutSeconds, 30))*time.Second, g.run)
+		orDefault(cfg.MaxQueuedPerIP, 8), maxQueuedPerPubkey, time.Duration(orDefault(cfg.CheckTimeoutSeconds, 30))*time.Second, nil)
+	g.queue.runIn = g.run
 	g.queue.member = g.isMember
+	return g
+}
+
+// NewSharedGate builds a gate for many region sets at once (the
+// speakeasies): every request names the Regions it is judged in (AdmitIn,
+// AdmitPubkeyIn, LiveAllowedIn), and the chain cache, the failed set and the
+// work queue are shared by all of them. The config's regions are not used.
+// A known member, for the queue and the cache's eviction, is an identity
+// whose position lies in any region the gate serves (SetMemberRegions),
+// whichever region asked: fresh keys spawned elsewhere cost an attacker
+// nothing and must never evict a player.
+func NewSharedGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
+	g := NewGate(cfg, verifier, sources...)
+	g.home, g.shared = NewRegions(), true
 	return g
 }
 
@@ -166,6 +192,10 @@ func (g *Gate) isMember(pubkey string) bool {
 	return e != nil && e.Value.(*cacheItem).entry.rules == g.rules
 }
 
+// IsMember reports whether pubkey is a known member: kept with the members
+// in the chain cache and served first by the work queue.
+func (g *Gate) IsMember(pubkey string) bool { return g.isMember(pubkey) }
+
 // WithClientIP returns ctx carrying the address of the client a request
 // came from, which the gate's work queue limits per address.
 func WithClientIP(ctx context.Context, ip string) context.Context {
@@ -182,18 +212,31 @@ func clientIP(ctx context.Context) string {
 // the author in, so moving into the region is admitted with the move itself
 // and moving out is refused.
 func (g *Gate) Admit(ctx context.Context, evt nostr.Event) (bool, string) {
-	if g.cfg.exempt[evt.PubKey] {
-		return true, ""
-	}
+	return g.AdmitIn(ctx, evt, g.home)
+}
+
+// AdmitIn is Admit judged in the region set in instead of the gate's own.
+func (g *Gate) AdmitIn(ctx context.Context, evt nostr.Event, in *Regions) (bool, string) {
 	for _, k := range g.cfg.AlwaysAllowKinds {
 		if evt.Kind == k {
 			return true, ""
 		}
 	}
-	if evt.Kind == KindMovement {
-		return g.check(ctx, evt.PubKey, &evt)
+	return g.AdmitAuthorIn(ctx, evt, in)
+}
+
+// AdmitAuthorIn is AdmitIn without always_allow_kinds: the event is admitted
+// only when its author is exempt or inside in (with the event itself, for a
+// movement event). A speakeasy judges with it, since a kind admitted from
+// anyone would let anyone write into a private room.
+func (g *Gate) AdmitAuthorIn(ctx context.Context, evt nostr.Event, in *Regions) (bool, string) {
+	if g.cfg.exempt[evt.PubKey] {
+		return true, ""
 	}
-	return g.AdmitPubkey(ctx, evt.PubKey)
+	if evt.Kind == KindMovement {
+		return g.check(ctx, evt.PubKey, &evt, in)
+	}
+	return g.AdmitPubkeyIn(ctx, evt.PubKey, in)
 }
 
 // AdmitPubkey reports whether a pubkey is inside the region right now: from
@@ -201,30 +244,35 @@ func (g *Gate) Admit(ctx context.Context, evt nostr.Event) (bool, string) {
 // judged with it (by the pubkey they authenticated as), and so are writers
 // of anything but movement events.
 func (g *Gate) AdmitPubkey(ctx context.Context, pubkey string) (bool, string) {
+	return g.AdmitPubkeyIn(ctx, pubkey, g.home)
+}
+
+// AdmitPubkeyIn is AdmitPubkey judged in the region set in.
+func (g *Gate) AdmitPubkeyIn(ctx context.Context, pubkey string, in *Regions) (bool, string) {
 	if g.cfg.exempt[pubkey] {
 		return true, ""
 	}
-	return g.check(ctx, pubkey, nil)
+	return g.check(ctx, pubkey, nil, in)
 }
 
 // check answers from the chain cache when that needs no new work, and
 // otherwise queues a check of the pubkey, with the incoming movement event
 // or none.
-func (g *Gate) check(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
-	if ok, reason, hit := g.cached(pubkey, incoming); hit {
+func (g *Gate) check(ctx context.Context, pubkey string, incoming *nostr.Event, in *Regions) (bool, string) {
+	if ok, reason, hit := g.cached(pubkey, incoming, in); hit {
 		return ok, reason
 	}
-	return g.queue.submit(ctx, clientIP(ctx), pubkey, incoming)
+	return g.queue.submitIn(ctx, clientIP(ctx), pubkey, incoming, in)
 }
 
 // cached is the verdict of pubkey's entry when it is fresh and, for a
 // movement event, already accounts for it or would answer the same with it
 // (sameVerdictWith): a re-sent event costs nothing, refused or not.
-func (g *Gate) cached(pubkey string, incoming *nostr.Event) (bool, string, bool) {
+func (g *Gate) cached(pubkey string, incoming *nostr.Event, in *Regions) (bool, string, bool) {
 	g.mu.Lock()
 	e := g.chains.get(pubkey, g.rules)
 	g.mu.Unlock()
-	if e == nil || !g.fresh(e) {
+	if e == nil || !g.fresh(e, in) {
 		return false, "", false
 	}
 	if incoming != nil && !e.accounted(incoming.ID) {
@@ -234,23 +282,43 @@ func (g *Gate) cached(pubkey string, incoming *nostr.Event) (bool, string, bool)
 			return false, "", false
 		}
 	}
-	ok, reason := g.judge(e.vd)
+	ok, reason := g.judge(e.vd, in)
 	return ok, reason, true
 }
 
 // fresh reports whether an entry is recent enough to answer without
-// asking the sources: for cache_ttl_seconds when it admits, for
-// negative_cache_ttl_seconds when it refuses.
-func (g *Gate) fresh(e *chainEntry) bool {
-	ok, _ := g.judge(e.vd)
+// asking the sources: for cache_ttl_seconds when it admits in the region
+// set asked about, for negative_cache_ttl_seconds when it refuses there. One
+// entry can be fresh for one speakeasy and stale for another: an identity
+// refused here is checked again sooner, in case it has moved in.
+func (g *Gate) fresh(e *chainEntry, in *Regions) bool {
+	ok, _ := g.judge(e.vd, in)
 	return g.now().Before(e.checkedAt.Add(g.cfg.cacheTTL(ok)))
 }
 
+// SetMemberRegions tells a shared gate which positions make a member: those
+// in any region it serves (the union of the registered speakeasies). It is
+// called before the gate serves.
+func (g *Gate) SetMemberRegions(inAny func(Coord) bool) { g.memberIn = inAny }
+
+// memberClass reports whether an entry belongs with the members in the
+// cache and the queue: admitted in the gate's own region, or, on a shared
+// gate, placed inside any region it serves.
+func (g *Gate) memberClass(vd Verdict, in *Regions) bool {
+	if g.shared {
+		pos := g.position(vd)
+		return pos != nil && g.memberIn != nil && g.memberIn(*pos)
+	}
+	ok, _ := g.judge(vd, in)
+	return ok
+}
+
 // run is one queued check, on a worker: it brings the pubkey's entry up to
-// date and stores it, unless the check was cut short.
-func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
+// date and stores it, unless the check was cut short. An incoming movement
+// event is judged in the region set its request named.
+func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event, in *Regions) (bool, string) {
 	// An earlier check of this job may have answered it already.
-	if ok, reason, hit := g.cached(pubkey, incoming); hit {
+	if ok, reason, hit := g.cached(pubkey, incoming, in); hit {
 		return ok, reason
 	}
 	g.mu.Lock()
@@ -263,7 +331,7 @@ func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event) (b
 	keep := o.base
 	ok, reason := false, o.refusal
 	if o.refusal == "" && o.with != nil {
-		if ok, reason = g.judge(o.with.vd); ok {
+		if ok, reason = g.judge(o.with.vd, in); ok {
 			keep = o.with
 		}
 	}
@@ -274,8 +342,7 @@ func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event) (b
 		}
 	}
 	if keep != nil {
-		admitted, _ := g.judge(keep.vd)
-		g.chains.put(pubkey, keep, admitted)
+		g.chains.put(pubkey, keep, g.memberClass(keep.vd, in))
 		delete(g.progress, pubkey)
 	}
 	g.mu.Unlock()
@@ -292,6 +359,11 @@ func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event) (b
 // cache_ttl_seconds plus one check), and an unknown pubkey gets nothing
 // until its check completes.
 func (g *Gate) LiveAllowed(pubkey string) bool {
+	return g.LiveAllowedIn(pubkey, g.home)
+}
+
+// LiveAllowedIn is LiveAllowed judged in the region set in.
+func (g *Gate) LiveAllowedIn(pubkey string, in *Regions) bool {
 	if pubkey == "" {
 		return false
 	}
@@ -301,17 +373,17 @@ func (g *Gate) LiveAllowed(pubkey string) bool {
 	g.mu.Lock()
 	e := g.chains.get(pubkey, g.rules)
 	g.mu.Unlock()
-	if (e == nil || !g.fresh(e)) && !g.queue.pending(pubkey) {
+	if (e == nil || !g.fresh(e, in)) && !g.queue.pending(pubkey) {
 		go func() {
 			ctx, cancel := context.WithTimeout(WithClientIP(context.Background(), liveBucket), g.lookupTimeout())
 			defer cancel()
-			g.AdmitPubkey(ctx, pubkey)
+			g.AdmitPubkeyIn(ctx, pubkey, in)
 		}()
 	}
 	if e == nil {
 		return false
 	}
-	ok, _ := g.judge(e.vd)
+	ok, _ := g.judge(e.vd, in)
 	return ok
 }
 
@@ -338,20 +410,31 @@ const maxGapRounds = 8
 // it respawns, and no event published on a frozen chain, the incoming one
 // included, can move it in or out. Only a respawn changes its position.
 // Strict mode takes the position from the proof-verified prefix.
-func (g *Gate) judge(vd Verdict) (bool, string) {
-	pos := vd.Position
-	if g.cfg.Mode == ModeStrict {
-		pos = vd.VerifiedPosition
-	}
+// Each request is judged in the region set it names (in).
+func (g *Gate) judge(vd Verdict, in *Regions) (bool, string) {
+	pos := g.position(vd)
 	switch {
 	case !vd.HasChain:
 		return false, "restricted: this relay is only for cyberspace identities inside its region; no movement chain found for your pubkey"
 	case pos == nil:
 		return false, "restricted: your cyberspace chain could not be verified: " + vd.Stopped
-	case !g.cfg.Contains(*pos):
+	case !in.Contains(*pos):
 		return false, "restricted: your cyberspace position is outside this relay's region"
 	}
 	return true, ""
+}
+
+// position is where the gate places the identity a verdict is about: the
+// proof-verified position in strict mode, the chain's otherwise; nil when
+// there is none.
+func (g *Gate) position(vd Verdict) *Coord {
+	if !vd.HasChain {
+		return nil
+	}
+	if g.cfg.Mode == ModeStrict {
+		return vd.VerifiedPosition
+	}
+	return vd.Position
 }
 
 // authentic reports whether an event counts for pubkey's chain at all: by

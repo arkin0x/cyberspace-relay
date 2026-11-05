@@ -89,12 +89,12 @@ func (rp *RelayPool) AuthChallenge(url string) string { return rp.messageRouter.
 // SendAuth sends a signed NIP-42 auth event (kind 22242) to a relay and marks it
 // authed for the session. The connection that issued the challenge must still be
 // open (the challenge is bound to it).
+//
+// It never does: the pool's connections are shared by every visitor, so an
+// authenticated one would serve one visitor's private events to all of them
+// (ErrSharedAuth). Answering challenges needs a connection per session.
 func (rp *RelayPool) SendAuth(url string, signedEvent *nostr.Event) error {
-	if err := rp.SendMessage(url, []interface{}{"AUTH", signedEvent}); err != nil {
-		return err
-	}
-	rp.messageRouter.MarkAuthed(url)
-	return nil
+	return ErrSharedAuth
 }
 
 // RemoveAuth forgets a relay's AUTH state.

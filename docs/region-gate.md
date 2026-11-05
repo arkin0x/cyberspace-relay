@@ -55,6 +55,123 @@ Verified over the wire: outsider REQ without AUTH `auth-required`, with AUTH
 `restricted`; member reads its note; member COUNT 1, outsider COUNT refused;
 `GET /`, `/api/v1/events/query`, `/api/v1/relay/stats`, `/static/*` all 404.
 
+## Speakeasies at their own paths
+
+`speakeasies.yml` in the data directory (start from
+[`examples/speakeasies.example.yml`](examples/speakeasies.example.yml)) makes
+`relay.onosendai.tech/<region>` its own speakeasy relay, for every region in
+the speakeasy registry, while the bare relay at `/` stays the relay it was
+(`docs/speakeasies.md`, step 3). `region.yml` still gates the root; the two
+are independent.
+
+| Path | Without `speakeasies.yml` | With it |
+|---|---|---|
+| `/` | the root relay | the root relay, unchanged |
+| `/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
+| another spelling of a registered region (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11: 301 to the one URL; websocket: 400 naming it |
+| any other path | the root relay | websocket, NIP-11, NIP-86: 404 "not a relay" |
+
+Once the file exists no path but `/` falls back to the root: also when it is
+invalid or says `enabled: false`, so a client that took `/<region>` for a
+speakeasy never posts its private room to the public relay. Paths are matched
+on the path as sent (`URL.EscapedPath()`), never through `http.ServeMux`,
+which cleans and redirects (`//abc`, `/x/../abc`, `/abc/.`); a plain browser
+request for a path goes on to grain's usual handlers.
+
+**One URL per speakeasy.** `public_url` (default `auth.relay_url`) plus `/`
+and the region string in its canonical spelling, as ONOSENDAI writes it after
+`/C/` (ruling D7): lowercase hex, no `0x`, no trailing slash. Its NIP-11 names
+it, and its NIP-42 AUTH must name exactly it, compared strictly (the path is
+significant) whatever `auth.relay_url_match` says. An AUTH for one speakeasy
+therefore never passes at another or at the root; the root must run
+`relay_url_match: strict` while speakeasies are on (otherwise they stay
+closed), so a speakeasy's AUTH cannot pass there either. Challenges are per
+connection and spent on use, as before.
+
+**Inside a speakeasy:**
+
+| What | Rule |
+|---|---|
+| REQ, COUNT | AUTH required (`auth-required:`), whatever `auth.required` says; then the authenticated pubkey must be inside the speakeasy's region (`restricted:`) |
+| EVENT | AUTH required; the author must be inside (a move into the region is admitted with the move; `exempt_pubkeys` always); when the sender is not the author, the sender must be inside too. `always_allow_kinds` opens nothing to outsiders: its one use here is kind 5 (when listed), from an author no longer inside, and only when it names at least one event and every event it names (`e` id or `a` address) is that author's own and stored in this speakeasy. Any other deletion from outside is refused and stored nowhere |
+| Kinds | any kind (ruling D6): neither whitelist (kinds, pubkeys) applies; the blacklist (pubkeys, words, mute lists, IPs) does |
+| NIP-70 | a protected event only from its authenticated author, on that connection |
+| Live events | only to that speakeasy's own connections, and of those only to pubkeys admitted there (from the chain cache, without blocking); the root's live events never reach a speakeasy's connections |
+| Storage | its own nostrdb database (below); nothing it stores reaches the root database or a backup relay, and nothing at the root is served by it |
+| NIP-11 | the relay's document renamed (`Speakeasy <region>`, or the entry's own name and description), with `auth_required` and `restricted_writes` true |
+| NIP-86 | not at the speakeasy's path (404): the relay owner manages speakeasies at `/` (ruling D5) |
+| grain's web client and API | never connect to a speakeasy: its built-in client (`client/core`) is one pool of connections for every visitor, with AUTH per relay URL, so a speakeasy read over it would be read for everyone. While `speakeasies.yml` exists, every dial (the pool, the relay pings) is refused for a URL on any host whose path is a region string in any spelling, or a registered speakeasy path. And the client answers no NIP-42 challenge at all, from any relay: an authenticated shared connection would serve one visitor's private events (a speakeasy's notes, NIP-17 gift wraps) to every other |
+
+**The gate.** Every speakeasy is judged by one shared gate
+(`regiongate.NewSharedGate`), configured by the `gate:` section: one chain
+cache, one failed set and one work queue for all of them, since a chain's head
+is the same whatever region asks. A verdict is never shared: each request
+names its region set (`AdmitIn`, `AdmitPubkeyIn`, `LiveAllowedIn`), the queue
+answers each waiter in its own set (the same movement event sent to two
+speakeasies at once is checked once and judged twice), and freshness follows
+the asking region's verdict (`cache_ttl_seconds` where the identity is admitted,
+`negative_cache_ttl_seconds` where it is refused, so moving in is noticed
+soon). A member, for the queue and the cache, is an identity with a verified
+position inside any registered speakeasy's region: fresh keys spawned
+elsewhere cost an attacker nothing and never evict a player's entry. Chains
+are read from the root database and `chain_relays`, never from a speakeasy's
+database.
+
+**Planes.** A region string shorter than a full coordinate never fixes the
+plane bit, so a speakeasy spans the planes in `planes` (default both, as
+ONOSENDAI draws the region); a 64-character region names one gibson and keeps
+its own plane.
+
+**Storage (ruling D1).** One nostrdb database per speakeasy, in
+`<data dir>/speakeasies/db/<region>`, created at its first use, opened on
+demand and closed after `idle_close_seconds` with nothing using it. A database
+is held for one operation (one store, one query, not while the events are
+sent), so open websockets with live subscriptions keep nothing open. At most
+`max_open_databases` are open: the next one closes the least recently used
+idle one, and when all are in use the request is refused "busy, try again". 1
+ingest thread each; `map_size_mb` is each map's ceiling (address space). A
+database is never open twice in the process, and a server instance that stops
+(a config reload) closes its databases and refuses to open any for the
+connections it leaves behind ("relay restarting, try again").
+
+**The registry** is `<data dir>/speakeasies/registry.json`, written atomically
+by the relay. Until step 5 (paid creation) the relay owner writes it through
+NIP-86 at `/` (NIP-98 auth, signer = relay owner):
+
+| Method | Params | Does |
+|---|---|---|
+| `grain_speakeasy_list` | none | every speakeasy, its URL, whether its database is open, its connections |
+| `grain_speakeasy_add` | `[{"id": <region string, canonical>, "name"?, "description"?, "note"?}]` | registers it; the path names the region, which the registry stores (an entry may also give `"region": {"base", "heights"}`, which must be that region) |
+| `grain_speakeasy_remove` | `[<id>]` | unregisters it at once (open connections included); its database stays on disk, and adding it again serves it again |
+| `grain_speakeasy_deleteevent` | `[<id>, <event id>]` | deletes one event from that speakeasy (ruling D5) |
+
+They exist (and `supportedmethods` lists them) only while speakeasies are on.
+Paths are read by `regiongate.ParseRegionPath` (arkin0x/cyberspace-relay #18,
+the vectors shared with ONOSENDAI), given the path as sent: it decodes it
+once, so `/%2530a` (a double encoding) is not region `0a`, while `/0A`,
+`/0x0a`, `/0a/` and `/%30a` are, and are sent to `/0a`. An id must be a
+region string in its canonical spelling, and an entry's region is the one its
+id names. An entry that fails its checks at load is left out and logged; its
+path is then not a relay.
+Names (step 6) are refused for now; `speakeasy.CheckName` is the rule they
+will pass (ruling D3: 3 to 40 of `a-z0-9-`, not reserved, and never a string
+the region parser reads as a region, such as `cafe` or `0xabc`).
+
+| Limit | Default |
+|---|---|
+| `max_open_databases` | 16 |
+| `idle_close_seconds` | 300 |
+| `map_size_mb` | 4096 |
+| `max_connections_per_path` (all of one speakeasy's paths; `server.max_connections` still caps the relay) | 200 |
+
+Measured on a local build (the onosendai profile, `max_open_databases: 4`,
+`idle_close_seconds: 5`, `map_size_mb: 4096`): with 100 speakeasies
+registered and none open, RSS 24 MB, 18 threads, as idle as with none; with 5
+in use (4 open), RSS 46 MB, 26 threads (2 per open database), address space
++16 GB (4 maps); once idle again, 18 threads and 0 open. A request on a
+closed speakeasy opens its database in about 1.5 ms (0.25 ms when open). A
+used speakeasy took 124 KB on disk; an unused one takes none.
+
 ## Looking up a chain
 
 The gate asks each source two indexed questions, so an identity with a long

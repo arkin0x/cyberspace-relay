@@ -65,6 +65,14 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 
 	// Load config
 	cfg := config.GetConfig()
+	scope := ScopeOf(client)
+
+	// A speakeasy needs AUTH for everything, whatever auth.required says.
+	if scope != nil && !IsAuthenticated(client) {
+		log.Event().Info("EVENT rejected: speakeasy needs authentication", "event_id", evt.ID, "path", scope.Path)
+		response.SendOK(client, evt.ID, false, scopeAuthRequired)
+		return
+	}
 
 	// Enforce NIP-42 authentication if required
 	if cfg.Auth.Required {
@@ -125,8 +133,14 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 
 	eventSize := len(eventBytes)
 
-	// Blacklist/Whitelist check - uses validation methods that respect enabled state
-	result := validation.CheckBlacklistAndWhitelistCached(evt)
+	// Blacklist/Whitelist check - uses validation methods that respect enabled state.
+	// A speakeasy takes any kind (ruling D6): only the blacklist applies there.
+	var result validation.Result
+	if scope != nil {
+		result = validation.CheckBlacklistOnlyCached(evt)
+	} else {
+		result = validation.CheckBlacklistAndWhitelistCached(evt)
+	}
 	if !result.Valid {
 		log.Event().Info("Event rejected by cached blacklist/whitelist",
 			"event_id", evt.ID,
@@ -148,16 +162,28 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
-	// Check database availability
-	db := nostrdb.GetDB()
-	if db == nil {
+	// Check database availability: the scope's own, or the root's.
+	db, release, err := acquireDB(scope)
+	if err != nil {
+		if scope != nil {
+			log.Event().Warn("Speakeasy database not available", "event_id", evt.ID, "path", scope.Path, "error", err)
+			response.SendOK(client, evt.ID, false, "error: "+err.Error())
+			return
+		}
 		log.Event().Error("Database not available", "event_id", evt.ID)
 		response.SendOK(client, evt.ID, false, "error: database not available")
 		return
 	}
+	defer release()
+
+	gate := EventGate
+	if scope != nil {
+		authed := GetAuthedPubkey(client)
+		gate = func(ctx context.Context, evt nostr.Event) (bool, string) { return scope.Admit(ctx, authed, evt) }
+	}
 
 	// Duplicate check, then the admission gate (admitNew says why in that order).
-	if ok, msg, notice := admitNew(gateContext(context.Background(), client), evt, db.CheckDuplicateEvent, EventGate); !ok {
+	if ok, msg, notice := admitNew(gateContext(context.Background(), client), evt, db.CheckDuplicateEvent, gate); !ok {
 		response.SendOK(client, evt.ID, false, msg)
 		if notice != "" {
 			response.SendNotice(client, notice)
@@ -216,6 +242,21 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		"event_id", evt.ID,
 		"kind", evt.Kind,
 		"pubkey", evt.PubKey)
+
+	// A speakeasy's event goes live to its own connections only, and never
+	// to a backup relay: it must not leave the speakeasy.
+	if scope != nil {
+		release()
+		if scope.Stored != nil {
+			scope.Stored(evt)
+		}
+		log.Event().Info("Event processing completed",
+			"event_id", evt.ID,
+			"kind", evt.Kind,
+			"pubkey", evt.PubKey,
+			"path", scope.Path)
+		return
+	}
 
 	// Broadcast to active subscribers
 	if OnEventStored != nil {

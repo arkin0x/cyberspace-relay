@@ -36,6 +36,20 @@ func CheckBlacklistAndWhitelistCached(evt noatr.Event) Result {
 	return Result{Valid: true}
 }
 
+// CheckBlacklistOnlyCached is the blacklist half of
+// CheckBlacklistAndWhitelistCached, for a speakeasy: it takes any kind from
+// anyone its gate admits (ruling D6), so neither whitelist applies there,
+// while pubkeys, words and mute lists the relay bans stay banned.
+func CheckBlacklistOnlyCached(evt noatr.Event) Result {
+	if blacklisted, msg := config.CheckBlacklistCached(evt.PubKey, evt.Content); blacklisted {
+		log.Validation().Info("Event rejected by cached blacklist",
+			"event_id", evt.ID,
+			"pubkey", evt.PubKey)
+		return Result{Valid: false, Message: msg}
+	}
+	return Result{Valid: true}
+}
+
 // CheckRateAndSizeLimits checks if an event passes per-client rate limits
 // and global size limits.
 func CheckRateAndSizeLimits(client noatr.ClientInterface, evt noatr.Event, eventSize int) Result {
