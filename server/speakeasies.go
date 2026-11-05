@@ -355,9 +355,12 @@ func (rt *speakeasyRuntime) admit(ctx context.Context, id string, in *regiongate
 
 // ownDeletion says why a kind 5 from an author outside the region may not be
 // stored in speakeasy id, or "" when it may: it names at least one event, and
-// every one (by e id or a address) is the author's own and stored here. A
-// deletion that names anything else would write the outsider's words into
-// the room.
+// every one (by e id or a address, its newest version) is the author's own,
+// stored here, and no newer than the deletion. A deletion that names anything
+// else would write the outsider's words into the room; so would one dated
+// before its target, which NIP-09 deletes nothing with (verifyAndDeleteByID
+// keeps an event newer than its deletion), so it could be sent again and
+// again, each one stored.
 func (rt *speakeasyRuntime) ownDeletion(id string, evt nostr.Event) string {
 	const outside = "you are outside this speakeasy's region: you may only delete your own events stored here"
 	db, release, err := rt.pool.Acquire(id)
@@ -397,6 +400,9 @@ func (rt *speakeasyRuntime) ownDeletion(id string, evt nostr.Event) string {
 		}
 		if len(got) == 0 || got[0].PubKey != evt.PubKey {
 			return outside
+		}
+		if got[0].CreatedAt > evt.CreatedAt {
+			return "you are outside this speakeasy's region: a deletion must be no older than the events it names"
 		}
 	}
 	if targets == 0 {

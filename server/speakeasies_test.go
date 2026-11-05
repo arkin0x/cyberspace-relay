@@ -49,10 +49,15 @@ func newKey(t *testing.T) key {
 
 func (k key) sign(t *testing.T, kind int, content string, tags ...[]string) nostr.Event {
 	t.Helper()
+	return k.signAt(t, time.Now().Unix(), kind, content, tags...)
+}
+
+// signAt is sign with created_at at.
+func (k key) signAt(t *testing.T, at int64, kind int, content string, tags ...[]string) nostr.Event {
+	t.Helper()
 	if tags == nil {
 		tags = [][]string{}
 	}
-	at := time.Now().Unix()
 	raw, _ := json.Marshal([]any{0, k.pub, at, kind, tags, content})
 	h := sha256.Sum256(raw)
 	sig, err := schnorr.Sign(k.priv, h[:])
@@ -815,12 +820,21 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 		if ok, msg := b.publish(mixed); ok || !strings.Contains(msg, "outside") {
 			t.Fatalf("a deletion naming another's event too: %v %q", ok, msg)
 		}
+		bm := mustDial(t, urlB)
+		bm.auth(kAB, urlB, bm.challenge)
+		// Dated before its target, a deletion deletes nothing (NIP-09), so it
+		// could be sent again and again: refused, and nothing stored.
+		backdated := kA.signAt(t, old.CreatedAt-60, 5, "an outsider's words, backdated", []string{"e", old.ID})
+		if ok, msg := b.publish(backdated); ok || !strings.Contains(msg, "no older than") {
+			t.Fatalf("a backdated deletion from outside: %v %q", ok, msg)
+		}
+		if got, _ := bm.req("bd", map[string]any{"ids": []string{backdated.ID, old.ID}}); len(got) != 1 || got[0] != old.ID {
+			t.Fatalf("after a backdated deletion B serves %v, want only the target %s", got, old.ID)
+		}
 		own := kA.sign(t, 5, "", []string{"e", old.ID})
 		if ok, msg := b.publish(own); !ok {
 			t.Fatalf("a former member deleting their own event: %s", msg)
 		}
-		bm := mustDial(t, urlB)
-		bm.auth(kAB, urlB, bm.challenge)
 		deadline := time.Now().Add(3 * time.Second)
 		for {
 			got, closed := bm.req("gone", map[string]any{"ids": []string{old.ID, nB.ID, mixed.ID}})
