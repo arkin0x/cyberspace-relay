@@ -21,7 +21,7 @@ Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/sp
 | Decisions D1 to D7 | all ruled 2026-11-04: separate DB per speakeasy; NWC read-only; strict names + reserved; forever; relay owner moderates; any kind minus blacklist; region = ONOSENDAI /C/ prefix |
 | Verifier current with the chain rules (hop proof v2, epoch 2), golden vectors shared with ONOSENDAI | DONE 2026-11-05 (#11) |
 | Bitcoin block data + ride checks (landfall math in Go) | not started (prerequisite, RULED 2026-11-05: before launch) |
-| Incremental chain cache plus bounded queue | not started |
+| Incremental chain cache plus bounded queue | in review 2026-11-05 (PR 2) |
 | Path routing, per-path NIP-11 and AUTH, separate storage | not started |
 | Region dashboard | not started |
 | Create Speakeasy (Lightning) | not started |

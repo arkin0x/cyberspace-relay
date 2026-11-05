@@ -17,9 +17,9 @@ is fixed: a gated relay that silently opened would be the wrong failure.
 |---|---|
 | 1 | The relay's usual checks run first (signature, timestamps, blacklist, whitelist). |
 | 2 | `exempt_pubkeys` and `always_allow_kinds` (default: kind 5 deletions) are admitted. |
-| 3 | A cached verdict for the author is used if fresh (admitted: `cache_ttl_seconds`, refused: `negative_cache_ttl_seconds`). Concurrent events from one author share one lookup. |
-| 4 | Otherwise the author's chain is looked up and verified (below), and the author's **position** is tested against every configured region. |
-| 5 | A movement event (kind 3333) by its author always re-verifies, with the event itself appended. Moving into the region is admitted together with the move; moving out is refused. |
+| 3 | The author's entry in the **chain cache** answers if it is fresh (admitted: `cache_ttl_seconds`, refused: `negative_cache_ttl_seconds`), and, for a movement event, already holds that event. A re-sent event costs nothing. |
+| 4 | Otherwise a check is queued (see The chain cache and the work queue): the first time, the author's chain is looked up whole and verified (below); after that, only the events newer than the cache holds are fetched and checked. The author's **position** is tested against every configured region. |
+| 5 | A movement event (kind 3333) by its author that the cache has not seen is checked with the event itself appended. Moving into the region is admitted together with the move; moving out is refused. |
 
 Refusals use the NIP-01 `restricted:` prefix and say why: no chain found, the
 chain could not be verified (with the reason), or the position is outside.
@@ -27,10 +27,10 @@ When every chain source fails, the event is refused with a retry message and
 nothing is cached.
 
 The gate runs after the relay's per-client rate limits, so a client cannot
-make it look up chains faster than those allow, and at most
-`max_concurrent_lookups` lookups (default 16) run at once; an event that
-cannot start one in time is refused with "try again", uncached. Expired
-verdicts are swept from the cache once it holds more than 4,096 authors.
+make it look up chains faster than those allow. Checks go through a bounded
+work queue: at most `max_concurrent_lookups` (default 16) run at once, and a
+request the queue cannot take is refused at once with "relay busy verifying
+chains, try again", uncached.
 
 ## The speakeasy (`gate_reads`)
 
@@ -43,7 +43,7 @@ can succeed, so nothing can be read or written.
 | Read path | Rule |
 |---|---|
 | `REQ`, `COUNT` | After the per-client rate limits: refused `auth-required:` without AUTH, `restricted:` unless the authenticated pubkey is inside the region (same lookup, cache and exemptions as writers). |
-| Live events (after EOSE) | Pushed only to connections whose pubkey is admitted, decided from the cache without blocking. An expired verdict keeps answering while a background lookup refreshes it, so someone who leaves the region (moving elsewhere) stops receiving within `cache_ttl_seconds` plus one lookup; an unknown pubkey gets nothing until its lookup completes. |
+| Live events (after EOSE) | Pushed only to connections whose pubkey is admitted, decided from the chain cache without blocking. An expired entry keeps answering while a background check refreshes it, so someone who leaves the region (moving elsewhere) stops receiving within `cache_ttl_seconds` plus one check; an unknown pubkey gets nothing until its check completes. |
 | HTTP | Everything except the websocket, NIP-11 and NIP-86 at `/` answers 404: grain's web client and API (`/api/v1/events/*`, `/api/v1/client/*`, stats, the dashboard) read through the server's own relay pool, and a browser can sign AUTH for that shared pool, so they would be a way around the gate. Manage the relay through its config files and NIP-86. |
 
 NIP-11 advertises `auth_required` and `restricted_writes`. The NIP-11 document
@@ -96,6 +96,73 @@ generates at startup.
 
 Measured on a real identity with 9,615 movement events across four relays:
 the two questions returned 139 events in 5.7 s and verification took 32 ms.
+
+## The chain cache and the work queue
+
+The chain cache is the owner's design (`docs/speakeasies.md`, section 4,
+and the note of 2026-11-05). Per pubkey it keeps:
+
+| Field | What it is for |
+|---|---|
+| chain genesis id (and its `created_at`) | the active chain; a newer spawn starts a new one |
+| highest validated `created_at` | the next check asks only for events newer than this, less a look-back |
+| head event id, and the position it leaves the identity at in each mode | a region check is one comparison; strict mode reads the proof-verified position |
+| rules revision (`ChainRulesRevision`, the mode and `max_hop_verify_height`) | an entry made under other rules or settings is not used |
+| failure point: the event where the chain stopped being valid, and why | a chain invalid at an event is answered from the cache, and its proof is never checked again |
+| strict stop point: the first proof strict mode could not judge | nothing after it can move a strict position, so nothing after it is checked |
+| the ids seen in the look-back window | an event already accounted for is skipped when fetched again |
+| the walk's state at the head (the last action a rule looks back to, an open bracket) | the next events are walked on from the head, without the chain |
+
+It holds at most `max_cached_chains` entries (default 4096), least recently
+used out first, in memory only.
+
+**An incremental check** asks each source one question,
+`{"authors":[pk],"kinds":[3333],"since":<highest created_at - 3600>}`,
+skips the ids it has already accounted for, and then:
+
+| New events | What happens |
+|---|---|
+| none | the entry stands |
+| a newer spawn, or an event naming another genesis | the chain may have changed: it is read whole and checked from scratch, the old entry is replaced |
+| events that extend the head one after another | they are walked on from the head; only their proofs are checked |
+| the same, on a chain already invalid, or stopped in strict mode | nothing is checked: nothing published after that point moves the identity |
+| an event naming anything but the head as previous (a fork, or a gap) | the chain is read whole |
+| anything, on a chain dead by a fork | the entry stands: only a newer spawn changes it |
+
+The look-back (one hour, as ONOSENDAI's TV census reads with
+`READ_OVERLAP_S`) catches an event signed before the head's time and
+published later. Once a day the chain is read whole again, for one signed
+even earlier (ONOSENDAI's `READ_WHOLE_S`). Reading a chain whole again never
+asks the checker about an event it already judged: an event id commits to
+the `e previous` it names, so the events from the spawn up to an id are
+always the same events, and every answer reached on them is the same answer
+(`Known` in `verify.go`). A movement event the cache has already accounted
+for (in its window, or its spawn, head, failure point or strict stop point)
+is answered from the cache while it is fresh. One forged proof therefore
+costs one check, however often it is sent and from however many
+connections.
+
+A check that fails to fetch, gets an incomplete answer, or runs out of time
+keeps nothing.
+
+**The work queue** replaces the old cap on lookups in flight:
+
+| Limit | Default | Past it |
+|---|---|---|
+| `max_concurrent_lookups`: checks running | 16 | the check waits its turn |
+| `max_queued_lookups`: units of work waiting | 256 | refused at once, "relay busy verifying chains, try again" |
+| `max_queued_per_ip`: units waiting from one client address | 8 | the same |
+| distinct movement events waiting for one pubkey | 4 | the same |
+
+Work for one pubkey is one job: readers share one check, a movement event
+already waiting adds nothing, and the events of one job are checked one
+after another, each against the entry the one before left. Jobs are taken
+round robin across client addresses, oldest first within each, so one
+address flooding the queue delays only its own work. A check runs under its
+own deadline, `check_timeout_seconds` (default 30), not its caller's: a
+caller that stops waiting (writes wait `fetch_timeout_seconds + 2`, reads 10
+seconds) is told to try again, and the check runs on and keeps its verdict
+for the retry. "Busy" and "timed out" refusals are never cached.
 
 ## Verifying a chain
 
@@ -312,15 +379,18 @@ An invalid proof makes the chain invalid in both modes. In strict mode the walk
 also stops at the first proof it cannot judge, since nothing after it can move
 a strict position, so nothing after it is checked.
 
-**Bounding the work.** Every check runs under the lookup's deadline
-(`fetch_timeout_seconds + 2`): `VerifyContext` and the proof checkers stop
-once it ends, the lookup slot is freed and the refusal ("try again") is not
-cached. A check longer than that deadline never completes, which is one
-reason the ceiling stays at 24. The relay runs its duplicate check before the
-gate, so an event it already stores is never judged again. A refused event
-can still be sent again and is judged again each time; the incremental chain
-cache (speakeasy design, PR 2), which keeps the point where a chain fails,
-removes that repeat. Until it lands, keep the ceiling at 24.
+**Bounding the work.** Every check runs under its own deadline
+(`check_timeout_seconds`): `VerifyContext` and the proof checkers stop once
+it ends, nothing is cached, and the worker is free. The relay runs its
+duplicate check before the gate, so an event it already stores is never
+judged again, and the chain cache answers for a refused event it has seen,
+so a re-sent forgery is checked once in all (see The chain cache and the
+work queue). Measured with a real forged h20 hop (three tall axes, passing
+its form, price and paths, failing only at its residues) through the real
+checker: the first send cost one Level 1 check, 49 ms on one core and 9 ms
+on 16; 999 more sends cost about 1 µs each, 64 sent at once 0.3 ms in all,
+and the whole re-read a day later 1.3 ms, with no second Level 1 check. The
+ceiling stays at 24 in this revision; the owner's ruling raises it to 30.
 
 **Cost.** Measured on the 16-core agent machine under a load average of 14 to
 19, one core per hop below h_max 20:
@@ -393,9 +463,14 @@ may be listed; any match admits.
   not a choice of branch. A chain that is invalid without a fork still
   stands frozen at its last valid position.
 - A second branch the gate has not seen yet (published on a relay the gate
-  does not read, or after the last lookup) changes the verdict at the next
-  lookup: at once for a movement event published here, which is always
-  judged afresh, and otherwise once the cached verdict expires, after
+  does not read, or after the last check) changes the verdict at the next
+  check: at once for a movement event published here that the cache has not
+  seen, and otherwise once the cache entry expires, after
   `cache_ttl_seconds` (600 by default) for an admission and
   `negative_cache_ttl_seconds` (60) for a refusal. Until then a forked
   identity that was admitted stays admitted.
+- An event published elsewhere, extending the chain, and signed more than an
+  hour before the cached head's `created_at` (the look-back) is seen at the
+  daily whole read, or at once if it is published here.
+- The chain cache is in memory: after a restart every identity's chain is
+  read and checked whole again at its first check.

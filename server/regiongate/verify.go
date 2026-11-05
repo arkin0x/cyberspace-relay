@@ -211,6 +211,39 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 // for it, under the chain rules of ChainRulesRevision. When ctx ends first it
 // stops, and returns ctx's error and no verdict.
 func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nostr.Event) (Verdict, error) {
+	vd, _, _, err := v.verify(ctx, pubkey, events, nil)
+	return vd, err
+}
+
+// Known is what an earlier walk of a chain established under the same rules
+// (ChainRulesRevision and the same checker settings). An event id commits to
+// the e previous it names, so the events from the spawn to a given id are
+// always the same events, walked from the same state, and every answer the
+// walk reached on them is the same answer. A walk given Known asks the
+// checker about none of them again. The gate's chain cache keeps one per
+// pubkey, so a re-sent forged proof is never checked twice.
+type Known struct {
+	// Genesis is the spawn of the chain this is about; on another chain
+	// Known is not used.
+	Genesis string
+	// Passed is the last event the walk passed: every event from the spawn
+	// to it passed every rule. Verified is the last event of the
+	// proof-verified prefix (Verdict.VerifiedEvent): a proof up to it was
+	// verified, a proof after it was left unchecked.
+	Passed, Verified string
+	// FailAt broke rule FailReason, and Stopped is the walk's words for it
+	// (Verdict.Stopped). A fork is never kept here: resolution decides it
+	// afresh on every walk.
+	FailAt, FailReason, Stopped string
+	// StopAt is the proof strict mode stopped at, which the checker could
+	// not judge for the reason StopWhy.
+	StopAt, StopWhy string
+}
+
+// verify is VerifyContext with what an earlier walk of the chain
+// established. It also returns the walk, which can walk on from the head
+// (walker.resume), and the active chain.
+func (v Verifier) verify(ctx context.Context, pubkey string, events []nostr.Event, known *Known) (Verdict, *walker, []Move, error) {
 	// Authentic events only (§8.7.3): every event that is not a valid NIP-01
 	// event by this pubkey is discarded before resolution and treated as if
 	// it never existed. Nobody can end another identity's chain with a
@@ -233,7 +266,7 @@ func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nos
 			continue
 		}
 		if i%256 == 0 && ctx.Err() != nil {
-			return Verdict{}, ctx.Err()
+			return Verdict{}, nil, nil, ctx.Err()
 		}
 		if m, _ := ParseMove(e); m.IsSpawn && authentic(e) {
 			signed = append(signed, e)
@@ -248,7 +281,7 @@ func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nos
 				continue
 			}
 			if i%256 == 0 && ctx.Err() != nil {
-				return Verdict{}, ctx.Err()
+				return Verdict{}, nil, nil, ctx.Err()
 			}
 			if m, _ := ParseMove(e); !m.IsSpawn && m.Genesis == newest.ID && authentic(e) {
 				signed = append(signed, e)
@@ -260,7 +293,7 @@ func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nos
 	vd := Verdict{Pubkey: pubkey, Length: len(chain), InvalidIndex: -1}
 	if len(chain) == 0 {
 		vd.Reason, vd.Stopped = ReasonNoSpawn, "no spawn event"
-		return vd, nil
+		return vd, nil, nil, nil
 	}
 	vd.HasChain = true
 	vd.Chain = make([]string, len(chain))
@@ -268,11 +301,6 @@ func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nos
 		vd.Chain[i] = m.Event.ID
 	}
 	vd.Head = vd.Chain[len(chain)-1]
-	invalid := func(i int, reason, detail string) (Verdict, error) {
-		vd.Reason, vd.InvalidAt, vd.InvalidIndex = reason, chain[i].Event.ID, i
-		vd.Stopped = fmt.Sprintf("event %s invalid (%s): %s", chain[i].Event.ID, reason, detail)
-		return vd, nil
-	}
 
 	// The identity's spawn coordinate, where a dead chain leaves it.
 	atSpawn := func() {
@@ -292,7 +320,7 @@ func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nos
 		// event the branches name, and it is invalid from the spawn.
 		vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Fork = ReasonFork, chain[0].Event.ID, 0, res.Fork
 		vd.Stopped = fmt.Sprintf("fork: %d chain events name %s as previous (%s)", len(res.Fork), res.ForkedFrom, strings.Join(res.Fork, ", "))
-		return vd, nil
+		return vd, nil, chain, nil
 	}
 
 	spawn := chain[0]
@@ -303,91 +331,221 @@ func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nos
 		// it publishes another spawn. That position rests on no proof, so
 		// it is also the proof-verified one.
 		atSpawn()
-		return invalid(0, reason, detail)
+		vd.Reason, vd.InvalidAt, vd.InvalidIndex = reason, spawn.Event.ID, 0
+		vd.Stopped = fmt.Sprintf("event %s invalid (%s): %s", spawn.Event.ID, reason, detail)
+		return vd, nil, chain, nil
 	}
 	pos, _ := ParseCoord(spawn.To) // checked by checkSpawn
 	vd.Position, vd.PositionEvent = &pos, spawn.Event.ID
 	verified := pos
 	vd.VerifiedPosition, vd.VerifiedEvent = &verified, spawn.Event.ID
-	proofsHold := true
 
-	w := walk{carried: spawn.To, lookback: spawn}
+	k := &walker{proofs: v.Proofs, stopAtUnchecked: v.StopAtUnchecked, w: walk{carried: spawn.To, lookback: spawn},
+		proofsHold: true, vd: vd, genesis: spawn.Event.ID, passed: spawn.Event.ID}
+	if known != nil && known.Genesis == spawn.Event.ID {
+		k.known, k.knownPassed, k.knownVerified = known, -1, -1
+		for i, m := range chain {
+			switch m.Event.ID {
+			case known.Passed:
+				k.knownPassed = i
+			case known.Verified:
+				k.knownVerified = i
+			}
+		}
+		if known.Verified == known.Passed {
+			k.knownVerified = k.knownPassed
+		}
+	}
 	for i := 1; i < len(chain); i++ {
-		cur := chain[i]
-		// Exactly one A tag, with a value, on every event: recognized,
-		// skipped, or inside a bracket (§8.8).
-		if n := countTags(cur.Event, "A", ""); n != 1 || cur.Action == "" {
-			return invalid(i, ReasonATag, fmt.Sprintf("expected exactly one A tag with a value, found %d", n))
+		end, err := k.step(ctx, i, len(chain), chain[i])
+		if err != nil {
+			return Verdict{}, nil, nil, err
 		}
-		// Exactly one e genesis and one e previous on every event but the
-		// spawn: recognized, skipped or virtual (arkinox, 2026-10-08).
-		if reason, detail := links(cur); reason != "" {
-			return invalid(i, reason, detail)
+		if end {
+			return k.vd, k, chain, nil
 		}
-		if w.bracket == nil && !recognizedActions[cur.Action] {
-			// §8.9: an action this verifier does not recognize is skipped.
-			// It is checked for being authentic (discarded above otherwise),
-			// linked (resolution reached it) and carrying one A tag, and for
-			// nothing else: its other tags, proofs and sector tags belong to
-			// its DECK. It neither moves the identity (item 2) nor stands
-			// before the next action for rules that look back (item 4), so
-			// the walk leaves its state untouched. Its id still seeds the
-			// work of the action after it, which the checker reads from that
-			// action's e previous tag (item 3).
-			vd.Skipped = append(vd.Skipped, cur.Event.ID)
-			continue
-		}
-		prev := w.lookback
-		if reason, detail := w.step(cur); reason != "" {
-			return invalid(i, reason, detail)
-		}
+	}
+	k.finish()
+	return k.vd, k, chain, nil
+}
 
-		// Only base and DECK-0001 actions outside a bracket carry a work
-		// proof; brackets and virtual actions carry none (§8.11.2), and a
-		// proof-bearing action inside a bracket was refused by step, which
-		// has also checked the form of its proof tags. Every proof is
-		// checked, those after an unchecked one included: a proof's validity
-		// rests on its own event and the id it names as previous, never on
-		// an earlier proof, so an invalid one makes the chain invalid however
-		// much before it was left unchecked.
-		if code, bearing := proofOf[cur.Action]; bearing && v.Proofs != nil {
-			res, why := v.Proofs.Check(ctx, prev, cur)
+// walker is a walk of one chain in progress: the state carried from one
+// event to the next and the verdict so far. A walker that reached the head
+// of a valid chain can walk on from there over newer events alone (resume),
+// which is how the gate's chain cache checks only what is new.
+type walker struct {
+	proofs          ProofChecker
+	stopAtUnchecked bool
+	w               walk
+	proofsHold      bool
+	vd              Verdict
+	genesis         string
+	// passed is the last event the walk passed; stopAt and stopWhy name the
+	// proof strict mode stopped at, if it did.
+	passed, stopAt, stopWhy string
+	// known, when set, is an earlier walk of this chain; knownPassed and
+	// knownVerified are its Passed and Verified as indices of this walk,
+	// or -1 when they are not on it.
+	known                      *Known
+	knownPassed, knownVerified int
+}
+
+// step walks chain event i, cur, of a chain of length events. It returns
+// true when the walk ends at cur: cur broke a rule, or strict mode stopped
+// at a proof the checker cannot judge.
+func (k *walker) step(ctx context.Context, i, length int, cur Move) (bool, error) {
+	vd := &k.vd
+	// An invalid chain has no open bracket (a walk resumed from a head
+	// inside one may have set it).
+	invalid := func(reason, detail string) (bool, error) {
+		vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.OpenBracket = reason, cur.Event.ID, i, ""
+		vd.Stopped = fmt.Sprintf("event %s invalid (%s): %s", cur.Event.ID, reason, detail)
+		return true, nil
+	}
+	// An event an earlier walk of this chain found invalid is invalid again,
+	// for the same reason, without asking the checker: re-sending a forged
+	// proof costs nothing.
+	if kn := k.known; kn != nil && kn.FailAt == cur.Event.ID {
+		vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Stopped, vd.OpenBracket = kn.FailReason, cur.Event.ID, i, kn.Stopped, ""
+		return true, nil
+	}
+	// Exactly one A tag, with a value, on every event: recognized,
+	// skipped, or inside a bracket (§8.8).
+	if n := countTags(cur.Event, "A", ""); n != 1 || cur.Action == "" {
+		return invalid(ReasonATag, fmt.Sprintf("expected exactly one A tag with a value, found %d", n))
+	}
+	// Exactly one e genesis and one e previous on every event but the
+	// spawn: recognized, skipped or virtual (arkinox, 2026-10-08).
+	if reason, detail := links(cur); reason != "" {
+		return invalid(reason, detail)
+	}
+	if k.w.bracket == nil && !recognizedActions[cur.Action] {
+		// §8.9: an action this verifier does not recognize is skipped.
+		// It is checked for being authentic (discarded above otherwise),
+		// linked (resolution reached it) and carrying one A tag, and for
+		// nothing else: its other tags, proofs and sector tags belong to
+		// its DECK. It neither moves the identity (item 2) nor stands
+		// before the next action for rules that look back (item 4), so
+		// the walk leaves its state untouched. Its id still seeds the
+		// work of the action after it, which the checker reads from that
+		// action's e previous tag (item 3).
+		vd.Skipped = append(vd.Skipped, cur.Event.ID)
+		k.passed = cur.Event.ID
+		return false, nil
+	}
+	prev := k.w.lookback
+	if reason, detail := k.w.step(cur); reason != "" {
+		return invalid(reason, detail)
+	}
+
+	// Only base and DECK-0001 actions outside a bracket carry a work
+	// proof; brackets and virtual actions carry none (§8.11.2), and a
+	// proof-bearing action inside a bracket was refused by step, which
+	// has also checked the form of its proof tags. Every proof is
+	// checked, those after an unchecked one included: a proof's validity
+	// rests on its own event and the id it names as previous, never on
+	// an earlier proof, so an invalid one makes the chain invalid however
+	// much before it was left unchecked.
+	if code, bearing := proofOf[cur.Action]; bearing && k.proofs != nil {
+		res, why, asked := k.knownProof(i, cur)
+		if !asked {
+			res, why = k.proofs.Check(ctx, prev, cur)
 			if err := ctx.Err(); err != nil {
-				return Verdict{}, err
-			}
-			switch res {
-			case ProofInvalid:
-				if c, _, _ := strings.Cut(why, ":"); proofReasons[c] {
-					code = c
-				}
-				return invalid(i, code, "proof: "+why)
-			case ProofUnchecked:
-				if v.StopAtUnchecked {
-					vd.Unchecked = len(chain) - i
-					vd.Stopped = fmt.Sprintf("stopped at event %s, whose proof cannot be judged (%s): nothing after it can move a strict position", cur.Event.ID, why)
-					if w.bracket != nil {
-						vd.OpenBracket = w.bracket.entry.Event.ID
-					}
-					return vd, nil
-				}
-				proofsHold = false
+				return true, err
 			}
 		}
-		if !proofsHold {
-			vd.Unchecked++
+		switch res {
+		case ProofInvalid:
+			if c, _, _ := strings.Cut(why, ":"); proofReasons[c] {
+				code = c
+			}
+			return invalid(code, "proof: "+why)
+		case ProofUnchecked:
+			if k.stopAtUnchecked {
+				vd.Unchecked = length - i
+				vd.Stopped = fmt.Sprintf("stopped at event %s, whose proof cannot be judged (%s): nothing after it can move a strict position", cur.Event.ID, why)
+				k.stopAt, k.stopWhy = cur.Event.ID, why
+				k.finish()
+				return true, nil
+			}
+			k.proofsHold = false
 		}
+	}
+	if !k.proofsHold {
+		vd.Unchecked++
+	}
 
-		p := w.position()
-		vd.Position, vd.PositionEvent = &p, cur.Event.ID
-		if proofsHold {
-			vp := p
-			vd.VerifiedPosition, vd.VerifiedEvent = &vp, cur.Event.ID
+	p := k.w.position()
+	vd.Position, vd.PositionEvent = &p, cur.Event.ID
+	if k.proofsHold {
+		vp := p
+		vd.VerifiedPosition, vd.VerifiedEvent = &vp, cur.Event.ID
+	}
+	k.passed = cur.Event.ID
+	return false, nil
+}
+
+// knownProof answers for the proof of chain event i from what an earlier
+// walk established, when it did (asked is then true): verified up to
+// Known.Verified, unchecked after it up to Known.Passed, and unchecked again
+// at Known.StopAt.
+func (k *walker) knownProof(i int, cur Move) (ProofResult, string, bool) {
+	kn := k.known
+	switch {
+	case kn == nil:
+		return 0, "", false
+	case kn.StopAt == cur.Event.ID:
+		return ProofUnchecked, kn.StopWhy, true
+	case i <= k.knownPassed && i <= k.knownVerified:
+		return ProofVerified, "", true
+	case i <= k.knownPassed:
+		return ProofUnchecked, "left unchecked by an earlier walk of this chain", true
+	}
+	return 0, "", false
+}
+
+// finish records the bracket still open where the walk ends.
+func (k *walker) finish() {
+	if k.w.bracket != nil {
+		k.vd.OpenBracket = k.w.bracket.entry.Event.ID
+	} else {
+		k.vd.OpenBracket = ""
+	}
+}
+
+// atHead reports whether the walk reached the head of a valid chain, so it
+// can walk on from there.
+func (k *walker) atHead() bool { return k.vd.Reason == "" && k.stopAt == "" }
+
+// knowledge is what this walk established, for a later walk of the same chain.
+func (k *walker) knowledge() *Known {
+	kn := &Known{Genesis: k.genesis, Passed: k.passed, Verified: k.vd.VerifiedEvent, StopAt: k.stopAt, StopWhy: k.stopWhy}
+	if k.vd.Reason != "" && k.vd.Reason != ReasonFork && k.vd.InvalidIndex > 0 {
+		kn.FailAt, kn.FailReason, kn.Stopped = k.vd.InvalidAt, k.vd.Reason, k.vd.Stopped
+	}
+	return kn
+}
+
+// resume walks on from the head of a valid chain over events that extend
+// it, in chain order, each naming the one before it (the first naming the
+// head) as previous. It returns ctx's error when ctx ends first, and the
+// walk is then not to be used.
+func (k *walker) resume(ctx context.Context, next []Move) error {
+	start, length := k.vd.Length, k.vd.Length+len(next)
+	k.vd.Length = length
+	for j, cur := range next {
+		k.vd.Head = cur.Event.ID
+		end, err := k.step(ctx, start+j, length, cur)
+		if err != nil {
+			return err
+		}
+		if end {
+			k.vd.Head = next[len(next)-1].Event.ID
+			return nil
 		}
 	}
-	if w.bracket != nil {
-		vd.OpenBracket = w.bracket.entry.Event.ID
-	}
-	return vd, nil
+	k.finish()
+	return nil
 }
 
 // checkSpawn checks the first event of the active chain: exactly one A tag

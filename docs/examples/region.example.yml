@@ -22,9 +22,9 @@ mode: strict
 
 # The tallest hop (h_max) whose proof is checked; Level 1 costs about 2^h_max
 # word additions per sampled residue (about 0.7 s on one core at h24 with
-# three tall axes). Default 24, at most 65. It stays 24 until the incremental
-# chain cache lands; HOSAKA sells hops up to h30, and in strict mode a hop
-# above the ceiling is not trusted, so its mover stands before it.
+# three tall axes). Default 24, at most 65. The chain cache checks each proof
+# once, however often it is sent; HOSAKA sells hops up to h30, and in strict
+# mode a hop above the ceiling is not trusted, so its mover stands before it.
 # max_hop_verify_height: 24
 
 # Speakeasy (default true): reading also requires NIP-42 AUTH as a pubkey
@@ -59,8 +59,12 @@ use_local_events: true # also use movement events published here
 exempt_pubkeys: [] # hex or npub; always admitted (e.g. the operator)
 always_allow_kinds: [5] # deletions are always allowed
 
-cache_ttl_seconds: 600 # keep an admission this long
-negative_cache_ttl_seconds: 60 # keep a refusal this long
+cache_ttl_seconds: 600 # a cached admission answers this long before newer events are fetched
+negative_cache_ttl_seconds: 60 # the same for a refusal
 fetch_timeout_seconds: 8
-max_concurrent_lookups: 16 # chain lookups in flight; extra events get "try again"
+max_concurrent_lookups: 16 # chain checks running at once
+max_queued_lookups: 256 # checks waiting; past it, "relay busy, try again"
+max_queued_per_ip: 8 # checks waiting from one client address
+check_timeout_seconds: 30 # one check's own deadline; a caller waits less and retries
+max_cached_chains: 4096 # chain cache entries, least recently used out first
 max_chain_events: 5000 # per source per question; a chain over it is refused with "try again"

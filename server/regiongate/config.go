@@ -64,15 +64,30 @@ type Config struct {
 	// Default true.
 	GateReads *bool `yaml:"gate_reads"`
 
-	// CacheTTLSeconds keeps an admitted author's verdict this long.
-	// Default 600. A movement event published here always re-verifies.
+	// CacheTTLSeconds is how long an admitted author's cached chain answers
+	// without asking the sources for newer events. Default 600. A movement
+	// event published here that the cache has not seen is always checked.
 	CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
-	// NegativeCacheTTLSeconds keeps a refusal this long. Default 60.
+	// NegativeCacheTTLSeconds is the same for a refused author. Default 60.
 	NegativeCacheTTLSeconds int `yaml:"negative_cache_ttl_seconds"`
-	// MaxConcurrentLookups caps chain lookups in flight, so a flood of
+	// MaxConcurrentLookups caps chain checks running at once, so a flood of
 	// events from unknown pubkeys cannot make the relay hammer the chain
-	// relays. Default 16.
+	// relays or its CPU. Default 16.
 	MaxConcurrentLookups int `yaml:"max_concurrent_lookups"`
+	// MaxQueuedLookups caps the checks waiting for one of those, and
+	// MaxQueuedPerIP how many of them one client address may have waiting.
+	// A request past either is refused at once with "relay busy, try again",
+	// uncached. Defaults 256 and 8.
+	MaxQueuedLookups int `yaml:"max_queued_lookups"`
+	MaxQueuedPerIP   int `yaml:"max_queued_per_ip"`
+	// CheckTimeoutSeconds bounds one check, fetch and verification
+	// together. A caller waits at most its own deadline (writes:
+	// fetch_timeout_seconds + 2) and is told to try again; the check runs on
+	// to this deadline and keeps its verdict for the retry. Default 30.
+	CheckTimeoutSeconds int `yaml:"check_timeout_seconds"`
+	// MaxCachedChains caps the chain cache, least recently used first out.
+	// Default 4096.
+	MaxCachedChains int `yaml:"max_cached_chains"`
 	// MaxHopVerifyHeight is the tallest hop (its h_max, §5.9) whose proof
 	// is checked. Level 1 costs about 2^h_max word additions per sampled
 	// residue and root, so a taller hop that passes its form and its
@@ -150,6 +165,18 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.MaxConcurrentLookups <= 0 {
 		c.MaxConcurrentLookups = 16
+	}
+	if c.MaxQueuedLookups <= 0 {
+		c.MaxQueuedLookups = 256
+	}
+	if c.MaxQueuedPerIP <= 0 {
+		c.MaxQueuedPerIP = 8
+	}
+	if c.CheckTimeoutSeconds <= 0 {
+		c.CheckTimeoutSeconds = 30
+	}
+	if c.MaxCachedChains <= 0 {
+		c.MaxCachedChains = 4096
 	}
 	if c.MaxHopVerifyHeight <= 0 {
 		c.MaxHopVerifyHeight = DefaultMaxHopHeight

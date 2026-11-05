@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 
@@ -24,6 +25,9 @@ type ChainQuery struct {
 	Tags map[string][]string
 	// IDs asks for these events by id, to fill a gap in a chain.
 	IDs []string
+	// Since, when above 0, asks only for events whose created_at is at
+	// least this: the chain cache's incremental check.
+	Since int64
 	// Max is how many kept events the source returns at most; 0 is no cap.
 	// A source holding more reports the answer Capped.
 	Max int
@@ -77,6 +81,10 @@ func (s LocalSource) Movement(_ context.Context, pubkey string, q ChainQuery) ([
 		limit = s.MaxResults
 	}
 	f := nostr.Filter{Authors: []string{pubkey}, Kinds: []int{KindMovement}, Tags: q.Tags, IDs: q.IDs}
+	if q.Since > 0 {
+		since := time.Unix(q.Since, 0)
+		f.Since = &since
+	}
 	raw, err := s.Query([]nostr.Filter{f}, limit)
 	if err != nil {
 		return nil, Coverage{}, err
@@ -100,44 +108,48 @@ type Gate struct {
 	sources  []Source
 	verifier Verifier
 	now      func() time.Time
+	// rules names the chain rules and the checker settings verdicts rest
+	// on; a cache entry made under others is not used.
+	rules string
 
-	lookups chan struct{} // semaphore: chain lookups in flight
+	queue *workQueue
 
-	mu        sync.Mutex
-	cache     map[string]cached
-	inflight  map[string]*call
-	lastSweep time.Time
-}
-
-// sweepAbove is the cache size past which expired entries are dropped.
-const sweepAbove = 4096
-
-type cached struct {
-	ok      bool
-	reason  string
-	expires time.Time
-}
-
-type call struct {
-	done   chan struct{}
-	ok     bool
-	reason string
+	mu     sync.Mutex
+	chains *chainCache
 }
 
 // NewGate builds a gate. Sources are read in order and merged.
 func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
-	n := cfg.MaxConcurrentLookups
-	if n <= 0 {
-		n = 16
+	orDefault := func(v, d int) int {
+		if v <= 0 {
+			return d
+		}
+		return v
 	}
 	// Strict mode stops each walk at the first proof it cannot judge:
 	// nothing after it can move a strict position.
 	verifier.StopAtUnchecked = cfg.Mode == ModeStrict
-	return &Gate{
+	g := &Gate{
 		cfg: cfg, sources: sources, verifier: verifier, now: time.Now,
-		lookups: make(chan struct{}, n),
-		cache:   map[string]cached{}, inflight: map[string]*call{},
+		rules:  fmt.Sprintf("%s mode=%s max_hop_verify_height=%d", ChainRulesRevision, cfg.Mode, orDefault(cfg.MaxHopVerifyHeight, DefaultMaxHopHeight)),
+		chains: newChainCache(orDefault(cfg.MaxCachedChains, 4096)),
 	}
+	g.queue = newWorkQueue(orDefault(cfg.MaxConcurrentLookups, 16), orDefault(cfg.MaxQueuedLookups, 256),
+		orDefault(cfg.MaxQueuedPerIP, 8), maxQueuedPerPubkey, time.Duration(orDefault(cfg.CheckTimeoutSeconds, 30))*time.Second, g.run)
+	return g
+}
+
+type clientIPKey struct{}
+
+// WithClientIP returns ctx carrying the address of the client a request
+// came from, which the gate's work queue limits per address.
+func WithClientIP(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, clientIPKey{}, ip)
+}
+
+func clientIP(ctx context.Context) string {
+	ip, _ := ctx.Value(clientIPKey{}).(string)
+	return ip
 }
 
 // Admit reports whether evt may be stored, and the NIP-01 OK message when
@@ -154,60 +166,82 @@ func (g *Gate) Admit(ctx context.Context, evt nostr.Event) (bool, string) {
 		}
 	}
 	if evt.Kind == KindMovement {
-		ok, reason := g.decide(ctx, evt.PubKey, &evt)
-		g.remember(evt.PubKey, ok, reason)
-		return ok, reason
+		return g.check(ctx, evt.PubKey, &evt)
 	}
 	return g.AdmitPubkey(ctx, evt.PubKey)
 }
 
 // AdmitPubkey reports whether a pubkey is inside the region right now: from
-// the cache when fresh, otherwise by one shared lookup. Readers are judged
-// with it (by the pubkey they authenticated as), and so are writers of
-// anything but movement events.
+// the chain cache when fresh, otherwise by one shared check. Readers are
+// judged with it (by the pubkey they authenticated as), and so are writers
+// of anything but movement events.
 func (g *Gate) AdmitPubkey(ctx context.Context, pubkey string) (bool, string) {
 	if g.cfg.exempt[pubkey] {
 		return true, ""
 	}
-	return g.shared(ctx, pubkey, func() (bool, string) { return g.decide(ctx, pubkey, nil) })
+	return g.check(ctx, pubkey, nil)
 }
 
-// shared answers for key from the cache when fresh, or waits for the lookup
-// already running for it, or runs decide and keeps its verdict.
-func (g *Gate) shared(ctx context.Context, key string, decide func() (bool, string)) (bool, string) {
-	g.mu.Lock()
-	if c, hit := g.cache[key]; hit && g.now().Before(c.expires) {
-		g.mu.Unlock()
-		return c.ok, c.reason
+// check answers from the chain cache when that needs no new work, and
+// otherwise queues a check of the pubkey, with the incoming movement event
+// or none.
+func (g *Gate) check(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
+	if ok, reason, hit := g.cached(pubkey, incoming); hit {
+		return ok, reason
 	}
-	if c := g.inflight[key]; c != nil {
-		g.mu.Unlock()
-		select {
-		case <-c.done:
-			return c.ok, c.reason
-		case <-ctx.Done():
-			return false, errTimeout
-		}
-	}
-	c := &call{done: make(chan struct{})}
-	g.inflight[key] = c
-	g.mu.Unlock()
+	return g.queue.submit(ctx, clientIP(ctx), pubkey, incoming)
+}
 
-	c.ok, c.reason = decide()
+// cached is the verdict of pubkey's entry when it is fresh and, for a
+// movement event, already accounts for it: a re-sent event costs nothing.
+func (g *Gate) cached(pubkey string, incoming *nostr.Event) (bool, string, bool) {
 	g.mu.Lock()
-	delete(g.inflight, key)
+	e := g.chains.get(pubkey, g.rules)
 	g.mu.Unlock()
-	g.remember(key, c.ok, c.reason)
-	close(c.done)
-	return c.ok, c.reason
+	if e == nil || !g.fresh(e) || incoming != nil && !e.accounted(incoming.ID) {
+		return false, "", false
+	}
+	ok, reason := g.judge(e.vd)
+	return ok, reason, true
+}
+
+// fresh reports whether an entry is recent enough to answer without
+// asking the sources: for cache_ttl_seconds when it admits, for
+// negative_cache_ttl_seconds when it refuses.
+func (g *Gate) fresh(e *chainEntry) bool {
+	ok, _ := g.judge(e.vd)
+	return g.now().Before(e.checkedAt.Add(g.cfg.cacheTTL(ok)))
+}
+
+// run is one queued check, on a worker: it brings the pubkey's entry up to
+// date and stores it, unless the check was cut short.
+func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
+	// An earlier check of this job may have answered it already.
+	if ok, reason, hit := g.cached(pubkey, incoming); hit {
+		return ok, reason
+	}
+	g.mu.Lock()
+	e := g.chains.get(pubkey, g.rules)
+	g.mu.Unlock()
+	next, refusal := g.refresh(ctx, pubkey, e, incoming)
+	if refusal != "" {
+		return false, refusal // a failed or incomplete lookup is not a verdict
+	}
+	if ctx.Err() != nil {
+		return false, errTimeout // nor is one reached after its deadline
+	}
+	g.mu.Lock()
+	g.chains.put(pubkey, next)
+	g.mu.Unlock()
+	return g.judge(next.vd)
 }
 
 // LiveAllowed decides, without blocking, whether a live event may be pushed
-// to a connection authenticated as pubkey. It answers from the cache; an
-// expired verdict keeps answering until a background lookup replaces it
+// to a connection authenticated as pubkey. It answers from the chain cache;
+// an expired entry keeps answering until a background check replaces it
 // (so someone who leaves the region stops receiving events within one
-// cache_ttl_seconds plus one lookup), and an unknown pubkey gets nothing
-// until its lookup completes.
+// cache_ttl_seconds plus one check), and an unknown pubkey gets nothing
+// until its check completes.
 func (g *Gate) LiveAllowed(pubkey string) bool {
 	if pubkey == "" {
 		return false
@@ -216,41 +250,24 @@ func (g *Gate) LiveAllowed(pubkey string) bool {
 		return true
 	}
 	g.mu.Lock()
-	c, hit := g.cache[pubkey]
-	fresh := hit && g.now().Before(c.expires)
-	busy := g.inflight[pubkey] != nil
+	e := g.chains.get(pubkey, g.rules)
 	g.mu.Unlock()
-	if !fresh && !busy {
+	if (e == nil || !g.fresh(e)) && !g.queue.pending(pubkey) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), g.lookupTimeout())
 			defer cancel()
 			g.AdmitPubkey(ctx, pubkey)
 		}()
 	}
-	return hit && c.ok
+	if e == nil {
+		return false
+	}
+	ok, _ := g.judge(e.vd)
+	return ok
 }
 
 func (g *Gate) lookupTimeout() time.Duration {
 	return time.Duration(g.cfg.FetchTimeoutSeconds+2) * time.Second
-}
-
-func (g *Gate) remember(pubkey string, ok bool, reason string) {
-	if reason == errFetch || reason == errBusy || reason == errIncomplete || reason == errTooLong || reason == errTimeout {
-		return // a failed or incomplete lookup is not a verdict
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	now := g.now()
-	g.cache[pubkey] = cached{ok: ok, reason: reason, expires: now.Add(g.cfg.cacheTTL(ok))}
-	// Refusals for random pubkeys would otherwise pile up forever.
-	if len(g.cache) > sweepAbove && now.Sub(g.lastSweep) > time.Minute {
-		g.lastSweep = now
-		for pk, c := range g.cache {
-			if !now.Before(c.expires) {
-				delete(g.cache, pk)
-			}
-		}
-	}
 }
 
 const (
@@ -264,32 +281,64 @@ const (
 // maxGapRounds bounds how many times one lookup asks for missing events.
 const maxGapRounds = 8
 
-// decide fetches and verifies a pubkey's chain, with an optional new
-// movement event appended, and checks the resulting position.
-func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
-	select {
-	case g.lookups <- struct{}{}:
-		defer func() { <-g.lookups }()
-	case <-ctx.Done():
-		return false, errBusy
+// judge turns a verdict into the gate's answer. The verdict's position is
+// where the identity stands, valid chain or not. An invalid chain is frozen
+// at its last valid position (§3.2, §8.7.3), and an invalid newest spawn
+// leaves the identity at its spawn coordinate, so the gate judges both by
+// that position: a frozen identity inside the region stays admitted until
+// it respawns, and no event published on a frozen chain, the incoming one
+// included, can move it in or out. Only a respawn changes its position.
+// Strict mode takes the position from the proof-verified prefix.
+func (g *Gate) judge(vd Verdict) (bool, string) {
+	pos := vd.Position
+	if g.cfg.Mode == ModeStrict {
+		pos = vd.VerifiedPosition
+	}
+	switch {
+	case !vd.HasChain:
+		return false, "restricted: this relay is only for cyberspace identities inside its region; no movement chain found for your pubkey"
+	case pos == nil:
+		return false, "restricted: your cyberspace chain could not be verified: " + vd.Stopped
+	case !g.cfg.Contains(*pos):
+		return false, "restricted: your cyberspace position is outside this relay's region"
+	}
+	return true, ""
+}
+
+// authentic reports whether an event counts for pubkey's chain at all: by
+// that pubkey, of the movement kind, and signed.
+func (g *Gate) authentic(pubkey string) func(nostr.Event) bool {
+	return func(e nostr.Event) bool {
+		return e.PubKey == pubkey && e.Kind == KindMovement && (g.verifier.Signature == nil || g.verifier.Signature(e))
+	}
+}
+
+// whole reads a pubkey's chain whole and verifies it, with an optional new
+// movement event and other new events (extra) appended, and what earlier
+// walks of the chain established (known, used only when the chain is the
+// same one). It returns the entry, or why there is no verdict.
+func (g *Gate) whole(ctx context.Context, pubkey string, incoming *nostr.Event, extra []nostr.Event, known *Known) (*chainEntry, string) {
+	added := extra
+	if incoming != nil {
+		added = append(added[:len(added):len(added)], *incoming)
 	}
 	// 1. The spawns. Authenticity is checked before choosing, so a forged
 	// "newer" spawn cannot redirect the lookup (§8.7.3). Validity is not:
 	// the newest authentic spawn is the one whose chain is fetched even when
 	// it is invalid, because the newest spawn wins with no fallback (§3.2).
-	authentic := func(e nostr.Event) bool {
-		return e.PubKey == pubkey && e.Kind == KindMovement && (g.verifier.Signature == nil || g.verifier.Signature(e))
-	}
+	authentic := g.authentic(pubkey)
 	isSpawn := func(e nostr.Event) bool {
 		m, _ := ParseMove(e)
 		return m.IsSpawn && authentic(e)
 	}
 	spawns, cov, ok := g.gather(ctx, pubkey, ChainQuery{Tags: map[string][]string{"A": {ActSpawn}}, Keep: isSpawn})
 	if !ok {
-		return false, errFetch
+		return nil, errFetch
 	}
-	if incoming != nil && isSpawn(*incoming) {
-		spawns = append(spawns, *incoming)
+	for _, e := range added {
+		if isSpawn(e) {
+			spawns = append(spawns, e)
+		}
 	}
 	var newest *nostr.Event
 	for i := range spawns {
@@ -308,11 +357,13 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 		}
 		chain, chainCov, ok := g.gather(ctx, pubkey, ChainQuery{Tags: map[string][]string{"e": {spawnID}}, Keep: onChain})
 		if !ok {
-			return false, errFetch
+			return nil, errFetch
 		}
 		cov.add(chainCov)
-		if incoming != nil && onChain(*incoming) {
-			chain = append(chain, *incoming)
+		for _, e := range added {
+			if onChain(e) {
+				chain = append(chain, e)
+			}
 		}
 		// 3. The gaps. A held event whose previous is neither the spawn nor
 		// held means the answers left something out, unless that event
@@ -320,55 +371,37 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 		// another author or kind, or on another chain (§8.7.3).
 		chain, gapCov, gap, ok := g.fillGaps(ctx, pubkey, spawnID, chain, onChain)
 		if !ok {
-			return false, errFetch
+			return nil, errFetch
 		}
 		cov.add(gapCov)
 		if gap != "" && !cov.Truncated() {
 			log.RegionGate().Debug("Chain gap", "pubkey", pubkey, "missing", gap)
-			return false, errIncomplete
+			return nil, errIncomplete
 		}
 		events = append(events, chain...)
 	}
 	// Whatever a truncated answer left out could change the verdict: a
 	// second branch, which makes the chain dead, or the events right after
-	// the spawn. Refuse
-	// without caching rather than judge a part of the chain.
+	// the spawn. Refuse without caching rather than judge a part of the
+	// chain.
 	switch {
 	case cov.Capped:
-		return false, errTooLong
+		return nil, errTooLong
 	case cov.Partial:
-		return false, errIncomplete
+		return nil, errIncomplete
 	}
 
-	// The verdict's position is where the identity stands, valid chain or
-	// not. An invalid chain is frozen at its last valid position (§3.2,
-	// §8.7.3), and an invalid newest spawn leaves the identity at its spawn
-	// coordinate, so the gate judges both by that position: a frozen
-	// identity inside the region stays admitted until it respawns, and no
-	// event published on a frozen chain, the incoming one included, can move
-	// it in or out. Only a respawn changes its position.
-	// The check ends with ctx: a caller that timed out frees its lookup slot
-	// at once, and nothing is cached.
-	vd, err := g.verifier.VerifyContext(ctx, pubkey, events)
+	// The check ends with ctx: nothing reached after it is cached.
+	vd, k, chain, err := g.verifier.verify(ctx, pubkey, events, known)
 	if err != nil {
-		return false, errTimeout
-	}
-	pos := vd.Position
-	if g.cfg.Mode == ModeStrict {
-		pos = vd.VerifiedPosition
+		return nil, errTimeout
 	}
 	log.RegionGate().Debug("Chain verdict", "pubkey", pubkey, "has_chain", vd.HasChain,
 		"length", vd.Length, "unchecked", vd.Unchecked, "skipped", len(vd.Skipped), "position_event", vd.PositionEvent,
 		"reason", vd.Reason, "stopped", vd.Stopped)
-	switch {
-	case !vd.HasChain:
-		return false, "restricted: this relay is only for cyberspace identities inside its region; no movement chain found for your pubkey"
-	case pos == nil:
-		return false, "restricted: your cyberspace chain could not be verified: " + vd.Stopped
-	case !g.cfg.Contains(*pos):
-		return false, "restricted: your cyberspace position is outside this relay's region"
-	}
-	return true, ""
+	// Every event handed in counts as accounted for, those resolution does
+	// not read included, so the next incremental check skips them.
+	return g.newEntry(vd, k, chain, append(events, added...)), ""
 }
 
 // gather asks every source one question and merges the answers, with

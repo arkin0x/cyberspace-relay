@@ -536,6 +536,10 @@ func (f *fakeSource) Movement(ctx context.Context, pubkey string, q ChainQuery) 
 	defer f.mu.Unlock()
 	var out []nostr.Event
 	flt := nostr.Filter{Authors: []string{pubkey}, Kinds: []int{KindMovement}, Tags: q.Tags, IDs: q.IDs}
+	if q.Since > 0 {
+		since := time.Unix(q.Since, 0)
+		flt.Since = &since
+	}
 	for _, e := range f.events {
 		if len(q.IDs) == 0 && f.untagged[e.ID] {
 			continue
@@ -636,11 +640,11 @@ func TestGateBoundsLookupsAndCache(t *testing.T) {
 	box := cubeAround(t, s.pubkey, 40)
 	slow := &fakeSource{delay: 200 * time.Millisecond}
 	cfg := &Config{Enabled: true, Mode: ModeStructural, AlwaysAllowKinds: []int{5}, CacheTTLSeconds: 600,
-		NegativeCacheTTLSeconds: 60, MaxConcurrentLookups: 1, boxes: []Box{box}, exempt: map[string]bool{}}
+		NegativeCacheTTLSeconds: 60, MaxConcurrentLookups: 1, MaxCachedChains: 8, boxes: []Box{box}, exempt: map[string]bool{}}
 	g := NewGate(cfg, verifier(), slow)
 
-	// One lookup slot: a second unknown author waiting past its deadline
-	// is told to retry, and that is not cached.
+	// One worker: a second unknown author still queued when its deadline
+	// passes is told to retry, and that is not cached.
 	go g.Admit(context.Background(), newSigner(t).sign(t, 1, 1))
 	time.Sleep(20 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -649,27 +653,26 @@ func TestGateBoundsLookupsAndCache(t *testing.T) {
 	if ok, msg := g.Admit(ctx, other.sign(t, 1, 1)); ok || msg != errBusy {
 		t.Fatalf("want busy refusal, got %v %q", ok, msg)
 	}
-	g.mu.Lock()
-	_, cachedBusy := g.cache[other.pubkey]
-	g.mu.Unlock()
-	if cachedBusy {
+	ok, msg, hit := g.cached(other.pubkey, nil)
+	if hit && (ok || msg == errBusy) {
 		t.Fatal("a busy refusal must not be cached")
 	}
 
-	// Expired refusals are swept once the cache is large.
-	now := time.Now()
-	g.now = func() time.Time { return now }
-	g.mu.Lock()
-	for i := 0; i < sweepAbove+10; i++ {
-		g.cache[strings.Repeat("0", 60)+strconv.Itoa(1000+i)] = cached{expires: now.Add(-time.Second)}
+	// The chain cache holds at most max_cached_chains, least recently used
+	// out first.
+	waitFor(t, func() bool { return !g.queue.pending(other.pubkey) })
+	for i := 0; i < 20; i++ {
+		g.mu.Lock()
+		g.chains.put(strings.Repeat("0", 60)+strconv.Itoa(1000+i), &chainEntry{rules: g.rules})
+		g.mu.Unlock()
 	}
-	g.mu.Unlock()
-	g.remember(s.pubkey, true, "")
 	g.mu.Lock()
-	n := len(g.cache)
+	n := g.chains.len()
+	newest := g.chains.get(strings.Repeat("0", 60)+"1019", g.rules) != nil
+	oldest := g.chains.get(strings.Repeat("0", 60)+"1000", g.rules) != nil
 	g.mu.Unlock()
-	if n > 10 {
-		t.Fatalf("expired entries not swept: %d left", n)
+	if n != 8 || !newest || oldest {
+		t.Fatalf("want 8 entries, the newest kept and the oldest dropped: %d %v %v", n, newest, oldest)
 	}
 }
 
