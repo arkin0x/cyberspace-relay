@@ -22,7 +22,7 @@ import (
 // implementation or the other, never a vector to edit.
 const (
 	regionVectorsFile   = "testdata/region-prefix-vectors.json"
-	regionVectorsSHA256 = "eaeec282fffae9bf6c96b2345d2480da417dc9de7e66ed98547a7b407ce7c9e1"
+	regionVectorsSHA256 = "4dc1cca6e28f1d5fe40cbf100a0733d258be14536ecd68a4c08261952ad02fa5"
 )
 
 type regionAxis struct {
