@@ -8,6 +8,7 @@ import (
 
 	"github.com/0ceanslim/grain/client/cache"
 	"github.com/0ceanslim/grain/client/connection"
+	"github.com/0ceanslim/grain/client/core"
 	"github.com/0ceanslim/grain/client/session"
 	"github.com/0ceanslim/grain/server/utils/log"
 	"golang.org/x/net/websocket"
@@ -264,7 +265,9 @@ func pingRelay(relayURL string) int64 {
 	go func() {
 		origin := "http://localhost/"
 		var err error
-		conn, err = websocket.Dial(relayURL, "", origin)
+		if err = core.CheckDial(relayURL); err == nil {
+			conn, err = websocket.Dial(relayURL, "", origin)
+		}
 		done <- err
 	}()
 

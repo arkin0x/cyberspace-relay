@@ -352,6 +352,11 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 	// Optional admission gate (region.yml).
 	startRegionGate()
 
+	// With speakeasies.yml, the built-in client (its connections are shared
+	// by every visitor) never connects to a speakeasy path. Installed before
+	// the client starts dialing.
+	installSpeakeasyDialGuard()
+
 	// Initialize client package with server configuration. This must happen
 	// BEFORE InitializePubkeyCache because the initial blacklist refresh
 	// fetches per-author NIP-65 mute lists via the core client; without it

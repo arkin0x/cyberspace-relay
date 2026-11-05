@@ -123,6 +123,9 @@ type Gate struct {
 	// whatever region asks.
 	home   *Regions
 	shared bool
+	// memberIn, on a shared gate, reports whether a position lies in any
+	// region the gate serves (SetMemberRegions); nil: none.
+	memberIn func(Coord) bool
 
 	mu     sync.Mutex
 	chains *chainCache
@@ -164,8 +167,9 @@ func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 // AdmitPubkeyIn, LiveAllowedIn), and the chain cache, the failed set and the
 // work queue are shared by all of them. The config's regions are not used.
 // A known member, for the queue and the cache's eviction, is an identity
-// with a verified position anywhere, since the region asking changes from
-// one request to the next.
+// whose position lies in any region the gate serves (SetMemberRegions),
+// whichever region asked: fresh keys spawned elsewhere cost an attacker
+// nothing and must never evict a player.
 func NewSharedGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 	g := NewGate(cfg, verifier, sources...)
 	g.home, g.shared = NewRegions(), true
@@ -188,6 +192,10 @@ func (g *Gate) isMember(pubkey string) bool {
 	return e != nil && e.Value.(*cacheItem).entry.rules == g.rules
 }
 
+// IsMember reports whether pubkey is a known member: kept with the members
+// in the chain cache and served first by the work queue.
+func (g *Gate) IsMember(pubkey string) bool { return g.isMember(pubkey) }
+
 // WithClientIP returns ctx carrying the address of the client a request
 // came from, which the gate's work queue limits per address.
 func WithClientIP(ctx context.Context, ip string) context.Context {
@@ -209,13 +217,21 @@ func (g *Gate) Admit(ctx context.Context, evt nostr.Event) (bool, string) {
 
 // AdmitIn is Admit judged in the region set in instead of the gate's own.
 func (g *Gate) AdmitIn(ctx context.Context, evt nostr.Event, in *Regions) (bool, string) {
-	if g.cfg.exempt[evt.PubKey] {
-		return true, ""
-	}
 	for _, k := range g.cfg.AlwaysAllowKinds {
 		if evt.Kind == k {
 			return true, ""
 		}
+	}
+	return g.AdmitAuthorIn(ctx, evt, in)
+}
+
+// AdmitAuthorIn is AdmitIn without always_allow_kinds: the event is admitted
+// only when its author is exempt or inside in (with the event itself, for a
+// movement event). A speakeasy judges with it, since a kind admitted from
+// anyone would let anyone write into a private room.
+func (g *Gate) AdmitAuthorIn(ctx context.Context, evt nostr.Event, in *Regions) (bool, string) {
+	if g.cfg.exempt[evt.PubKey] {
+		return true, ""
 	}
 	if evt.Kind == KindMovement {
 		return g.check(ctx, evt.PubKey, &evt, in)
@@ -280,12 +296,18 @@ func (g *Gate) fresh(e *chainEntry, in *Regions) bool {
 	return g.now().Before(e.checkedAt.Add(g.cfg.cacheTTL(ok)))
 }
 
+// SetMemberRegions tells a shared gate which positions make a member: those
+// in any region it serves (the union of the registered speakeasies). It is
+// called before the gate serves.
+func (g *Gate) SetMemberRegions(inAny func(Coord) bool) { g.memberIn = inAny }
+
 // memberClass reports whether an entry belongs with the members in the
 // cache and the queue: admitted in the gate's own region, or, on a shared
-// gate, placed anywhere.
+// gate, placed inside any region it serves.
 func (g *Gate) memberClass(vd Verdict, in *Regions) bool {
 	if g.shared {
-		return g.position(vd) != nil
+		pos := g.position(vd)
+		return pos != nil && g.memberIn != nil && g.memberIn(*pos)
 	}
 	ok, _ := g.judge(vd, in)
 	return ok

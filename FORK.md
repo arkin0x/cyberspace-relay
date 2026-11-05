@@ -35,6 +35,8 @@ Conflicts can only happen in the few grain files this repo changes:
 | `server/validation/validation.go` | `CheckBlacklistOnlyCached` |
 | `server/utils/loadRelayMetadata.go` | `RelayInfoHandlerFor` (a speakeasy's NIP-11); `RelayInfoHandler` calls it with no edit |
 | `server/api/nip86.go` | `grain_speakeasy_*` methods while speakeasies are on (`nip86_speakeasy.go`) |
+| `client/core/pool_lease.go`, `relays.go`, `client/api/relayPing.go`, `clientRelays.go` | every dial asks `core.CheckDial` (the dial guard, `dialguard.go`): the relay refuses its own speakeasy paths |
+| `client/core/nip42.go` | `SendAuth` refuses (`ErrSharedAuth`): the pool is shared by every visitor, so it never authenticates |
 | `server/types/filter.go` | `MarshalJSON` (drops out once upstream takes the fix) |
 | `server/utils/log/components.go` | `region-gate` log component |
 | `server/utils/getClientIP.go` | `X-Forwarded-For` believed only from loopback and `GRAIN_TRUSTED_PROXIES`, rightmost untrusted hop |

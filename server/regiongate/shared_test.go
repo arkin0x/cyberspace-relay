@@ -27,6 +27,7 @@ func TestSharedGateJudgesEachRegionApart(t *testing.T) {
 	g := sharedGate(t, src)
 	here := NewRegions(cubeAround(t, in.pubkey, 40))
 	there := NewRegions(cubeAround(t, offset(t, in.pubkey, 1<<41), 40))
+	g.SetMemberRegions(func(c Coord) bool { return here.Contains(c) || there.Contains(c) })
 
 	if ok, msg := g.AdmitPubkeyIn(ctx, in.pubkey, here); !ok {
 		t.Fatalf("refused in its own region: %s", msg)
@@ -41,10 +42,10 @@ func TestSharedGateJudgesEachRegionApart(t *testing.T) {
 	if src.calls.Load() != calls {
 		t.Fatalf("the second region asked the sources again (%d calls, want %d): the chain cache must be shared", src.calls.Load(), calls)
 	}
-	// Placed somewhere, so a member for the queue and the cache, whatever
-	// region asked last.
+	// Inside a served region, so a member for the queue and the cache,
+	// whatever region asked last.
 	if !g.isMember(in.pubkey) {
-		t.Fatal("an identity with a verified position is not a member of the shared gate")
+		t.Fatal("an identity inside a served region is not a member of the shared gate")
 	}
 	if g.LiveAllowedIn(in.pubkey, there) || !g.LiveAllowedIn(in.pubkey, here) {
 		t.Fatal("live events must follow each region's own verdict")
@@ -114,23 +115,64 @@ func TestSharedQueueAnswersEachRegion(t *testing.T) {
 	}
 }
 
-// On a shared gate a member is anyone with a verified position, whatever
-// region asked: an identity first judged where it is outside is still a
-// player, kept with the members and served first by the queue.
-func TestSharedGateMemberIsPlacedAnywhere(t *testing.T) {
+// On a shared gate a member is an identity placed inside any region the gate
+// serves, whichever region asked: one judged where it is outside is still a
+// player, kept with the members and served first by the queue. A key placed
+// outside every region is not.
+func TestSharedGateMemberIsInsideAServedRegion(t *testing.T) {
 	in := newSigner(t)
 	src := &fakeSource{events: []nostr.Event{newChain(t, in).spawn}}
 	g := sharedGate(t, src)
+	here := NewRegions(cubeAround(t, in.pubkey, 40))
 	there := NewRegions(cubeAround(t, offset(t, in.pubkey, 1<<41), 40))
+	g.SetMemberRegions(here.Contains)
 	if ok, _ := g.AdmitPubkeyIn(context.Background(), in.pubkey, there); ok {
 		t.Fatal("admitted outside")
 	}
 	if !g.isMember(in.pubkey) {
-		t.Fatal("a placed identity refused in one region is not a member of the shared gate")
+		t.Fatal("an identity inside a served region, refused in another, is not a member")
 	}
-	stranger := newSigner(t)
-	g.AdmitPubkeyIn(context.Background(), stranger.pubkey, there)
-	if g.isMember(stranger.pubkey) {
-		t.Fatal("a pubkey with no chain is a member")
+	elsewhere := newSigner(t)
+	src.mu.Lock()
+	src.events = append(src.events, newChain(t, elsewhere).spawn)
+	src.mu.Unlock()
+	g.AdmitPubkeyIn(context.Background(), elsewhere.pubkey, there)
+	if g.isMember(elsewhere.pubkey) {
+		t.Fatal("an identity placed outside every served region is a member")
+	}
+}
+
+// Fresh keys spawned outside every served region (free for an attacker) are
+// never members, so they cannot evict a real member's entry from the chain
+// cache (the #15 eviction rule, on a shared gate).
+func TestSharedGateFreshSpawnsNeverEvictMembers(t *testing.T) {
+	ctx := context.Background()
+	member := newSigner(t)
+	src := &fakeSource{events: []nostr.Event{newChain(t, member).spawn}}
+	cfg := &Config{Enabled: true, Mode: ModeStructural, AlwaysAllowKinds: []int{5}, CacheTTLSeconds: 600,
+		NegativeCacheTTLSeconds: 60, MaxConcurrentLookups: 1, MaxCachedChains: 8, exempt: map[string]bool{}}
+	g := NewSharedGate(cfg, verifier(), src)
+	room := NewRegions(cubeAround(t, member.pubkey, 40))
+	g.SetMemberRegions(room.Contains)
+	if ok, msg := g.AdmitPubkeyIn(ctx, member.pubkey, room); !ok {
+		t.Fatal(msg)
+	}
+	for i := 0; i < 20; i++ {
+		k := newSigner(t)
+		src.mu.Lock()
+		src.events = append(src.events, newChain(t, k).spawn)
+		src.mu.Unlock()
+		if room.Contains(mustCoord(t, k.pubkey)) {
+			continue
+		}
+		if ok, _ := g.AdmitPubkeyIn(ctx, k.pubkey, room); ok {
+			t.Fatal("a fresh key outside was admitted")
+		}
+	}
+	g.mu.Lock()
+	kept := g.chains.get(member.pubkey, g.rules) != nil
+	g.mu.Unlock()
+	if !kept || !g.isMember(member.pubkey) {
+		t.Fatal("fresh spawned keys outside every region evicted a member's cache entry")
 	}
 }

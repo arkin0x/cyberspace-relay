@@ -93,13 +93,14 @@ connection and spent on use, as before.
 | What | Rule |
 |---|---|
 | REQ, COUNT | AUTH required (`auth-required:`), whatever `auth.required` says; then the authenticated pubkey must be inside the speakeasy's region (`restricted:`) |
-| EVENT | AUTH required; the author is judged as the region gate judges writers (a move into the region is admitted with the move, `always_allow_kinds` such as kind 5 from its author are admitted after they leave, `exempt_pubkeys` always); when the sender is not the author, the sender must be inside too |
+| EVENT | AUTH required; the author must be inside (a move into the region is admitted with the move; `exempt_pubkeys` always); when the sender is not the author, the sender must be inside too. `always_allow_kinds` opens nothing to outsiders: its one use here is kind 5 (when listed), from an author no longer inside, and only when it names at least one event and every event it names (`e` id or `a` address) is that author's own and stored in this speakeasy. Any other deletion from outside is refused and stored nowhere |
 | Kinds | any kind (ruling D6): neither whitelist (kinds, pubkeys) applies; the blacklist (pubkeys, words, mute lists, IPs) does |
 | NIP-70 | a protected event only from its authenticated author, on that connection |
 | Live events | only to that speakeasy's own connections, and of those only to pubkeys admitted there (from the chain cache, without blocking); the root's live events never reach a speakeasy's connections |
 | Storage | its own nostrdb database (below); nothing it stores reaches the root database or a backup relay, and nothing at the root is served by it |
 | NIP-11 | the relay's document renamed (`Speakeasy <region>`, or the entry's own name and description), with `auth_required` and `restricted_writes` true |
 | NIP-86 | not at the speakeasy's path (404): the relay owner manages speakeasies at `/` (ruling D5) |
+| grain's web client and API | never connect to a speakeasy: its built-in client (`client/core`) is one pool of connections for every visitor, with AUTH per relay URL, so a speakeasy read over it would be read for everyone. While `speakeasies.yml` exists, every dial (the pool, the relay pings) is refused for a URL on any host whose path is a region string in any spelling, or a registered speakeasy path. And the client answers no NIP-42 challenge at all, from any relay: an authenticated shared connection would serve one visitor's private events (a speakeasy's notes, NIP-17 gift wraps) to every other |
 
 **The gate.** Every speakeasy is judged by one shared gate
 (`regiongate.NewSharedGate`), configured by the `gate:` section: one chain
@@ -110,9 +111,11 @@ answers each waiter in its own set (the same movement event sent to two
 speakeasies at once is checked once and judged twice), and freshness follows
 the asking region's verdict (`cache_ttl_seconds` where the identity is admitted,
 `negative_cache_ttl_seconds` where it is refused, so moving in is noticed
-soon). A member, for the queue and the cache, is any identity with a verified
-position. Chains are read from the root database and `chain_relays`, never
-from a speakeasy's database.
+soon). A member, for the queue and the cache, is an identity with a verified
+position inside any registered speakeasy's region: fresh keys spawned
+elsewhere cost an attacker nothing and never evict a player's entry. Chains
+are read from the root database and `chain_relays`, never from a speakeasy's
+database.
 
 **Planes.** A region string shorter than a full coordinate never fixes the
 plane bit, so a speakeasy spans the planes in `planes` (default both, as

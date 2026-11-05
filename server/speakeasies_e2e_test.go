@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -157,6 +159,104 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		for _, c := range []*conn{a, b, r, aAB} {
 			c.ws.Close()
 		}
+		time.Sleep(time.Second)
+	})
+
+	// The leak the #19 review reproduced: grain's web client and API share
+	// one relay pool, whose AUTH is per relay URL, not per visitor. Once a
+	// member answered a speakeasy's challenge through the web client, anyone
+	// could read the speakeasy through the anonymous event API. Now the
+	// client never dials a speakeasy path and never answers a challenge.
+	t.Run("web API never reads a speakeasy", func(t *testing.T) {
+		c := mustDial(t, urlB)
+		c.auth(kAB, urlB, c.challenge)
+		secret := kAB.sign(t, 1, "SECRET speakeasy note")
+		if ok, msg := c.publish(secret); !ok {
+			t.Fatal(msg)
+		}
+		c.ws.Close()
+		anon := func(path string) (int, bool) {
+			resp, err := http.Get(base + path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, strings.Contains(string(b), "SECRET")
+		}
+		hints := []string{urlB, strings.Replace(urlB, "127.0.0.1", "localhost", 1), wsBase + "/0X" + strings.ToUpper(idB) + "/"}
+		for _, h := range hints {
+			if code, leaked := anon("/api/v1/events/" + secret.ID + "?relays=" + url.QueryEscape(h)); leaked {
+				t.Fatalf("anonymous /api/v1/events/{id}?relays=%s: %d, leaked", h, code)
+			}
+		}
+		// The member logs in to the web client and tries to answer the
+		// speakeasy's challenge through it.
+		jar, _ := cookiejar.New(nil)
+		web := &http.Client{Jar: jar}
+		lb, _ := json.Marshal(map[string]any{"public_key": kAB.pub})
+		if resp, err := web.Post(base+"/api/v1/auth/login", "application/json", bytes.NewReader(lb)); err != nil {
+			t.Fatal(err)
+		} else {
+			resp.Body.Close()
+		}
+		resp, err := web.Get(base + "/api/v1/client/auth-requests")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ab, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var reqs []struct{ Relay, Challenge string }
+		json.Unmarshal(ab, &reqs)
+		challenge := "none-held"
+		for _, r := range reqs {
+			if strings.HasSuffix(strings.TrimRight(r.Relay, "/"), "/"+idB) {
+				t.Fatalf("the web client holds a challenge from the speakeasy %s: it dialed it", r.Relay)
+			}
+		}
+		authEvt := kAB.sign(t, 22242, "", []string{"relay", urlB}, []string{"challenge", challenge})
+		sb, _ := json.Marshal(map[string]any{"relay": urlB, "event": authEvt})
+		resp, err = web.Post(base+"/api/v1/client/auth", "application/json", bytes.NewReader(sb))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rb, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if strings.Contains(string(rb), `"success":true`) {
+			t.Fatalf("the web client answered a speakeasy's AUTH: %s", rb)
+		}
+		t.Logf("WEBAPI member AUTH through the web client: %s", strings.TrimSpace(string(rb)))
+		time.Sleep(time.Second)
+		for _, p := range []string{
+			"/api/v1/events/" + secret.ID + "?relays=" + url.QueryEscape(urlB),
+			"/api/v1/events/" + secret.ID,
+			"/api/v1/events/query?kinds=1&authors=" + kAB.pub,
+			"/api/v1/events/query?kinds=1&limit=50",
+		} {
+			code, leaked := anon(p)
+			if leaked {
+				t.Fatalf("anonymous %s: %d, the speakeasy's note leaked", p, code)
+			}
+			t.Logf("WEBAPI anonymous %s: %d, leaked=false", strings.Replace(p, secret.ID, "<secret id>", 1), code)
+		}
+	})
+
+	t.Run("kind 5 from outside writes nothing", func(t *testing.T) {
+		o := mustDial(t, urlA)
+		o.auth(kOut, urlA, o.challenge)
+		d := kOut.sign(t, 5, "an outsider's words in the room")
+		ok, msg := o.publish(d)
+		if ok {
+			t.Fatal("an outsider's kind 5 was stored")
+		}
+		m := mustDial(t, urlA)
+		m.auth(kAB, urlA, m.challenge)
+		if got, _ := m.req("k5", map[string]any{"kinds": []int{5}, "authors": []string{kOut.pub}}); len(got) != 0 {
+			t.Fatalf("stored: %v", got)
+		}
+		t.Logf("KIND5 outsider's kind 5 on /%s: refused %q; members see 0 of them", idA, msg)
+		o.ws.Close()
+		m.ws.Close()
 		time.Sleep(time.Second)
 	})
 

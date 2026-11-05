@@ -240,6 +240,20 @@ func (r *Registry) List() []Entry {
 	return out
 }
 
+// ContainsAny reports whether a position lies in any registered
+// speakeasy's region: the shared gate's members are the identities placed
+// there.
+func (r *Registry) ContainsAny(c regiongate.Coord) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.byID {
+		if s.Regions.Contains(c) {
+			return true
+		}
+	}
+	return false
+}
+
 // Len is how many speakeasies are registered.
 func (r *Registry) Len() int {
 	r.mu.RLock()

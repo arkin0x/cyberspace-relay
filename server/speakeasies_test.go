@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0ceanslim/grain/client/core"
 	"github.com/0ceanslim/grain/config"
 	cfgType "github.com/0ceanslim/grain/config/types"
 	"github.com/0ceanslim/grain/server/db/nostrdb"
@@ -81,6 +82,9 @@ type conn struct {
 	ws        *websocket.Conn
 	challenge string
 	in        chan []any
+	// seq makes every REQ and COUNT a new subscription: grain answers a
+	// repeated REQ with the same id and filters with EOSE alone.
+	seq int
 }
 
 func dial(t *testing.T, url string) (*conn, error) {
@@ -177,6 +181,8 @@ func (c *conn) publish(evt nostr.Event) (bool, string) {
 // req runs a REQ to EOSE and returns the ids sent, or the CLOSED reason.
 func (c *conn) req(sub string, filter map[string]any) (ids []string, closed string) {
 	c.t.Helper()
+	c.seq++
+	sub = fmt.Sprintf("%s-%d", sub, c.seq)
 	c.send("REQ", sub, filter)
 	for {
 		m := c.until("EOSE or CLOSED for "+sub, func(m []any) bool { return len(m) >= 2 && m[1] == sub })
@@ -196,6 +202,8 @@ func (c *conn) req(sub string, filter map[string]any) (ids []string, closed stri
 
 func (c *conn) count(sub string, filter map[string]any) (int, string) {
 	c.t.Helper()
+	c.seq++
+	sub = fmt.Sprintf("%s-%d", sub, c.seq)
 	c.send("COUNT", sub, filter)
 	m := c.until("COUNT or CLOSED for "+sub, func(m []any) bool { return len(m) >= 3 && m[1] == sub })
 	if m[0] == "CLOSED" {
@@ -206,13 +214,21 @@ func (c *conn) count(sub string, filter map[string]any) (int, string) {
 	return int(n), ""
 }
 
+func m1(m []any) (string, bool) {
+	if len(m) < 2 {
+		return "", false
+	}
+	s, ok := m[1].(string)
+	return s, ok
+}
+
 // live reports whether an EVENT for sub arrives within wait.
 func (c *conn) live(sub string, wait time.Duration) []string {
 	var ids []string
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		m := c.next(time.Until(deadline))
-		if len(m) >= 3 && m[0] == "EVENT" && m[1] == sub {
+		if id, _ := m1(m); len(m) >= 3 && m[0] == "EVENT" && strings.HasPrefix(id, sub+"-") {
 			e, _ := m[2].(map[string]any)
 			id, _ := e["id"].(string)
 			ids = append(ids, id)
@@ -338,6 +354,8 @@ func startRelay(t *testing.T, parse speakeasy.RegionPath, speakeasiesYML string)
 	cfg.BackupRelay.URLs = []string{"ws" + strings.TrimPrefix(backup.srv.URL, "http")}
 
 	os.WriteFile(filepath.Join(dir, speakeasy.ConfigFile), []byte(speakeasiesYML), 0o644)
+	installSpeakeasyDialGuard()
+	t.Cleanup(func() { core.SetDialGuard(nil) })
 	ctx, cancel := context.WithCancel(context.Background())
 	var stop func()
 	start := func() {
@@ -661,6 +679,16 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 		if r.rt.pool.Open() > 1 {
 			t.Fatalf("open databases %d over the cap of 1", r.rt.pool.Open())
 		}
+		// The gate's members are the identities inside a registered region.
+		if !r.rt.gate.IsMember(kAB.pub) || !r.rt.gate.IsMember(kA.pub) {
+			t.Fatal("identities inside a registered speakeasy are not the gate's members")
+		}
+		out := mustDial(t, urlA)
+		out.auth(kOut, urlA, out.challenge)
+		out.req("m", map[string]any{})
+		if r.rt.gate.IsMember(kOut.pub) {
+			t.Fatal("an identity outside every speakeasy is a member")
+		}
 	})
 
 	t.Run("live events stay on their speakeasy", func(t *testing.T) {
@@ -716,6 +744,96 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 		self.auth(kA, urlA, self.challenge)
 		if ok, msg := self.publish(kA.sign(t, 1, "my own protected", []string{"-"})); !ok {
 			t.Fatalf("own protected event: %s", msg)
+		}
+	})
+
+	t.Run("grain's own client never dials a speakeasy", func(t *testing.T) {
+		// Any host (the relay has many names), any spelling the router
+		// reads as a region, registered or not, and the registered ones.
+		up := strings.ToUpper(idB)
+		for _, u := range []string{
+			urlA, urlB, urlB + "/", "wss://relay.onosendai.tech/" + idA, "wss://RELAY.ONOSENDAI.TECH/" + up,
+			"ws://localhost:8181/0x" + idB, "wss://203.0.113.7/" + idB + "//", "relay.onosendai.tech/" + idA,
+			"https://relay.onosendai.tech/" + pct(idB, false), "wss://relay.onosendai.tech/" + idB + "?x=1",
+			"wss://relay.onosendai.tech/0fe6b3deeb67e952f852e8c1df15",
+		} {
+			if err := core.CheckDial(u); err == nil {
+				t.Fatalf("the built-in client may dial %s", u)
+			}
+		}
+		for _, u := range []string{r.wsRoot, r.wsRoot + "/", "wss://relay.onosendai.tech", "wss://relay.damus.io", "wss://nos.lol/", "wss://relay.example/fiatjafs-speakeasy"} {
+			if err := core.CheckDial(u); err != nil {
+				t.Fatalf("%s refused: %v", u, err)
+			}
+		}
+	})
+
+	t.Run("kind 5 from outside writes nothing", func(t *testing.T) {
+		out := mustDial(t, urlA)
+		out.auth(kOut, urlA, out.challenge)
+		for _, d := range []nostr.Event{
+			kOut.sign(t, 5, "hello room, from outside"),
+			kOut.sign(t, 5, "deleting a member's note", []string{"e", nA.ID}),
+			kOut.sign(t, 5, "deleting nothing here", []string{"e", strings.Repeat("ab", 32)}),
+			kOut.sign(t, 5, "", []string{"a", "30023:" + kAB.pub + ":x"}),
+		} {
+			if ok, msg := out.publish(d); ok || !strings.Contains(msg, "outside") {
+				t.Fatalf("an outsider's kind 5 %q: %v %q", d.Content, ok, msg)
+			}
+		}
+		m := mustDial(t, urlA)
+		m.auth(kAB, urlA, m.challenge)
+		if got, _ := m.req("k5", map[string]any{"kinds": []int{5}, "authors": []string{kOut.pub}}); len(got) != 0 {
+			t.Fatalf("an outsider's kind 5 is stored in the speakeasy: %v", got)
+		}
+		if got, _ := m.req("still", map[string]any{"ids": []string{nA.ID}}); len(got) != 1 {
+			t.Fatal("a member's note was deleted by an outsider")
+		}
+
+		// kA is outside B. An event of kA's stored in B (as when kA was
+		// inside) may be deleted by kA there, and nothing else.
+		db, release, err := r.rt.pool.Acquire(idB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := kA.sign(t, 1, "kA, when inside B")
+		if err := db.StoreEvent(context.Background(), old); err != nil {
+			t.Fatal(err)
+		}
+		for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if got, _ := db.Query([]nostr.Filter{{IDs: []string{old.ID}}}, 1); len(got) == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("never indexed")
+			}
+		}
+		release()
+		b := mustDial(t, urlB)
+		b.auth(kA, urlB, b.challenge)
+		mixed := kA.sign(t, 5, "", []string{"e", old.ID}, []string{"e", nB.ID})
+		if ok, msg := b.publish(mixed); ok || !strings.Contains(msg, "outside") {
+			t.Fatalf("a deletion naming another's event too: %v %q", ok, msg)
+		}
+		own := kA.sign(t, 5, "", []string{"e", old.ID})
+		if ok, msg := b.publish(own); !ok {
+			t.Fatalf("a former member deleting their own event: %s", msg)
+		}
+		bm := mustDial(t, urlB)
+		bm.auth(kAB, urlB, bm.challenge)
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			got, closed := bm.req("gone", map[string]any{"ids": []string{old.ID, nB.ID, mixed.ID}})
+			if len(got) == 1 && got[0] == nB.ID {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("after the deletions B serves %v (%q), want only %s", got, closed, nB.ID)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		for _, c := range []*conn{out, m, b, bm} {
+			c.ws.Close()
 		}
 	})
 

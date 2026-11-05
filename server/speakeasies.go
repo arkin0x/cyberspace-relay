@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/0ceanslim/grain/client/core"
 	"github.com/0ceanslim/grain/config"
 	cfgType "github.com/0ceanslim/grain/config/types"
 	relay "github.com/0ceanslim/grain/server/api"
@@ -53,6 +58,50 @@ import (
 // string it reads as a region (ruling D3). Tests may swap it.
 var speakeasyRegionPath speakeasy.RegionPath = speakeasy.ParseRegionPath
 
+// errSpeakeasyDial refuses the built-in client a speakeasy URL.
+var errSpeakeasyDial = errors.New("grain's web client never connects to a speakeasy: its relay connections are shared by every visitor; use a nostr client to enter one")
+
+// installSpeakeasyDialGuard makes the built-in client (client/core) refuse
+// every URL whose path this relay would serve as a speakeasy, while
+// speakeasies.yml exists: its pool is one set of connections for every
+// visitor of the web client and API, so a speakeasy read over it would be
+// read for everyone.
+func installSpeakeasyDialGuard() {
+	if _, err := os.Stat(config.ConfigPath(speakeasy.ConfigFile)); err != nil {
+		core.SetDialGuard(nil)
+		return
+	}
+	core.SetDialGuard(speakeasyDialGuard)
+}
+
+// speakeasyDialGuard refuses a URL on any host whose path, as sent, is a
+// region string (any spelling ParseRegionPath reads, registered or not) or a
+// registered speakeasy path. The host is not trusted to tell: this relay may
+// be reached by many names and addresses (DNS, its IP, a proxy, localhost).
+// A path the router would not serve as a speakeasy (/, //abc, /x/../abc) is
+// let through, as the relay answers it itself.
+func speakeasyDialGuard(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil // the client cannot dial it either
+	}
+	p := u.EscapedPath()
+	if p == "" || p == "/" {
+		return nil
+	}
+	if speakeasyRegionPath != nil {
+		if _, _, ok := speakeasyRegionPath(p); ok {
+			return errSpeakeasyDial
+		}
+	}
+	if rt := speakeasyState.Load(); rt != nil && rt.reg != nil {
+		if sp, _ := rt.reg.Lookup(p); sp != nil {
+			return errSpeakeasyDial
+		}
+	}
+	return nil
+}
+
 // speakeasyRuntime is the open speakeasies of one server instance.
 type speakeasyRuntime struct {
 	cfg       *speakeasy.Config
@@ -64,6 +113,10 @@ type speakeasyRuntime struct {
 
 	connMu sync.Mutex
 	conns  map[string]int // open connections, by speakeasy id
+
+	// ownDeletions: always_allow_kinds lists 5, so an author no longer
+	// inside may still delete their own events stored in a speakeasy.
+	ownDeletions bool
 }
 
 // speakeasyState is what the router reads: nil without speakeasies.yml, a
@@ -125,6 +178,10 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 		gate:    regiongate.NewSharedGate(sc.GateConfig, gateVerifier(sc.GateConfig), sources...),
 		timeout: time.Duration(sc.GateConfig.FetchTimeoutSeconds+2) * time.Second,
 		conns:   map[string]int{},
+	}
+	rt.gate.SetMemberRegions(reg.ContainsAny)
+	for _, k := range sc.GateConfig.AlwaysAllowKinds {
+		rt.ownDeletions = rt.ownDeletions || k == 5
 	}
 	poolCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -257,7 +314,7 @@ func (rt *speakeasyRuntime) scope(sp *speakeasy.Speakeasy) *handlers.Scope {
 			return rt.pool.Acquire(id)
 		},
 		Admit: func(ctx context.Context, authed string, evt nostr.Event) (bool, string) {
-			return rt.admit(ctx, in, authed, evt)
+			return rt.admit(ctx, id, in, authed, evt)
 		},
 		Read: func(ctx context.Context, pubkey string) (bool, string) {
 			return rt.gate.AdmitPubkeyIn(regiongate.WithClientIP(ctx, handlers.ClientIP(ctx)), pubkey, in)
@@ -270,10 +327,12 @@ func (rt *speakeasyRuntime) scope(sp *speakeasy.Speakeasy) *handlers.Scope {
 
 // admit judges an event sent to a speakeasy: its author by the gate, as the
 // region gate judges writers, and, when someone else sends it, the sender
-// too (reads and writes both need an admitted AUTH). So kind 5 from its own
-// author is admitted after they leave (always_allow_kinds), as at a gated
-// root, but nobody outside can push anything in.
-func (rt *speakeasyRuntime) admit(ctx context.Context, in *regiongate.Regions, authed string, evt nostr.Event) (bool, string) {
+// too (reads and writes both need an admitted AUTH). always_allow_kinds does
+// not open a private room to anyone: its one use here is kind 5, from an
+// author no longer inside, and then only when every event it names is that
+// author's own and stored in this speakeasy (ownDeletion). Anything else
+// from outside is refused and stored nowhere.
+func (rt *speakeasyRuntime) admit(ctx context.Context, id string, in *regiongate.Regions, authed string, evt nostr.Event) (bool, string) {
 	ctx, cancel := context.WithTimeout(regiongate.WithClientIP(ctx, handlers.ClientIP(ctx)), rt.timeout)
 	defer cancel()
 	if authed == "" {
@@ -284,7 +343,66 @@ func (rt *speakeasyRuntime) admit(ctx context.Context, in *regiongate.Regions, a
 			return false, msg
 		}
 	}
-	return rt.gate.AdmitIn(ctx, evt, in)
+	ok, msg := rt.gate.AdmitAuthorIn(ctx, evt, in)
+	if ok || evt.Kind != 5 || !rt.ownDeletions {
+		return ok, msg
+	}
+	if why := rt.ownDeletion(id, evt); why != "" {
+		return false, "restricted: " + why
+	}
+	return true, ""
+}
+
+// ownDeletion says why a kind 5 from an author outside the region may not be
+// stored in speakeasy id, or "" when it may: it names at least one event, and
+// every one (by e id or a address) is the author's own and stored here. A
+// deletion that names anything else would write the outsider's words into
+// the room.
+func (rt *speakeasyRuntime) ownDeletion(id string, evt nostr.Event) string {
+	const outside = "you are outside this speakeasy's region: you may only delete your own events stored here"
+	db, release, err := rt.pool.Acquire(id)
+	if err != nil {
+		return err.Error()
+	}
+	defer release()
+	targets := 0
+	for _, tag := range evt.Tags {
+		if len(tag) < 2 {
+			continue
+		}
+		var f nostr.Filter
+		switch tag[0] {
+		case "e":
+			if len(tag[1]) != 64 {
+				return outside
+			}
+			f = nostr.Filter{IDs: []string{tag[1]}}
+		case "a":
+			parts := strings.SplitN(tag[1], ":", 3)
+			kind, err := strconv.Atoi(parts[0])
+			if len(parts) != 3 || err != nil || parts[1] != evt.PubKey {
+				return outside
+			}
+			f = nostr.Filter{Kinds: []int{kind}, Authors: []string{evt.PubKey}}
+			if parts[2] != "" { // a replaceable event's address has no d
+				f.Tags = map[string][]string{"d": {parts[2]}}
+			}
+		default:
+			continue
+		}
+		targets++
+		got, err := db.Query([]nostr.Filter{f}, 1)
+		if err != nil {
+			return "could not check the events this deletion names, try again"
+		}
+		if len(got) == 0 || got[0].PubKey != evt.PubKey {
+			return outside
+		}
+	}
+	if targets == 0 {
+		return outside
+	}
+	return ""
 }
 
 // serveInfo is the speakeasy's NIP-11 document: the relay's own, renamed,
