@@ -1,14 +1,19 @@
 package regiongate
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"math/bits"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -26,10 +31,11 @@ import (
 //     of the ride's openings (DECK-0001 §4.2, §4.3, §5.5); one without mn
 //     only when listed (DECK-0001 §5.8).
 //
-// Two things leave a proof unchecked rather than judged: a ride when no Line
-// supplies Bitcoin's block data, and a hop taller than MaxHopHeight that
-// passes its form and price (the reference raises in both cases, since no
-// verdict can be reached without the data or the work).
+// Two things leave a proof unchecked rather than judged: a ride when the Line
+// does not yet hold a height it needs (or there is no Line), and a hop
+// taller than MaxHopHeight that passes its form and price (the reference
+// raises in both cases, since no verdict can be reached without the data or
+// the work).
 type SpecProofs struct {
 	// Line supplies the block data rides are checked against. Nil leaves
 	// every ride unchecked.
@@ -42,6 +48,9 @@ type SpecProofs struct {
 	// Progress, when set, keeps the residues of tall hops whose check was
 	// cut short (see HopProgress).
 	Progress *HopProgress
+	// RideProgress, when set, keeps the finished leaves of rides whose
+	// check was cut short (see RideProgress).
+	RideProgress *RideProgress
 }
 
 // HopProgress keeps, by event id, the residues of hops whose check its
@@ -159,15 +168,18 @@ func (s SpecProofs) check(ctx context.Context, prev, cur Move) (ProofResult, str
 			return ProofInvalid, ReasonEnterHyperspaceProof + ": " + why
 		}
 	case ActHyperjump:
-		// For the block data PR: a ride the line cannot judge yet (as_of or
-		// B above the line's tip) must not become a permanent failure point
-		// (Known.FailAt, the gate's failed set): either answer it
-		// ProofUnchecked, or put the line's state (its tip) in Gate.rules so
-		// entries and failures made under a shorter line are not used.
+		// A ride the line cannot judge yet (as_of or B above its tip) is
+		// left unchecked, waiting for that height, never failed (checkRide,
+		// Known.LineWait); a reorganization changes LineState, which is
+		// part of Gate.rules.
 		if s.Line == nil {
 			return ProofUnchecked, "no line: a ride needs Bitcoin's block data (DECK-0001 §5.5)"
 		}
-		return checkRide(ctx, s.Line, prev, cur)
+		var kept *rideKept
+		if s.RideProgress != nil {
+			kept = &rideKept{p: s.RideProgress, id: cur.Event.ID}
+		}
+		return checkRide(ctx, s.Line, prev, cur, kept)
 	}
 	return ProofVerified, ""
 }
@@ -460,17 +472,88 @@ func verifyBoarding(cur Move) string {
 
 // Line is the Bitcoin block line rides are checked against (DECK-0001 §1,
 // §4.2, §5.3): the stops by height, from 0 to the tip without a gap. How the
-// stops are obtained is out of scope (DECK-0001 §2.3).
+// stops are obtained is out of scope (DECK-0001 §2.3); AnchorLine reads them
+// from this relay's kind 321 anchors.
 type Line interface {
-	// Tip is the highest height on the line.
-	Tip() uint64
+	// Tip is the highest height on the line; false when it holds none.
+	Tip() (uint64, bool)
 	// Stop is block height's stop coordinate, as 64 lowercase hex.
 	Stop(height uint64) (string, bool)
 	// BlockHash is block height's 32-byte hash in display order.
 	BlockHash(height uint64) ([]byte, bool)
 	// Station is the height of the stop at or below bound nearest c by
 	// the distance of DECK-0001 §4.1, ties to the lowest height (§4.2).
+	// bound is on the line.
 	Station(c Coord, bound uint64) uint64
+}
+
+// LineState names what verdicts on rides rest on besides the blocks: the
+// line's source and, for a line that can reorganize, how many times it has.
+// It is part of Gate.rules, so a verdict made on another line is not used.
+// The tip is deliberately not part of it: a block added at the top changes
+// no verdict already reached (a ride that needed it was left unchecked, see
+// LineReached), so the cache need not start over every ten minutes.
+func (s SpecProofs) LineState() string {
+	if s.Line == nil {
+		return "none"
+	}
+	name := "static"
+	if n, ok := s.Line.(interface{ Name() string }); ok {
+		name = n.Name()
+	}
+	if e, ok := s.Line.(interface{ Epoch() uint64 }); ok {
+		name += fmt.Sprintf("@%d", e.Epoch())
+	}
+	return name
+}
+
+// LineReached reports whether the line holds height h: whether a ride left
+// unchecked for want of it can now be judged.
+func (s SpecProofs) LineReached(h uint64) bool {
+	if s.Line == nil {
+		return false
+	}
+	tip, ok := s.Line.Tip()
+	return ok && tip >= h
+}
+
+// lineComplete reports whether a line is the whole line, so that a height
+// above its tip does not exist (rather than not being known yet).
+func lineComplete(l Line) bool {
+	c, ok := l.(interface{ Complete() bool })
+	return ok && c.Complete()
+}
+
+// lineWaitPrefix starts the why of a ride left unchecked because the line
+// has not reached a height it needs (as_of or B above the tip); the height
+// follows. It is never a failure: Known keeps the height (LineWait), and the
+// gate checks the chain again once the line holds it.
+const lineWaitPrefix = "line: waiting for block "
+
+// awaitedHeight is the height a why made by awaitLine waits for.
+func awaitedHeight(why string) (uint64, bool) {
+	rest, ok := strings.CutPrefix(why, lineWaitPrefix)
+	if !ok {
+		return 0, false
+	}
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	h, err := strconv.ParseUint(rest[:end], 10, 64)
+	return h, err == nil
+}
+
+func awaitLine(h *big.Int, line Line) (ProofResult, string) {
+	need := uint64(math.MaxUint64) // a height no line will reach
+	if h.IsUint64() {
+		need = h.Uint64()
+	}
+	tip := "the line holds no block yet"
+	if t, ok := line.Tip(); ok {
+		tip = fmt.Sprintf("its tip is %d", t)
+	}
+	return ProofUnchecked, fmt.Sprintf("%s%d; %s", lineWaitPrefix, need, tip)
 }
 
 // LineBlock is one block of a StaticLine.
@@ -485,8 +568,8 @@ type LineBlock struct {
 }
 
 // StaticLine is a Line held in memory. Station is a linear scan, which is
-// exact and fine for short lines; a line of mainnet's length wants the sorted
-// lookup of DECK-0001 §4.4.
+// exact and fine for short lines; AnchorLine has the sorted lookup of
+// DECK-0001 §4.4 a line of mainnet's length wants.
 type StaticLine struct {
 	stops  []Coord
 	coords []string
@@ -520,7 +603,16 @@ func NewStaticLine(blocks []LineBlock) (*StaticLine, error) {
 	return l, nil
 }
 
-func (l *StaticLine) Tip() uint64 { return uint64(len(l.stops)) - 1 }
+// Complete implements lineComplete: a StaticLine is the whole line, as the
+// golden vectors' synthetic line is the whole of their world.
+func (l *StaticLine) Complete() bool { return true }
+
+func (l *StaticLine) Tip() (uint64, bool) {
+	if len(l.stops) == 0 {
+		return 0, false
+	}
+	return uint64(len(l.stops)) - 1, true
+}
 
 func (l *StaticLine) Stop(h uint64) (string, bool) {
 	if h >= uint64(len(l.coords)) {
@@ -552,7 +644,111 @@ const (
 	kLine           = 6
 	rideSamples     = 32
 	rideGrindHeight = 16
+	// tallLeafHeight: a ride leaf this tall or taller (h20 2.4 s and about
+	// 100 MB at its peak, h22 14 s and 370 MB, measured) is computed one at
+	// a time in the whole process, so concurrent checks cannot stack their
+	// memory.
+	tallLeafHeight = 20
 )
+
+// tallLeaves admits one tall ride leaf at a time, members first: a check
+// for an identity the gate already knows as a member (its position is in a
+// region the gate serves) takes the slot before any stranger waiting, so a
+// flood of strangers' forged rides cannot hold up a real rider for more than
+// the one leaf in progress. Members-first is bounded as the work queue's is
+// (unknownEvery): while a stranger waits, at least every fourth grant is a
+// stranger's, so members keep three of every four and no stranger starves.
+// A stranger is never refused; it waits, and a check its deadline ends while
+// it waits keeps what it finished.
+var tallLeaves = &prioritySlot{}
+
+// prioritySlot is a one-holder lock whose waiters are served members first,
+// then strangers, each in arrival order, but a waiting stranger at least
+// every unknownEvery-th grant.
+type prioritySlot struct {
+	mu                 sync.Mutex
+	busy               bool
+	members, strangers []chan struct{}
+	// memberRun counts the grants to members since the last to a stranger.
+	memberRun int
+}
+
+// acquire takes the slot, or returns ctx's error once ctx ends first.
+func (p *prioritySlot) acquire(ctx context.Context, member bool) error {
+	p.mu.Lock()
+	if !p.busy {
+		p.busy = true
+		p.granted(member)
+		p.mu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{})
+	if member {
+		p.members = append(p.members, ch)
+	} else {
+		p.strangers = append(p.strangers, ch)
+	}
+	p.mu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		p.mu.Lock()
+		queued := false
+		for _, q := range []*[]chan struct{}{&p.members, &p.strangers} {
+			if i := slices.Index(*q, ch); i >= 0 {
+				*q, queued = slices.Delete(*q, i, i+1), true
+			}
+		}
+		p.mu.Unlock()
+		if !queued { // granted as ctx ended: hand it on
+			p.release()
+		}
+		return ctx.Err()
+	}
+}
+
+// release hands the slot to the first member waiting, else the first
+// stranger, else frees it; but to a waiting stranger once members have had
+// unknownEvery-1 grants in a row.
+func (p *prioritySlot) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	strangerTurn := len(p.strangers) > 0 && p.memberRun >= unknownEvery-1
+	switch {
+	case len(p.members) > 0 && !strangerTurn:
+		close(p.members[0])
+		p.members = p.members[1:]
+		p.granted(true)
+	case len(p.strangers) > 0:
+		close(p.strangers[0])
+		p.strangers = p.strangers[1:]
+		p.granted(false)
+	default:
+		p.busy = false
+	}
+}
+
+func (p *prioritySlot) granted(member bool) {
+	if member {
+		p.memberRun++
+	} else {
+		p.memberRun = 0
+	}
+}
+
+type memberKey struct{}
+
+// WithMember returns ctx marking the check it carries as one for a known
+// member (tallLeaves).
+func WithMember(ctx context.Context, member bool) context.Context {
+	return context.WithValue(ctx, memberKey{}, member)
+}
+
+func isMemberCheck(ctx context.Context) bool {
+	m, _ := ctx.Value(memberKey{}).(bool)
+	return m
+}
 
 var (
 	hyperspaceTerrainDomain = []byte("CYBERSPACE_HYPERSPACE_TERRAIN_V1")
@@ -564,17 +760,35 @@ var (
 
 // checkRide checks the rules of a ride that need the line, in the
 // reference's order: on the first ride after boarding, as_of is a height on
-// the line and from_height is the station within it (DECK-0001 §4.2, §4.3);
-// then C is the stop of B (§5.5 Level 1 step 2); then the proof (§5.5, §5.8).
-// The walk has already checked everything that reads only tags.
-func checkRide(ctx context.Context, line Line, look, cur Move) (ProofResult, string) {
+// the line and at least B, and from_height is the station within it
+// (DECK-0001 §4.2, §4.3); then C is the stop of B (§5.5 Level 1 step 2);
+// then the proof (§5.5, §5.8). The walk has already checked everything that
+// reads only tags.
+//
+// A height the line has not reached yet (as_of or B above its tip) is not a
+// failure: the ride is left unchecked, waiting for that height (awaitLine).
+// The reference judges against mainnet's whole line, where such a ride is
+// invalid until Bitcoin reaches the height; an AnchorLine can lag mainnet
+// (the publisher waits for six confirmations, and a gap stops it), so there
+// it means only that the answer is not known yet. Only a line that is the
+// whole of its world (a StaticLine, such as the golden vectors' synthetic
+// line, lineComplete) says that a height above its tip does not exist, and
+// the ride is then invalid, as the reference has it. Every block the proof reads
+// is at or below the higher of from_height and B, so once both checks pass
+// it is on the line.
+func checkRide(ctx context.Context, line Line, look, cur Move, kept *rideKept) (ProofResult, string) {
 	from, _ := onlyDecimal(cur.Event, "from_height")
 	to, _ := onlyDecimal(cur.Event, "B")
-	tip := new(big.Int).SetUint64(line.Tip())
+	tip, has := line.Tip()
+	reached := func(h *big.Int) bool { return has && h.IsUint64() && h.Uint64() <= tip }
+	complete := lineComplete(line)
 	if look.Action == ActEnterHyperspace {
 		asOf, _ := onlyDecimal(cur.Event, "as_of")
-		if asOf.Cmp(tip) > 0 {
+		if asOf.Cmp(to) < 0 || complete && !reached(asOf) {
 			return ProofInvalid, ReasonHyperjumpAsOf + ": as_of must be a height on the line and at least B"
+		}
+		if !reached(asOf) {
+			return awaitLine(asOf, line)
 		}
 		boarded, _ := ParseCoord(look.To)
 		station := line.Station(boarded, asOf.Uint64())
@@ -582,39 +796,65 @@ func checkRide(ctx context.Context, line Line, look, cur Move) (ProofResult, str
 			return ProofInvalid, fmt.Sprintf("%s: from_height %s but the station within %s is %d", ReasonHyperjumpStation, from, asOf, station)
 		}
 	}
-	if to.Cmp(tip) > 0 {
-		return ProofInvalid, ReasonHyperjumpStop + ": B is not a height on the line"
+	if !reached(to) {
+		if complete {
+			return ProofInvalid, ReasonHyperjumpStop + ": B is not a height on the line"
+		}
+		return awaitLine(to, line)
 	}
 	if stop, ok := line.Stop(to.Uint64()); !ok || stop != cur.To {
 		return ProofInvalid, fmt.Sprintf("%s: C is not the stop coordinate of block %s", ReasonHyperjumpStop, to)
 	}
-	if why := verifyRideProof(ctx, line, cur, from.Uint64(), to.Uint64()); why != "" {
+	if !from.IsUint64() || !reached(from) {
+		// Only a ride after another can get here with from_height above the
+		// tip, and that one's B was on the line when it was checked.
+		return awaitLine(from, line)
+	}
+	why, err := verifyRideProof(ctx, line, cur, from.Uint64(), to.Uint64(), kept)
+	if err != nil {
+		return ProofUnchecked, err.Error()
+	}
+	kept.done()
+	if why != "" {
 		return ProofInvalid, ReasonHyperjumpProof + ": " + why
 	}
 	return ProofVerified, ""
 }
 
+// errRideCut is a ride's check cut short by its deadline; its leaves are
+// kept (RideProgress).
+var errRideCut = errors.New("canceled: the ride's check was cut short; its finished leaves are kept")
+
 // verifyRideProof is Level 1 of a ride's openings (DECK-0001 §5.5 steps 3
-// to 6, verify_ride_event). Both heights are on the line.
-func verifyRideProof(ctx context.Context, line Line, cur Move, fromH, toH uint64) string {
+// to 6, verify_ride_event). Both heights are on the line. It returns "" or
+// the first failure found, or errRideCut.
+//
+// The answer is the reference's; how the work is done differs in three
+// ways that change no answer. A block sampled more than once is computed
+// once (§5.5: "implementations MAY deduplicate"), so a ride shorter than 32
+// blocks costs its own length, not 32 leaves. The sampled blocks are
+// computed cheapest first, so a forged root fails on the cheapest leaf the
+// samples hold. And each finished leaf is kept, with a tall leaf's tree in
+// progress, so a check its deadline cuts short goes on from there.
+func verifyRideProof(ctx context.Context, line Line, cur Move, fromH, toH uint64, kept *rideKept) (string, error) {
 	mn := tagValues(cur.Event, "mn")
 	if len(mn) == 0 {
 		if !ListedV1Rides[cur.Event.ID] {
-			return "mn: missing; a ride without mn not listed in decks/grandfathered-v1-hyperjumps.txt (5.8)"
+			return "mn: missing; a ride without mn not listed in decks/grandfathered-v1-hyperjumps.txt (5.8)", nil
 		}
-		return ""
+		return "", nil
 	}
 	lo, hi := min(fromH, toH), max(fromH, toH)
 	n := hi - lo
 	depth := bits.Len64(n - 1)
 	parts := strings.Split(tagValues(cur.Event, "mp")[0], ":")
 	if len(parts) != rideSamples {
-		return fmt.Sprintf("mp: not %d colon-joined paths of %d siblings each (5.5)", rideSamples, depth)
+		return fmt.Sprintf("mp: not %d colon-joined paths of %d siblings each (5.5)", rideSamples, depth), nil
 	}
 	paths := make([][][]byte, rideSamples)
 	for i, p := range parts {
 		if !isLowerHex(p, 64*depth) {
-			return fmt.Sprintf("mp: not %d colon-joined paths of %d siblings each (5.5)", rideSamples, depth)
+			return fmt.Sprintf("mp: not %d colon-joined paths of %d siblings each (5.5)", rideSamples, depth), nil
 		}
 		raw, _ := hex.DecodeString(p)
 		for k := 0; k < depth; k++ {
@@ -625,30 +865,43 @@ func verifyRideProof(ctx context.Context, line Line, cur Move, fromH, toH uint64
 	root, _ := hex.DecodeString(tagValues(cur.Event, "proof")[0])
 	nb, _ := hex.DecodeString(mn[0])
 	// One attempt, a Cantor tree at height 16 (§5.5).
-	h := sha256.New()
-	h.Write(hyperspaceGrindDomain)
-	h.Write(prev)
-	h.Write(root)
-	h.Write(nb)
-	seed := h.Sum(nil)
-	gBase := new(big.Int).SetBytes(seed)
-	gBase.And(gBase, axisMask)
-	h = sha256.New()
-	h.Write(hyperspaceGrindDomain)
-	h.Write(seed)
-	cantorG := subtreeCantorCtx(ctx, aligned(gBase, rideGrindHeight), rideGrindHeight)
-	if cantorG == nil {
-		return "canceled"
+	G := kept.grind()
+	if G == nil {
+		h := sha256.New()
+		h.Write(hyperspaceGrindDomain)
+		h.Write(prev)
+		h.Write(root)
+		h.Write(nb)
+		seed := h.Sum(nil)
+		gBase := new(big.Int).SetBytes(seed)
+		gBase.And(gBase, axisMask)
+		h = sha256.New()
+		h.Write(hyperspaceGrindDomain)
+		h.Write(seed)
+		cantorG := subtreeCantorCtx(ctx, aligned(gBase, rideGrindHeight), rideGrindHeight)
+		if cantorG == nil {
+			return "", errRideCut
+		}
+		h.Write(bytesMin(cantorG))
+		G = h.Sum(nil)
+		kept.putGrind(G)
 	}
-	h.Write(bytesMin(cantorG))
-	G := h.Sum(nil)
 	price := big.NewInt(int64((n + rideSamples - 1) / rideSamples))
 	if price.Sign() == 0 {
 		price.SetInt64(1)
 	}
 	if !meetsPrice(G, price) {
-		return fmt.Sprintf("mn: nonce %s does not meet the re-roll price, A=%s (5.5)", mn[0], price)
+		return fmt.Sprintf("mn: nonce %s does not meet the re-roll price, A=%s (5.5)", mn[0], price), nil
 	}
+	// The samples, by block.
+	type sampled struct {
+		b, idx uint64
+		hash   []byte
+		height int
+		of     []int
+	}
+	byBlock := map[uint64]*sampled{}
+	var blocks []*sampled
 	for i := 0; i < rideSamples; i++ {
 		var ib [4]byte
 		binary.BigEndian.PutUint32(ib[:], uint32(i))
@@ -659,41 +912,241 @@ func verifyRideProof(ctx context.Context, line Line, cur Move, fromH, toH uint64
 		idx := new(big.Int).SetBytes(hs.Sum(nil))
 		idx.Mod(idx, new(big.Int).SetUint64(n))
 		b := lo + 1 + idx.Uint64()
-		hash, ok := line.BlockHash(b)
-		if !ok {
-			return fmt.Sprintf("block %d has no hash on the line", b)
+		s := byBlock[b]
+		if s == nil {
+			hash, ok := line.BlockHash(b)
+			if !ok {
+				return fmt.Sprintf("block %d has no hash on the line", b), nil
+			}
+			s = &sampled{b: b, idx: idx.Uint64(), hash: hash, height: rideLeafHeight(hash)}
+			byBlock[b] = s
+			blocks = append(blocks, s)
 		}
-		leaf := rideLeaf(ctx, prev, b, hash)
-		if leaf == nil {
-			return "canceled"
+		s.of = append(s.of, i)
+	}
+	slices.SortFunc(blocks, func(x, y *sampled) int {
+		if x.height != y.height {
+			return x.height - y.height
 		}
-		if !climbs(leaf, idx, paths[i], root) {
-			return fmt.Sprintf("mp: sample %d (block %d) does not reach the root", i, b)
+		return int(int64(x.b) - int64(y.b))
+	})
+	for _, s := range blocks {
+		leaf, err := rideLeafKept(ctx, prev, s.b, s.hash, s.height, kept)
+		if err != nil {
+			return "", err
+		}
+		for _, i := range s.of {
+			if !climbs(leaf, new(big.Int).SetUint64(s.idx), paths[i], root) {
+				return fmt.Sprintf("mp: sample %d (block %d) does not reach the root", i, s.b), nil
+			}
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// rideLeafHeight is h_b = K_b + 6 (DECK-0001 §5.3 steps 1 and 2).
+func rideLeafHeight(blockHash []byte) int {
+	d := sha256.Sum256(append(append([]byte{}, hyperspaceTerrainDomain...), blockHash...))
+	return bits.OnesCount16(uint16(d[0])<<8|uint16(d[1])) + kLine
 }
 
 // rideLeaf is block b's leaf (DECK-0001 §5.3): a Cantor tree of height
-// K_b + 6 seeded by the rider's previous event id and b.
+// K_b + 6 seeded by the rider's previous event id and b. nil when ctx ends.
 func rideLeaf(ctx context.Context, prev []byte, b uint64, blockHash []byte) []byte {
-	d := sha256.Sum256(append(append([]byte{}, hyperspaceTerrainDomain...), blockHash...))
-	height := bits.OnesCount16(uint16(d[0])<<8|uint16(d[1])) + kLine
+	leaf, err := rideLeafKept(ctx, prev, b, blockHash, rideLeafHeight(blockHash), nil)
+	if err != nil {
+		return nil
+	}
+	return leaf
+}
+
+func rideLeafKept(ctx context.Context, prev []byte, b uint64, blockHash []byte, height int, kept *rideKept) ([]byte, error) {
+	if leaf := kept.leaf(b, blockHash); leaf != nil {
+		return leaf, nil
+	}
 	var bb [8]byte
 	binary.BigEndian.PutUint64(bb[:], b)
-	s := sha256.New()
-	s.Write(hyperspaceSeedDomain)
-	s.Write(prev)
-	s.Write(bb[:])
-	t := new(big.Int).SetBytes(s.Sum(nil))
-	t.And(t, axisMask)
-	cantor := subtreeCantorCtx(ctx, aligned(t, height), height)
-	if cantor == nil {
-		return nil
+	tree := kept.tree(b, blockHash)
+	if tree == nil {
+		s := sha256.New()
+		s.Write(hyperspaceSeedDomain)
+		s.Write(prev)
+		s.Write(bb[:])
+		t := new(big.Int).SetBytes(s.Sum(nil))
+		t.And(t, axisMask)
+		tree = newCantorTree(aligned(t, height), height)
+	}
+	if height >= tallLeafHeight {
+		if tallLeaves.acquire(ctx, isMemberCheck(ctx)) != nil {
+			return nil, errRideCut
+		}
+		defer tallLeaves.release()
+	}
+	cantor, ok := tree.run(ctx)
+	if !ok {
+		kept.putTree(b, blockHash, tree)
+		return nil, errRideCut
 	}
 	leaf := sha256.New()
 	leaf.Write(hyperspaceLeafDomain)
 	leaf.Write(bb[:])
 	leaf.Write(bytesMin(cantor))
-	return leaf.Sum(nil)
+	out := leaf.Sum(nil)
+	if rideLeafHook != nil {
+		rideLeafHook(b)
+	}
+	kept.putLeaf(b, blockHash, out)
+	return out, nil
 }
+
+// RideProgress keeps, by ride event id, what checks of a ride that their
+// deadline cut short had finished: its G and its leaves, each with the
+// block hash it was computed from, and the tree of the one tall leaf in
+// progress (rides are checked one leaf at a time). As HopProgress, it is a
+// checkpoint and never a verdict: the event id commits to the previous id,
+// the root and the nonce the work is seeded by, and a leaf is used again
+// only for the same block hash. A ride's entry is dropped once it is
+// judged, and the oldest go first past max. At most one tree in progress is
+// kept in the whole process, the newest, since a tall one holds tens of MB.
+type RideProgress struct {
+	mu    sync.Mutex
+	max   int
+	byID  map[string]*rideState
+	order []string
+	tree  *keptTree
+}
+
+type rideState struct {
+	g      []byte
+	leaves map[uint64]keptLeaf
+}
+
+type keptLeaf struct {
+	hash, leaf []byte
+}
+
+type keptTree struct {
+	id   string
+	b    uint64
+	hash []byte
+	t    *cantorTree
+}
+
+// maxKeptTreeBytes bounds the tree in progress that is kept: an h22 leaf's
+// pending roots are under 32 MB. A variable only so a test can lower it.
+var maxKeptTreeBytes = 64 << 20
+
+// NewRideProgress keeps the progress of at most max rides.
+func NewRideProgress(max int) *RideProgress {
+	return &RideProgress{max: max, byID: map[string]*rideState{}}
+}
+
+// rideKept is one ride's view of a RideProgress (nil keeps nothing).
+type rideKept struct {
+	p  *RideProgress
+	id string
+}
+
+func (k *rideKept) state(create bool) *rideState {
+	st := k.p.byID[k.id]
+	if st == nil && create {
+		st = &rideState{leaves: map[uint64]keptLeaf{}}
+		k.p.byID[k.id] = st
+		k.p.order = append(k.p.order, k.id)
+		if len(k.p.order) > k.p.max {
+			delete(k.p.byID, k.p.order[0])
+			k.p.order = k.p.order[1:]
+		}
+	}
+	return st
+}
+
+func (k *rideKept) grind() []byte {
+	if k == nil {
+		return nil
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	if st := k.state(false); st != nil {
+		return st.g
+	}
+	return nil
+}
+
+func (k *rideKept) putGrind(g []byte) {
+	if k == nil {
+		return
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	k.state(true).g = g
+}
+
+func (k *rideKept) leaf(b uint64, hash []byte) []byte {
+	if k == nil {
+		return nil
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	if st := k.state(false); st != nil {
+		if l, ok := st.leaves[b]; ok && bytes.Equal(l.hash, hash) {
+			return l.leaf
+		}
+	}
+	return nil
+}
+
+func (k *rideKept) putLeaf(b uint64, hash, leaf []byte) {
+	if k == nil {
+		return
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	k.state(true).leaves[b] = keptLeaf{append([]byte(nil), hash...), leaf}
+	if t := k.p.tree; t != nil && t.id == k.id && t.b == b {
+		k.p.tree = nil
+	}
+}
+
+// tree takes the kept tree in progress for block b, if it is this ride's.
+func (k *rideKept) tree(b uint64, hash []byte) *cantorTree {
+	if k == nil {
+		return nil
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	if t := k.p.tree; t != nil && t.id == k.id && t.b == b && bytes.Equal(t.hash, hash) {
+		k.p.tree = nil
+		return t.t
+	}
+	return nil
+}
+
+func (k *rideKept) putTree(b uint64, hash []byte, t *cantorTree) {
+	if k == nil || t.bytes() > maxKeptTreeBytes {
+		return
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	k.p.tree = &keptTree{id: k.id, b: b, hash: append([]byte(nil), hash...), t: t}
+}
+
+// done drops a judged ride's progress.
+func (k *rideKept) done() {
+	if k == nil {
+		return
+	}
+	k.p.mu.Lock()
+	defer k.p.mu.Unlock()
+	if _, ok := k.p.byID[k.id]; !ok {
+		return
+	}
+	delete(k.p.byID, k.id)
+	k.p.order = slices.DeleteFunc(k.p.order, func(id string) bool { return id == k.id })
+	if t := k.p.tree; t != nil && t.id == k.id {
+		k.p.tree = nil
+	}
+}
+
+// rideLeafHook, when set (tests), is called after each leaf is computed.
+var rideLeafHook func(b uint64)

@@ -175,7 +175,7 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 			MapSizeMB:     sc.MapSizeMB,
 			FulltextKinds: cfg.Database.FulltextKinds,
 		}, sc.MaxOpenDatabases, time.Duration(sc.IdleCloseSeconds)*time.Second),
-		gate:    regiongate.NewSharedGate(sc.GateConfig, gateVerifier(sc.GateConfig), sources...),
+		gate:    regiongate.NewSharedGate(sc.GateConfig, gateVerifier(ctx, sc.GateConfig), sources...),
 		timeout: time.Duration(sc.GateConfig.FetchTimeoutSeconds+2) * time.Second,
 		conns:   map[string]int{},
 	}

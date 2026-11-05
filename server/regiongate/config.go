@@ -98,9 +98,34 @@ type Config struct {
 	// stands before it until the ceiling is raised.
 	MaxHopVerifyHeight int `yaml:"max_hop_verify_height"`
 
+	// CheckRides checks rides (DECK-0001) against the Bitcoin line built
+	// from this relay's own block anchors (kind 321) by LinePublisher.
+	// Default true. Off, every ride is left unchecked (see Mode).
+	CheckRides *bool `yaml:"check_rides"`
+	// LinePublisher is the hex pubkey (or npub) whose anchors make the
+	// line. Default our NTH publisher, c6e74d44... (owner ruling
+	// 2026-11-05).
+	LinePublisher string `yaml:"line_publisher"`
+	// LinePollSeconds is how often the line asks the store for new
+	// anchors. Default 30.
+	LinePollSeconds int `yaml:"line_poll_seconds"`
+	// LineFallback fills heights no anchor covers, between two that do,
+	// with block headers from LineFallbackURLs (Esplora's
+	// /block/<hash>/header). Each header is fetched by the hash the anchor
+	// above names and must hash to it, so the source is trusted for
+	// nothing; it only makes requests. Default false.
+	LineFallback bool `yaml:"line_fallback"`
+	// LineFallbackURLs default to https://mempool.space/api and
+	// https://blockstream.info/api.
+	LineFallbackURLs []string `yaml:"line_fallback_urls"`
+
 	boxes  []Box
 	exempt map[string]bool
 }
+
+// DefaultLinePublisher is the NTH block anchor publisher (owner ruling
+// 2026-11-05).
+const DefaultLinePublisher = "c6e74d44d41fce3b117c1129feacd182918e9fa3b3239579081de9172c4bf5e6"
 
 // RegionSpec is one region in region.yml. Exactly one form is used:
 //   - base + height: an aligned cube (the §8.11.1 bracket form)
@@ -181,6 +206,24 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.MaxHopVerifyHeight <= 0 {
 		c.MaxHopVerifyHeight = DefaultMaxHopHeight
+	}
+	if c.CheckRides == nil {
+		t := true
+		c.CheckRides = &t
+	}
+	if c.LinePublisher == "" {
+		c.LinePublisher = DefaultLinePublisher
+	}
+	pub, err := normalizePubkey(c.LinePublisher)
+	if err != nil {
+		return nil, fmt.Errorf("line_publisher: %w", err)
+	}
+	c.LinePublisher = pub
+	if c.LinePollSeconds <= 0 {
+		c.LinePollSeconds = 30
+	}
+	if c.LineFallback && len(c.LineFallbackURLs) == 0 {
+		c.LineFallbackURLs = []string{"https://mempool.space/api", "https://blockstream.info/api"}
 	}
 	if c.MaxHopVerifyHeight > MaxHopVerifyHeightLimit {
 		return nil, fmt.Errorf("region: max_hop_verify_height %d is above %d, where a hop's residue count no longer fits 64 bits", c.MaxHopVerifyHeight, MaxHopVerifyHeightLimit)

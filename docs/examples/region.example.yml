@@ -10,15 +10,27 @@ enabled: true
 
 # Both modes check every chain rule and every work proof at Level 1 (chain
 # rules revision 2026-10-08-residue-openings). They differ only on a proof the
-# gate cannot judge: a ride (no Bitcoin line is configured yet) or a hop taller
-# than max_hop_verify_height.
+# gate cannot judge: a ride whose as_of or B the Bitcoin line has not reached
+# yet, or a hop taller than max_hop_verify_height.
 # strict (default): such a proof is not trusted; position = the last event
-#   before it. An identity that rode since its last spawn stands where it
-#   boarded.
+#   before it. A rider waiting for the line stands where they boarded until
+#   the line holds the height; then the chain is checked again at once.
 # structural: such a proof is trusted; position = chain head (or the frozen
-#   position of an invalid chain). With no line, a ride lands wherever its C
-#   says, so do not run a speakeasy in this mode.
+#   position of an invalid chain). A ride waiting for the line is the
+#   exception: it is not trusted in either mode.
 mode: strict
+
+# Rides (DECK-0001) are checked against the Bitcoin line built from the block
+# anchors (kind 321) this relay holds, signed by line_publisher (default the
+# NTH publisher). The line stops at the first height no anchor covers;
+# line_fallback fills such a gap (up to 64 blocks between two anchors) from
+# block headers fetched by hash and checked against the anchors, so the
+# source is trusted for nothing. See "The Bitcoin line" in docs/region-gate.md.
+# check_rides: true
+# line_publisher: c6e74d44d41fce3b117c1129feacd182918e9fa3b3239579081de9172c4bf5e6
+# line_poll_seconds: 30
+# line_fallback: false
+# line_fallback_urls: [https://mempool.space/api, https://blockstream.info/api]
 
 # The tallest hop (h_max) whose proof is checked; Level 1 costs about 2^h_max
 # word additions per sampled residue (about 0.7 s on one core at h24 with

@@ -350,7 +350,7 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 	handlers.OnEventStored = BroadcastEvent
 
 	// Optional admission gate (region.yml).
-	startRegionGate()
+	startRegionGate(ctx)
 
 	// With speakeasies.yml, the built-in client (its connections are shared
 	// by every visitor) never connects to a speakeasy path. Installed before

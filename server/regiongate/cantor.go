@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"math/big"
 	"math/bits"
+
+	"github.com/remyoudompheng/bigfft"
 )
 
 // The exact Cantor arithmetic the proofs of the chain rules are built on
@@ -16,10 +18,27 @@ import (
 // cantorPair is π(a, b) = (a + b)(a + b + 1) / 2 + b (§4.2), into z.
 func cantorPair(z, a, b *big.Int) *big.Int {
 	s := new(big.Int).Add(a, b)
-	t := new(big.Int).Mul(s, s) // s(s + 1) = s^2 + s; math/big squares faster than it multiplies
+	t := square(s) // s(s + 1) = s^2 + s
 	t.Add(t, s)
 	t.Rsh(t, 1)
 	return z.Add(t, b)
+}
+
+// fftWords is the size, in 64-bit words, from which s^2 is computed by FFT
+// multiplication (bigfft) rather than math/big's Karatsuba squaring. The
+// top levels of a tall ride leaf square numbers of millions of words, where
+// Karatsuba is several times slower: measured on one core, an h20 tree takes
+// 7.9 s with math/big and 2.4 s with bigfft from 8192 words (2.6 s from
+// 2048, 2.8 s from 16384), and an h22 leaf 14 s instead of about a minute.
+// Below it math/big is as fast or faster. The product is the same exact
+// integer either way.
+const fftWords = 8192
+
+func square(s *big.Int) *big.Int {
+	if len(s.Bits()) >= fftWords {
+		return bigfft.Mul(s, s)
+	}
+	return new(big.Int).Mul(s, s) // math/big squares faster than it multiplies
 }
 
 var bigOne = big.NewInt(1)
@@ -36,32 +55,78 @@ func subtreeCantor(base *big.Int, height int) *big.Int {
 }
 
 // subtreeCantorCtx is subtreeCantor that gives up, returning nil, once ctx
-// ends: a ride leaf at h22 takes about a minute.
+// ends.
 func subtreeCantorCtx(ctx context.Context, base *big.Int, height int) *big.Int {
-	if height == 0 {
-		return new(big.Int).Set(base)
+	root, _ := newCantorTree(base, height).run(ctx)
+	return root
+}
+
+// cantorTree is the Cantor root of an aligned subtree in progress: the next
+// leaf, and the roots of the completed subtrees not yet paired, at most one
+// per level. A tree cut short keeps them, so it can go on later from where
+// it stopped (a ride leaf's checkpoint, RideProgress).
+type cantorTree struct {
+	base   *big.Int
+	height int
+	next   int
+	stack  []cantorNode
+}
+
+type cantorNode struct {
+	v     *big.Int
+	level int
+}
+
+func newCantorTree(base *big.Int, height int) *cantorTree {
+	return &cantorTree{base: new(big.Int).Set(base), height: height, stack: make([]cantorNode, 0, height+1)}
+}
+
+// run computes on until the root, which it returns, or until ctx ends: it
+// then returns false and can be run again. Each step leaves the tree whole:
+// a leaf is pushed, or the two newest roots of one level are paired.
+func (t *cantorTree) run(ctx context.Context) (*big.Int, bool) {
+	if t.height == 0 {
+		return new(big.Int).Set(t.base), true
 	}
-	type node struct {
-		v     *big.Int
-		level int
+	if !t.settle(ctx) {
+		return nil, false
 	}
-	stack := make([]node, 0, height+1)
-	leaf := new(big.Int).Set(base)
-	for i := 0; i < 1<<height; i++ {
-		if i&1023 == 1023 && ctx.Err() != nil {
-			return nil
+	leaf := new(big.Int).Add(t.base, big.NewInt(int64(t.next)))
+	for t.next < 1<<t.height {
+		if t.next&1023 == 1023 && ctx.Err() != nil {
+			return nil, false
 		}
-		cur, level := new(big.Int).Set(leaf), 0
-		for len(stack) > 0 && stack[len(stack)-1].level == level {
-			left := stack[len(stack)-1].v
-			stack = stack[:len(stack)-1]
-			cur = cantorPair(left, left, cur)
-			level++
-		}
-		stack = append(stack, node{cur, level})
+		t.stack = append(t.stack, cantorNode{new(big.Int).Set(leaf), 0})
+		t.next++
 		leaf.Add(leaf, bigOne)
+		if !t.settle(ctx) {
+			return nil, false
+		}
 	}
-	return stack[0].v
+	return t.stack[0].v, true
+}
+
+// settle pairs the two newest roots while they are of one level. The top
+// pairings of a tall tree take seconds each, so ctx is checked after each
+// of those.
+func (t *cantorTree) settle(ctx context.Context) bool {
+	for n := len(t.stack); n >= 2 && t.stack[n-1].level == t.stack[n-2].level; n = len(t.stack) {
+		left, right := t.stack[n-2], t.stack[n-1]
+		t.stack = append(t.stack[:n-2], cantorNode{cantorPair(left.v, left.v, right.v), left.level + 1})
+		if left.level+1 >= 16 && ctx.Err() != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// bytes is about how much memory the tree in progress holds.
+func (t *cantorTree) bytes() int {
+	n := 0
+	for _, nd := range t.stack {
+		n += 8 * len(nd.v.Bits())
+	}
+	return n
 }
 
 // bytesMin is n as big-endian bytes with no leading zero byte, and 0 as the

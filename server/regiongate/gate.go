@@ -109,11 +109,10 @@ type Gate struct {
 	sources  []Source
 	verifier Verifier
 	now      func() time.Time
-	// rules names the chain rules and the checker settings verdicts rest
-	// on; a cache entry made under others is not used. When rides are
-	// checked against a Bitcoin line, the line's state belongs here too (see
-	// SpecProofs.check).
-	rules string
+	// rulesBase names the chain rules and the checker settings verdicts
+	// rest on; rules adds the line's state. A cache entry or failure made
+	// under other rules is not used.
+	rulesBase string
 
 	queue *workQueue
 	// home is the region set of the gate's own config, the one Admit,
@@ -149,9 +148,9 @@ func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 	verifier.StopAtUnchecked = cfg.Mode == ModeStrict
 	g := &Gate{
 		cfg: cfg, sources: sources, verifier: verifier, now: time.Now,
-		rules:  fmt.Sprintf("%s mode=%s max_hop_verify_height=%d", ChainRulesRevision, cfg.Mode, orDefault(cfg.MaxHopVerifyHeight, DefaultMaxHopHeight)),
-		chains: newChainCache(orDefault(cfg.MaxCachedChains, 4096)),
-		failed: newFailedSet(), progress: map[string]*Known{},
+		rulesBase: fmt.Sprintf("%s mode=%s max_hop_verify_height=%d", ChainRulesRevision, cfg.Mode, orDefault(cfg.MaxHopVerifyHeight, DefaultMaxHopHeight)),
+		chains:    newChainCache(orDefault(cfg.MaxCachedChains, 4096)),
+		failed:    newFailedSet(), progress: map[string]*Known{},
 		home: NewRegions(cfg.boxes...),
 	}
 	g.verifier.failed = g.failedEvent
@@ -176,6 +175,15 @@ func NewSharedGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 	return g
 }
 
+// rules is rulesBase with the state of the line rides are checked against
+// (SpecProofs.LineState): its source, and how often it has reorganized.
+func (g *Gate) rules() string {
+	if la, ok := g.verifier.Proofs.(lineAware); ok {
+		return g.rulesBase + " line=" + la.LineState()
+	}
+	return g.rulesBase
+}
+
 // defaultLookups is how many checks run at once by default: about one per
 // core the process may use, since a check is CPU-bound once its events are
 // fetched.
@@ -189,7 +197,7 @@ func (g *Gate) isMember(pubkey string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e := g.chains.members.byPub[pubkey]
-	return e != nil && e.Value.(*cacheItem).entry.rules == g.rules
+	return e != nil && e.Value.(*cacheItem).entry.rules == g.rules()
 }
 
 // IsMember reports whether pubkey is a known member: kept with the members
@@ -270,7 +278,7 @@ func (g *Gate) check(ctx context.Context, pubkey string, incoming *nostr.Event, 
 // (sameVerdictWith): a re-sent event costs nothing, refused or not.
 func (g *Gate) cached(pubkey string, incoming *nostr.Event, in *Regions) (bool, string, bool) {
 	g.mu.Lock()
-	e := g.chains.get(pubkey, g.rules)
+	e := g.chains.get(pubkey, g.rules())
 	g.mu.Unlock()
 	if e == nil || !g.fresh(e, in) {
 		return false, "", false
@@ -290,8 +298,12 @@ func (g *Gate) cached(pubkey string, incoming *nostr.Event, in *Regions) (bool, 
 // asking the sources: for cache_ttl_seconds when it admits in the region
 // set asked about, for negative_cache_ttl_seconds when it refuses there. One
 // entry can be fresh for one speakeasy and stale for another: an identity
-// refused here is checked again sooner, in case it has moved in.
+// refused here is checked again sooner, in case it has moved in. An entry
+// that left a ride waiting for a height the line now holds is never fresh.
 func (g *Gate) fresh(e *chainEntry, in *Regions) bool {
+	if lineReached(g.verifier.Proofs, e.known) {
+		return false // a ride it left unchecked can be judged now
+	}
 	ok, _ := g.judge(e.vd, in)
 	return g.now().Before(e.checkedAt.Add(g.cfg.cacheTTL(ok)))
 }
@@ -321,10 +333,18 @@ func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event, in
 	if ok, reason, hit := g.cached(pubkey, incoming, in); hit {
 		return ok, reason
 	}
+	rules := g.rules()
+	// A known member's tall ride leaves go before strangers' (tallLeaves).
+	ctx = WithMember(ctx, g.isMember(pubkey))
 	g.mu.Lock()
-	e := g.chains.get(pubkey, g.rules)
+	e := g.chains.get(pubkey, rules)
 	g.mu.Unlock()
 	o := g.refresh(ctx, pubkey, e, incoming)
+	if g.rules() != rules {
+		// The line reorganized while the check ran: what it read may be
+		// from both sides, so none of it is kept.
+		return false, errBusy
+	}
 	// The incoming event enters the entry only when it is admitted, and so
 	// stored here: a refused one is stored nowhere, and no reader would see
 	// the identity where it puts it.
@@ -338,7 +358,7 @@ func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event, in
 	g.mu.Lock()
 	for _, x := range []*chainEntry{o.base, o.with} {
 		if x != nil {
-			g.failed.add(x.known)
+			g.failed.add(x.known, rules)
 		}
 	}
 	if keep != nil {
@@ -371,7 +391,7 @@ func (g *Gate) LiveAllowedIn(pubkey string, in *Regions) bool {
 		return true
 	}
 	g.mu.Lock()
-	e := g.chains.get(pubkey, g.rules)
+	e := g.chains.get(pubkey, g.rules())
 	g.mu.Unlock()
 	if (e == nil || !g.fresh(e, in)) && !g.queue.pending(pubkey) {
 		go func() {

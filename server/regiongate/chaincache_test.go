@@ -101,7 +101,7 @@ func cacheGate(t *testing.T, mode Mode, box Box, proofs ProofChecker, src Source
 func (g *Gate) entry(pubkey string) *chainEntry {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.chains.get(pubkey, g.rules)
+	return g.chains.get(pubkey, g.rules())
 }
 
 // insideTarget is a signer, a target coordinate away from its spawn and a
@@ -1320,12 +1320,12 @@ func TestReplayedOldEventsCostNothing(t *testing.T) {
 func TestOnlyProofFailuresAreKept(t *testing.T) {
 	f := newFailedSet()
 	junk, forged := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
-	f.add(&Known{FailAt: junk, FailReason: ReasonCMismatch, Stopped: "c-mismatch"})
-	f.add(&Known{FailAt: forged, FailReason: ReasonHopProof, Stopped: "hop-proof"})
-	if _, in := f.get(junk); in {
+	f.add(&Known{FailAt: junk, FailReason: ReasonCMismatch, Stopped: "c-mismatch"}, "r")
+	f.add(&Known{FailAt: forged, FailReason: ReasonHopProof, Stopped: "hop-proof"}, "r")
+	if _, in := f.get(junk, "r"); in {
 		t.Fatal("a structural failure was kept")
 	}
-	if _, in := f.get(forged); !in {
+	if _, in := f.get(forged, "r"); !in {
 		t.Fatal("a proof failure was not kept")
 	}
 }

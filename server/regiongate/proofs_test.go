@@ -469,7 +469,7 @@ func TestCheckIsCanceledWithItsCaller(t *testing.T) {
 		t.Fatalf("the check was abandoned after %v, before its own deadline", time.Since(start))
 	}
 	g.mu.Lock()
-	hit := g.chains.get(s.pubkey, g.rules) != nil
+	hit := g.chains.get(s.pubkey, g.rules()) != nil
 	g.mu.Unlock()
 	if hit {
 		t.Fatal("a timed-out check was cached as a verdict")

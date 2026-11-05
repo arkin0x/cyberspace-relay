@@ -170,7 +170,7 @@ func TestSharedGateFreshSpawnsNeverEvictMembers(t *testing.T) {
 		}
 	}
 	g.mu.Lock()
-	kept := g.chains.get(member.pubkey, g.rules) != nil
+	kept := g.chains.get(member.pubkey, g.rules()) != nil
 	g.mu.Unlock()
 	if !kept || !g.isMember(member.pubkey) {
 		t.Fatal("fresh spawned keys outside every region evicted a member's cache entry")
