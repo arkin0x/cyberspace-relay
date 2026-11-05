@@ -179,7 +179,17 @@ the rest.
 | `max_concurrent_lookups`: checks running | one per core (at least 2) | the check waits its turn |
 | `max_queued_lookups`: units of work waiting | 256 | refused at once, "relay busy verifying chains, try again" |
 | `max_queued_per_ip`: units waiting from one client address | 8 | the same |
+| units waiting from one network (IPv4 /24, IPv6 /48) | 4 times `max_queued_per_ip` (32) | the same |
 | distinct movement events waiting for one pubkey | 4 | the same |
+
+When the queue is full, two requests still get in. A known member takes the
+place of the newest queued job of an unknown key (from the address holding
+the most such work), or, when all of that work is already running, goes over
+the cap by that much: a member is refused only when members alone fill the
+queue. And an address with nothing waiting takes the place of the newest job
+of the address holding the most (if it holds at least two), so every address
+gets in however many others flood the queue. A job that gives up its place
+is answered "relay busy verifying chains, try again", never cached.
 
 Work for one pubkey is one job: readers share one check, a movement event
 already waiting adds nothing, and the events of one job are checked one

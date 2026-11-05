@@ -45,7 +45,10 @@ type workQueue struct {
 	memberRun int
 	queued    int            // units waiting
 	ipUnits   map[string]int // units waiting, by address
-	running   int            // workers running
+	netUnits  map[string]int // units waiting, by network (IPv4 /24, IPv6 /48)
+	// classUnits are the units waiting, members' then anyone else's.
+	classUnits [2]int
+	running    int // workers running
 }
 
 // job is the work waiting or running for one pubkey.
@@ -61,6 +64,8 @@ type job struct {
 type waiter struct {
 	incoming *nostr.Event
 	ip       string
+	network  string
+	class    int
 	units    int
 	started  bool
 	done     chan struct{}
@@ -71,7 +76,7 @@ type waiter struct {
 func newWorkQueue(workers, max, perIP, perPubkey int, timeout time.Duration,
 	run func(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string)) *workQueue {
 	return &workQueue{workers: workers, max: max, perIP: perIP, perPubkey: perPubkey, timeout: timeout, run: run,
-		jobs: map[string]*job{}, lines: [2]map[string][]*job{{}, {}}, ipUnits: map[string]int{}}
+		jobs: map[string]*job{}, lines: [2]map[string][]*job{{}, {}}, ipUnits: map[string]int{}, netUnits: map[string]int{}}
 }
 
 // submit queues a check of pubkey, with an incoming movement event or none
@@ -104,6 +109,7 @@ func (q *workQueue) pending(pubkey string) bool {
 }
 
 func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, string) {
+	network := networkBucket(ip)
 	ip = addressBucket(ip)
 	class := 1
 	if q.member != nil && q.member(pubkey) {
@@ -135,14 +141,37 @@ func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, 
 			}
 		}
 	}
-	if units > 0 && (q.queued+units > q.max || ip != "" && q.ipUnits[ip]+units > q.perIP) {
-		return nil, errBusy
+	if j != nil {
+		class = j.class
 	}
-	w := &waiter{incoming: incoming, ip: ip, units: units, done: make(chan struct{})}
-	q.queued += units
-	if ip != "" {
-		q.ipUnits[ip] += units
+	if units > 0 {
+		if ip != "" && q.ipUnits[ip]+units > q.perIP || network != "" && q.netUnits[network]+units > q.perIP*networkShare {
+			return nil, errBusy
+		}
+		if q.queued+units > q.max {
+			switch {
+			case class == 0:
+				// A member is never refused while anyone else holds work: it
+				// takes the place of the newest job of the address holding
+				// the most, or, when all of theirs is running already (and
+				// frees soon), goes over the cap by that much at most.
+				if !q.evict(pubkey, 1) && q.classUnits[1] == 0 {
+					return nil, errBusy
+				}
+			case ip != "" && q.ipUnits[ip] == 0:
+				// An address with nothing waiting takes the place of the
+				// newest job of the address holding the most (which keeps
+				// some), so every address gets in.
+				if !q.evict(pubkey, 2) {
+					return nil, errBusy
+				}
+			default:
+				return nil, errBusy
+			}
+		}
 	}
+	w := &waiter{incoming: incoming, ip: ip, network: network, class: class, units: units, done: make(chan struct{})}
+	q.hold(w)
 	if j == nil {
 		j = &job{pubkey: pubkey, ip: ip, class: class}
 		q.jobs[pubkey] = j
@@ -250,12 +279,7 @@ func (q *workQueue) work() {
 
 		q.mu.Lock()
 		for _, w := range batch {
-			q.queued -= w.units
-			if w.ip != "" {
-				if q.ipUnits[w.ip] -= w.units; q.ipUnits[w.ip] <= 0 {
-					delete(q.ipUnits, w.ip)
-				}
-			}
+			q.release(w)
 			close(w.done)
 		}
 		j.running = false
@@ -286,4 +310,100 @@ func addressBucket(ip string) string {
 		return v4.String()
 	}
 	return a.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// networkShare: one network (an IPv4 /24, an IPv6 /48) may have at most
+// networkShare times max_queued_per_ip units waiting, so a host with many
+// addresses (a /56 holds 256 /64s) cannot fill the queue on its own.
+const networkShare = 4
+
+// networkBucket is the network the per-network limit counts, or "" for
+// anything that is not an address (the live bucket).
+func networkBucket(ip string) string {
+	a := net.ParseIP(ip)
+	if a == nil {
+		return ""
+	}
+	if v4 := a.To4(); v4 != nil {
+		return v4.Mask(net.CIDRMask(24, 32)).String() + "/24"
+	}
+	return a.Mask(net.CIDRMask(48, 128)).String() + "/48"
+}
+
+func (q *workQueue) hold(w *waiter) {
+	q.queued += w.units
+	q.classUnits[w.class] += w.units
+	if w.ip != "" {
+		q.ipUnits[w.ip] += w.units
+	}
+	if w.network != "" {
+		q.netUnits[w.network] += w.units
+	}
+}
+
+func (q *workQueue) release(w *waiter) {
+	q.queued -= w.units
+	q.classUnits[w.class] -= w.units
+	if w.ip != "" {
+		if q.ipUnits[w.ip] -= w.units; q.ipUnits[w.ip] <= 0 {
+			delete(q.ipUnits, w.ip)
+		}
+	}
+	if w.network != "" {
+		if q.netUnits[w.network] -= w.units; q.netUnits[w.network] <= 0 {
+			delete(q.netUnits, w.network)
+		}
+	}
+}
+
+// evict drops the newest queued job (not one running) of a non-member,
+// from the address whose queued non-member jobs hold the most units, when
+// that address holds at least min of them; its waiters are told "busy, try
+// again", which is never cached. A job of pubkey itself is never dropped.
+// It reports whether one was.
+func (q *workQueue) evict(pubkey string, min int) bool {
+	best, bestUnits := "", 0
+	for _, ip := range q.rings[1] {
+		units := 0
+		for _, j := range q.lines[1][ip] {
+			for _, w := range j.waiters {
+				units += w.units
+			}
+		}
+		if units > bestUnits {
+			best, bestUnits = ip, units
+		}
+	}
+	if best == "" || bestUnits < min {
+		return false
+	}
+	line := q.lines[1][best]
+	for i := len(line) - 1; i >= 0; i-- {
+		j := line[i]
+		if j.pubkey == pubkey {
+			continue
+		}
+		q.lines[1][best] = append(line[:i:i], line[i+1:]...)
+		if len(q.lines[1][best]) == 0 {
+			delete(q.lines[1], best)
+			for k, a := range q.rings[1] {
+				if a == best {
+					q.rings[1] = append(q.rings[1][:k], q.rings[1][k+1:]...)
+					if k < q.turns[1] {
+						q.turns[1]--
+					}
+					break
+				}
+			}
+		}
+		delete(q.jobs, j.pubkey)
+		for _, w := range j.waiters {
+			q.release(w)
+			w.ok, w.reason = false, errBusy
+			close(w.done)
+		}
+		j.waiters = nil
+		return true
+	}
+	return false
 }

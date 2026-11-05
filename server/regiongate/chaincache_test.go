@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1418,5 +1419,170 @@ func TestQueueMembersFirstDoesNotStarveUnknownKeys(t *testing.T) {
 	ok, msg := q.submit(ctx, "newcomer", "u0", nil)
 	if took := time.Since(start); !ok || took > 200*time.Millisecond {
 		t.Fatalf("an unknown key behind always-busy members: %v %q after %v, want served within 200 ms", ok, msg, took)
+	}
+}
+
+// ── review round 5: the door ──────────────────────────────────────────
+
+// queuedCount is the units waiting in q.
+func queuedCount(q *workQueue) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.queued
+}
+
+// A member is never refused at a full door while anyone else holds work:
+// it takes the place of the newest job of the address holding the most
+// (whose waiter is told "busy, try again"), or, when all of theirs is
+// running already, goes over the cap by that much.
+func TestMembersAreNeverRefusedAtAFullDoor(t *testing.T) {
+	r := newBlockedRun()
+	defer close(r.release)
+	q := newWorkQueue(1, 4, 100, 4, time.Second, r.run)
+	q.member = func(pk string) bool { return pk[0] == 'm' }
+	go q.submit(context.Background(), "192.0.2.1", "z0", nil)
+	<-r.started
+	evicted := make(chan string, 4)
+	for _, pk := range []string{"u1", "u2", "u3"} {
+		go func(pk string) {
+			if _, msg := q.submit(context.Background(), "198.51.100.1", pk, nil); msg == errBusy {
+				evicted <- pk
+			}
+		}(pk)
+		waitFor(t, func() bool { return q.pending(pk) })
+	}
+	if n := queuedCount(q); n != 4 {
+		t.Fatalf("want the queue full at 4 units, got %d", n)
+	}
+	go q.submit(context.Background(), "203.0.113.1", "m0", nil)
+	waitFor(t, func() bool { return q.pending("m0") })
+	select {
+	case pk := <-evicted:
+		if pk != "u3" {
+			t.Fatalf("evicted %s, want the newest job, u3", pk)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no job made room for the member")
+	}
+
+	// All of the non-members' work is running: the member goes over the cap.
+	r2 := newBlockedRun()
+	defer close(r2.release)
+	q2 := newWorkQueue(1, 1, 100, 4, time.Second, r2.run)
+	q2.member = q.member
+	go q2.submit(context.Background(), "192.0.2.1", "z0", nil)
+	<-r2.started
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	go q2.submit(ctx, "203.0.113.1", "m0", nil)
+	waitFor(t, func() bool { return q2.pending("m0") })
+}
+
+// At a full door an address with nothing waiting takes the place of the
+// newest job of the address holding the most, so every address gets in; an
+// address that already has work waiting is refused, at once.
+func TestEveryAddressGetsInAtAFullDoor(t *testing.T) {
+	r := newBlockedRun()
+	defer close(r.release)
+	q := newWorkQueue(1, 4, 8, 4, time.Second, r.run)
+	go q.submit(context.Background(), "192.0.2.1", "z0", nil)
+	<-r.started
+	for _, pk := range []string{"a1", "a2", "a3"} {
+		go q.submit(context.Background(), "198.51.100.1", pk, nil)
+		waitFor(t, func() bool { return q.pending(pk) })
+	}
+	go q.submit(context.Background(), "203.0.113.7", "c1", nil)
+	waitFor(t, func() bool { return q.pending("c1") })
+	if q.pending("a3") || !q.pending("a2") {
+		t.Fatal("want the newest job of the fullest address (a3) to make room, and a2 kept")
+	}
+	for _, try := range []struct{ ip, pk string }{{"203.0.113.7", "c2"}, {"198.51.100.1", "a4"}} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		start := time.Now()
+		ok, msg := q.submit(ctx, try.ip, try.pk, nil)
+		cancel()
+		if ok || msg != errBusy || time.Since(start) > 500*time.Millisecond {
+			t.Fatalf("%s from %s at a full door: %v %q after %v, want a prompt refusal", try.pk, try.ip, ok, msg, time.Since(start))
+		}
+	}
+}
+
+// One network (IPv4 /24, IPv6 /48) holds at most networkShare times the
+// per-address limit, so many addresses of one host cannot fill the queue.
+func TestNetworkLimitBluntsAddressSybils(t *testing.T) {
+	for _, nets := range [][2]string{{"10.0.0.%d", "10.0.1.1"}, {"2001:db8:0:1%02x::1", "2001:db8:1::1"}} {
+		r := newBlockedRun()
+		q := newWorkQueue(1, 1000, 2, 4, time.Second, r.run)
+		go q.submit(context.Background(), "192.0.2.1", "z0", nil)
+		<-r.started
+		n := 0
+		for a := 1; a <= networkShare; a++ {
+			for k := 0; k < 2; k++ {
+				pk := fmt.Sprintf("s%d", n)
+				n++
+				go q.submit(context.Background(), fmt.Sprintf(nets[0], a), pk, nil)
+				waitFor(t, func() bool { return q.pending(pk) })
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		start := time.Now()
+		ok, msg := q.submit(ctx, fmt.Sprintf(nets[0], networkShare+1), "over", nil)
+		cancel()
+		if ok || msg != errBusy || time.Since(start) > 500*time.Millisecond {
+			t.Fatalf("%s: another address of a full network: %v %q after %v, want a prompt refusal", nets[0], ok, msg, time.Since(start))
+		}
+		go q.submit(context.Background(), nets[1], "elsewhere", nil)
+		waitFor(t, func() bool { return q.pending("elsewhere") })
+		close(r.release)
+	}
+}
+
+// The reviewer's flood (cyberspace-relay #15, round 4): unknown keys from
+// 16 addresses keep a 64-unit queue full; a newcomer from another address
+// still gets in every time, and is served well within its deadline.
+func TestNewcomerGetsInAmongAFlood(t *testing.T) {
+	run := func(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
+		time.Sleep(2 * time.Millisecond)
+		return true, ""
+	}
+	const workers, capQ, perIP, addrs = 2, 64, 8, 16
+	q := newWorkQueue(workers, capQ, perIP, 4, time.Second, run)
+	stop, wg := make(chan struct{}), &sync.WaitGroup{}
+	var n atomic.Int64
+	for a := 0; a < addrs; a++ {
+		for k := 0; k < perIP; k++ {
+			wg.Add(1)
+			go func(a int) {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					q.submit(context.Background(), fmt.Sprintf("10.%d.0.1", a), fmt.Sprintf("f%d", n.Add(1)), nil)
+				}
+			}(a)
+		}
+	}
+	defer func() { close(stop); wg.Wait() }()
+	time.Sleep(100 * time.Millisecond)
+	tries, refused := 0, 0
+	var worst time.Duration
+	for end := time.Now().Add(time.Second); time.Now().Before(end); {
+		tries++
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		start := time.Now()
+		ok, _ := q.submit(ctx, "203.0.113.9", fmt.Sprintf("u%d", tries), nil)
+		cancel()
+		if !ok {
+			refused++
+		} else {
+			worst = max(worst, time.Since(start))
+		}
+	}
+	t.Logf("newcomer among %d flooding addresses: %d tries, %d refused, worst wait %v", addrs, tries, refused, worst)
+	if refused > 0 || worst > 500*time.Millisecond {
+		t.Fatalf("a newcomer was refused %d of %d times (worst wait %v)", refused, tries, worst)
 	}
 }
