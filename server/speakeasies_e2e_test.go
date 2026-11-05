@@ -290,7 +290,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		if !strings.Contains(ws, "max connections") {
 			t.Fatalf("4th connection to B: %q", ws)
 		}
-		t.Logf("BOUND 4th connection to /0b (max_connections_per_path 3): %s", ws)
+		t.Logf("BOUND 4th connection to /%s (max_connections_per_path 3): %s", idB, ws)
 	})
 }
 
