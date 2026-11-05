@@ -185,7 +185,9 @@ Work for one pubkey is one job: readers share one check, a movement event
 already waiting adds nothing, and the events of one job are checked one
 after another, each against the entry the one before left. Jobs of known
 members (pubkeys with an admitted entry, fresh or not) are taken before
-anyone else's, so fresh keys building costly chains cannot starve players.
+anyone else's, so fresh keys building costly chains cannot starve players;
+while anyone else's job waits, at least every fourth job taken is theirs, so
+members cannot starve newcomers either.
 Within each of the two classes, jobs are taken round robin across client
 addresses, oldest first within each, so one address flooding the queue
 delays only its own work. An IPv6 client counts

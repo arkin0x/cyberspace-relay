@@ -1384,3 +1384,39 @@ func TestGateServesKnownMembersFirst(t *testing.T) {
 		t.Fatalf("the member waited %v behind 10 unknown keys (about 50 ms each)", took)
 	}
 }
+
+// Members first never starves anyone: an unknown key behind members who
+// keep the only worker busy is still served, well within its deadline.
+func TestQueueMembersFirstDoesNotStarveUnknownKeys(t *testing.T) {
+	run := func(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
+		time.Sleep(5 * time.Millisecond)
+		return true, ""
+	}
+	q := newWorkQueue(1, 100, 100, 4, time.Second, run)
+	q.member = func(pk string) bool { return pk[0] == 'm' }
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, pk := range []string{"m0", "m1", "m2"} {
+		wg.Add(1)
+		go func(pk string) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				q.submit(context.Background(), "members", pk, nil)
+			}
+		}(pk)
+	}
+	defer func() { close(stop); wg.Wait() }()
+	time.Sleep(20 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	ok, msg := q.submit(ctx, "newcomer", "u0", nil)
+	if took := time.Since(start); !ok || took > 200*time.Millisecond {
+		t.Fatalf("an unknown key behind always-busy members: %v %q after %v, want served within 200 ms", ok, msg, took)
+	}
+}

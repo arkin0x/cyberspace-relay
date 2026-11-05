@@ -36,13 +36,16 @@ type workQueue struct {
 	// the queued jobs of class c (0 members, 1 the rest), oldest first, by
 	// the address that queued them; rings[c] the addresses with such jobs,
 	// in turn order, and turns[c] whose turn is next.
-	jobs    map[string]*job
-	lines   [2]map[string][]*job
-	rings   [2][]string
-	turns   [2]int
-	queued  int            // units waiting
-	ipUnits map[string]int // units waiting, by address
-	running int            // workers running
+	jobs  map[string]*job
+	lines [2]map[string][]*job
+	rings [2][]string
+	turns [2]int
+	// memberRun counts members' jobs taken in a row while anyone else's
+	// waited (see unknownEvery).
+	memberRun int
+	queued    int            // units waiting
+	ipUnits   map[string]int // units waiting, by address
+	running   int            // workers running
 }
 
 // job is the work waiting or running for one pubkey.
@@ -162,10 +165,24 @@ func (q *workQueue) push(j *job) {
 	q.lines[c][j.ip] = append(q.lines[c][j.ip], j)
 }
 
-// next takes a known member's job first, if any is queued, else anyone's:
+// unknownEvery bounds members-first: while anyone else's job waits, at
+// least every unknownEvery-th job taken is one of theirs. Members keep at
+// least three of every four picks under a sustained flood of fresh keys
+// (promoting jobs by age instead would let a flood that has waited share
+// equally with members, the attack members-first is for), and an unknown
+// key waits at most unknownEvery-1 members' jobs once its turn comes.
+const unknownEvery = 4
+
+// next takes a known member's job first, if any is queued, else anyone's,
+// but anyone else's at least every unknownEvery-th pick while one waits:
 // within a class, the oldest job of the address whose turn it is.
 func (q *workQueue) next() *job {
-	for c := range q.rings {
+	others := len(q.rings[1]) > 0
+	order := [2]int{0, 1}
+	if others && q.memberRun >= unknownEvery-1 {
+		order = [2]int{1, 0}
+	}
+	for _, c := range order {
 		if len(q.rings[c]) == 0 {
 			continue
 		}
@@ -181,6 +198,11 @@ func (q *workQueue) next() *job {
 		} else {
 			q.lines[c][ip] = line[1:]
 			q.turns[c]++
+		}
+		if c == 0 && others {
+			q.memberRun++
+		} else {
+			q.memberRun = 0
 		}
 		return j
 	}
