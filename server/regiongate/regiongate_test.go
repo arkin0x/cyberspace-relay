@@ -259,7 +259,7 @@ regions:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Mode != ModeStructural || len(c.boxes) != 3 || c.AlwaysAllowKinds[0] != 5 || !c.exempt[op.pubkey] {
+	if c.Mode != ModeStrict || c.MaxHopVerifyHeight != DefaultMaxHopHeight || len(c.boxes) != 3 || c.AlwaysAllowKinds[0] != 5 || !c.exempt[op.pubkey] {
 		t.Fatalf("unexpected config: %+v", c)
 	}
 	s := c.boxes[0]

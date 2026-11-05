@@ -49,6 +49,8 @@ can succeed, so nothing can be read or written.
 NIP-11 advertises `auth_required` and `restricted_writes`. The NIP-11 document
 itself stays public, so the relay's existence, name and description are not secret.
 
+Writes are judged by the event's author, not by who sends it, so anyone can push a member's public events (copied from another relay) into a speakeasy. Clients should mark speakeasy posts protected (NIP-70 `["-"]`), which this relay accepts only from the authenticated author.
+
 Verified over the wire: outsider REQ without AUTH `auth-required`, with AUTH
 `restricted`; member reads its note; member COUNT 1, outsider COUNT refused;
 `GET /`, `/api/v1/events/query`, `/api/v1/relay/stats`, `/static/*` all 404.
@@ -98,10 +100,12 @@ the two questions returned 139 events in 5.7 s and verification took 32 ms.
 ## Verifying a chain
 
 `regiongate.Verifier` implements the chain rules of revision
-`2026-09-28-virtual-brackets` (CYBERSPACE_V2 §8.12, `regiongate.ChainRulesRevision`,
-logged at startup), with the rulings of 2026-10-07 and the clarifications of
-2026-10-08 that arkin0x/cyberspace #46 (`912f3d7`) and #48 (`1bf5694`) folded
-into that revision.
+`2026-10-08-residue-openings` (CYBERSPACE_V2 §8.12, `regiongate.ChainRulesRevision`,
+logged at startup): everything in `2026-09-28-virtual-brackets`, with the
+rulings of 2026-10-07 and 2026-10-08 that arkin0x/cyberspace #46 (`912f3d7`)
+and #48 (`1bf5694`) folded in, plus hop proofs of version 2, residue openings
+(§5.9 to §5.13, arkin0x/cyberspace #50, `8b45430`), as the reference verifier
+implements them (arkin0x/cyberspace-cli `5103c62`, `cyberspace_core.chain`).
 It does, in order:
 
 1. **Discards every event that is not authentic** (§8.7.3): an id that is not
@@ -149,9 +153,12 @@ It does, in order:
      sidestep, and `from_height`, `B` and `mp` on a ride, plus `as_of` on the
      first ride after boarding (missing there: `hyperjump-as-of`; present
      but repeated or not decimal: `malformed`; on later rides unread). `mn`
-     may be absent on a sidestep or a ride, because the exemption lists
-     (§6.16, DECK-0001 §5.8) name events with none, but not repeated; a
-     missing `mn` on an unlisted event is the proof checker's. A tag of the
+     may be absent on a hop, a sidestep or a ride, and `mp` on a hop, because
+     the exemption lists (§5.13, §6.16, DECK-0001 §5.8) name events with
+     none, but neither may be repeated; `mn` is 16 lowercase hex characters,
+     and a hop's `mp` is exactly `16 × (128 + 64 × depth)` lowercase hex
+     characters, the depth its `c`, `C` and `e … previous` give it (§8.4). A
+     missing `mn` or `mp` on an unlisted event is the proof checker's. A tag of the
      wrong form is `malformed`. On a ride the heights come first, then
      DECK-0001 §5.6 (zero-length), then the other ride tags. Inside a
      bracket only `A` and the `e` tags are constrained; on skipped actions
@@ -222,63 +229,115 @@ It does, in order:
    chain moves it; only a respawn does. When the newest spawn itself is
    invalid, the identity stands at its spawn coordinate, its pubkey's.
 4. Asks the `ProofChecker` about each hop, sidestep, `enter-hyperspace` and
-   `hyperjump` outside a bracket, after its structural checks pass.
+   `hyperjump` outside a bracket, after its structural checks pass (see
+   Proofs). Every proof is asked about, those after one the checker could
+   not judge included: a proof rests on its own event and the id it names
+   as previous, never on an earlier proof.
 
 The verdict carries two positions: `Position` (where the identity stands,
 valid chain or frozen) and `VerifiedPosition` (after the longest prefix whose
-every proof the checker verified). `mode: structural` uses the first, `mode:
-strict` the second. The gate judges a frozen identity by its frozen position:
+every proof the checker verified, which stops before the first proof the
+checker could not judge). `mode: strict`, the default, uses the second;
+`mode: structural` the first. The gate judges a frozen identity by its frozen position:
 inside the region it stays admitted, and a movement event published on its
 frozen chain is admitted or refused at that position, since it cannot move
 the identity.
 
 ### Golden vectors
 
-`server/regiongate/testdata/chain-rules-2026-09-28-virtual-brackets.json` is
-the reference implementation's vector file, copied unchanged from
-arkin0x/cyberspace-cli PR #25 (commit `32c21dc`, generated against the spec
-at `1bf5694`, arkin0x/cyberspace #48). Events in it that are not NIP-01
-shaped are left out, as a relay could not accept them.
-`TestChainRulesGoldenVectors` runs every vector through the verifier, every
-event checked for authenticity:
+`TestChainRulesGoldenVectors` runs the spec's normative vectors,
+`server/regiongate/testdata/chain-rules-2026-10-08-residue-openings.json`,
+copied unchanged from arkin0x/cyberspace (`9210d6d`, added by #84; the same
+file as cyberspace-cli's `vectors/`, sha256 `3c56a77d…`). As §8.12 requires,
+every one of the 158 vectors runs in full with the real proof checker, the
+file's synthetic block line in place of Bitcoin mainnet and the file's own
+list of version 1 hops in place of `grandfathered-v1-hops.txt`: validity,
+chain, position, head, open bracket and skipped ids for a valid chain; the
+reason code, the invalid event and the frozen position for an invalid one.
+Events in it that are not NIP-01 shaped are left out, as a relay could not
+accept them. `REGIONGATE_VECTORS=<path>` runs another vectors file of the same
+revision in its place.
 
-- vectors whose verdict rests on structure must match the reference exactly:
-  validity, chain, position, head, open bracket and skipped ids, or the
-  reason code, the invalid event and the frozen position;
-- vectors whose verdict rests on a proof, or on Bitcoin's block data, are
-  marked pending: the test asserts the chain is structurally valid up to that
-  event and the event's proof is reported unchecked, never verified.
+Beside them, from the real network and the spec:
 
-`REGIONGATE_VECTORS=<path> go test -run Golden ./server/regiongate/` runs
-another vectors file in place of the one in testdata, without copying it in.
+| Test | File | What |
+|---|---|---|
+| `TestRealChainVectors` | `chain-rules-2026-10-08-residue-openings-real.json` | 12 real chains read from `wss://cyberspace.nostr1.com` on 2026-11-04 (9 valid, 3 frozen by unlisted version 1 sidesteps), each with the reference verifier's verdict under the real lists and no line; a chain that rides is cut before its first ride. Each vector names its identity. |
+| `TestRealProofs` | `real-proofs-2026-11-04.json` | 124 real proof-bearing events (version 2 hops at every h_max seen, every sidestep with `mn`, every boarding, one of which is invalid), each with the reference's verdict. `REGIONGATE_REAL_PROOFS=<path>` runs the full set of 553 in its place. |
+| `TestResidue*` | `hop-residue-vectors.json` | the spec's machine-readable vectors of residue openings (§5.10): primes, roots modulo p, residues, attempts, prices, sizes and 26 Level 1 verdicts. |
+| `TestRealChainCost` | (`REGIONGATE_REAL_CHAINS=<jsonl>`) | logs what verifying each identity's whole history costs; skipped without the variable. |
 
-## The placeholder: what is NOT checked yet
+The tools that made and cross-check these files are in
+`server/regiongate/testdata/tools/`: `fetch-chains.mjs` (read only, a
+throwaway AUTH key), `build-real-vectors.py` and `real-proofs.py` (expected
+verdicts from the reference verifier), `reference-verdicts.py` (the reference
+over any vectors file) and `onosendai-run-vectors.ts` (ONOSENDAI's own chain
+review, `buildChain` and `firstBreak` from origin/v2, over any vectors file).
 
-Proofs are not verified yet: the only `ProofChecker` is `PendingSpec`, which
-answers `ProofUnchecked` for every hop, sidestep, enter-hyperspace and
-hyperjump.
+## Proofs
 
-| Mode | With `PendingSpec` |
+The gate's checker is `regiongate.SpecProofs` (`server/regiongate/proofs.go`),
+a port of the reference's Level 1 checks:
+
+| Action | Checked | Exemption (by event id) |
+|---|---|---|
+| hop | version 2 at Level 1 (§5.11, §8.7.1): form and width of `proof`, `mn`, `mp`; one re-roll attempt against the price A; the 16 sampled openings' paths to the seal; the 16 residues of `hop_n`, each computed modulo its prime by the method of differences (`residue.go`) | `grandfathered-v1-hops.txt` (2,658): a listed version 1 hop's proof is accepted; any other version 1 hop is invalid |
+| sidestep | Level 1 (§8.7.2): geometry, `hx`/`hy`/`hz`, the re-roll price, the destination and the 8 sampled paths per moving axis, the proof hash | `grandfathered-v2-sidesteps.txt` (36): a listed sidestep without `mn` skips the price and the openings |
+| enter-hyperspace | the entry proof (DECK-0001 §3.2) | none |
+| hyperjump | `as_of` on the line, the station, `C` the stop of `B` (§4.2, §4.3, §5.5 step 2), Level 1 of the 32 openings (§5.5) | `decks/grandfathered-v1-hyperjumps.txt` (16) |
+
+The three lists are embedded from `server/regiongate/rules/`, copied unchanged
+from arkin0x/cyberspace `9210d6d` (the lists cyberspace-cli embeds). A lookup
+is by id, and the verifier has already checked that each id is its event's
+NIP-01 hash.
+
+Two things leave a proof unchecked instead of judged, as the reference raises
+instead of giving a verdict:
+
+- **A ride, when no `Line` is configured.** Checking a ride needs Bitcoin
+  mainnet's block line: every stop up to `as_of` for the station, the stop of
+  `B`, and the hashes of the sampled blocks. `regiongate.Line` is the seam;
+  `StaticLine` holds a line in memory (the vectors use it). No production
+  source is wired yet, so every ride is unchecked.
+- **A hop taller than `max_hop_verify_height`** (default 24, at most 65) that passes its
+  form and its price. Level 1 costs about 2^h_max word additions per sampled
+  residue and root; the price, checked first, costs one attempt.
+
+| Mode | A proof the checker cannot judge |
 |---|---|
-| `structural` | Position = chain head. Structure is enforced; work is trusted. Someone could sign a structurally valid chain that hops anywhere without doing the work. |
-| `strict` | Position = spawn point. Only identities that spawned inside the region are admitted. |
+| `strict` (default) | not trusted: the identity stands where the chain left it before that proof. Someone who rode since their last spawn stands where they boarded. |
+| `structural` | trusted: the identity stands at its head. With no line a ride lands wherever its `C` says, so a speakeasy must not run in this mode. |
 
-To plug in the proof rules, implement `regiongate.ProofChecker`
-(`server/regiongate/verify.go`) and pass it in `server/regiongate_startup.go`
-in place of `PendingSpec{}`. It receives each proof-bearing action as `cur`
-and, as `prev`, the action a rule that looks back sees: the nearest recognized
-action before it, with a closed bracket standing for the action before its
-entry. `prev`'s `C` is `cur`'s `c`. The work is seeded by `cur.Previous`, the
-id the action's `e … previous` names, which can be a skipped action or an
-`exit-virtual` and is then not `prev`. Expected contents, per the current spec:
-hop proofs (§8.7.1), sidestep Level 1 (§8.7.2) with the `mn` re-roll price and
-`grandfathered-v2-sidesteps.txt`, entry proofs (DECK-0001 §3.2), and rides at
-Level 1 (DECK-0001 §5.5, §5.8) with `decks/grandfathered-v1-hyperjumps.txt`.
-Rides also need the line's block data for the rules the verifier cannot
-decide from tags: `as_of` is a height on the line, `from_height` is the
-station within `as_of`, and `C` is the stop of `B`. A refusal names its rule
-by starting the reason string with a proof code (`hop-proof`,
-`hyperjump-station`, and so on). Nothing else changes.
+An invalid proof makes the chain invalid in both modes. In strict mode the walk
+also stops at the first proof it cannot judge, since nothing after it can move
+a strict position, so nothing after it is checked.
+
+**Bounding the work.** Every check runs under the lookup's deadline
+(`fetch_timeout_seconds + 2`): `VerifyContext` and the proof checkers stop
+once it ends, the lookup slot is freed and the refusal ("try again") is not
+cached. A check longer than that deadline never completes, which is one
+reason the ceiling stays at 24. The relay runs its duplicate check before the
+gate, so an event it already stores is never judged again. A refused event
+can still be sent again and is judged again each time; the incremental chain
+cache (speakeasy design, PR 2), which keeps the point where a chain fails,
+removes that repeat. Until it lands, keep the ceiling at 24.
+
+**Cost.** Measured on the 16-core agent machine under a load average of 14 to
+19, one core per hop below h_max 20:
+
+| What | Cost |
+|---|---|
+| a real version 2 hop (h_max 5 to 15, 502 of them) | median 0.24 ms, max 1.3 ms |
+| a real sidestep with `mn` (14) / a real boarding (37) | median 0.21 ms / 0.15 ms, max 1.0 ms / 6.4 ms |
+| the 16 residues of a hop, one tall axis (three tall axes), single core | h16 1.7 ms (5.3 ms); h20 17 ms (51 ms); h24 0.30 s (0.73 s); h28 4.7 s (16 s) |
+| the exact temporal tree of a sidestep or boarding | K8 0.1 ms, K12 1.0 ms, K16 27 ms |
+| an exact ride tree (attempt: h16; leaves: h6 to h22) | h14 19 ms, h16 0.13 s, h18 1.1 s, h20 8.6 s |
+| the owner's whole history (11,311 events held, 1,832 on the active chain, 1,795 hops) | 0.51 s, mostly signatures |
+| other real histories (8 to 517 events) | 0.6 ms to 158 ms |
+
+From h_max 20 a hop's 16 residues run in parallel. Signatures are checked only
+on the events resolution reads (the spawns and the events naming the newest
+one as genesis): on the owner's history that skips 9,476 of 11,311.
 
 ## Region forms
 
@@ -292,6 +351,18 @@ by starting the reason string with a proof code (`hop-proof`,
 may be listed; any match admits.
 
 ## Known limits
+
+- Rides are not checked until a Bitcoin line is configured (see Proofs). In
+  strict mode an identity that rode since its last spawn stands where it
+  boarded, so it is admitted only if that is inside the region.
+- Version 1 sidesteps (one opening path per axis, §6.15) are invalid and on
+  no list. Census 2026-11-04 on nostr1: 98 of them, by 16 identities, from
+  2026-08-25 to 2026-09-07, the owner's main key among them. A chain with one
+  on it is frozen just before it. ONOSENDAI does not check incoming proofs,
+  so it shows those chains as valid.
+- An exact Cantor tree (a sidestep's or a boarding's temporal tree, a ride's
+  leaves and attempt) is built with Go's math/big, which has no FFT
+  multiplication: a ride leaf at h20 to h22 costs seconds to a minute.
 
 - An admitted author stays admitted for `cache_ttl_seconds` even if they move
   out through another relay. A move published here re-verifies at once.

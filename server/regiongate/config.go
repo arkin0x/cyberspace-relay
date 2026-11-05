@@ -17,13 +17,17 @@ import (
 type Mode string
 
 const (
-	// ModeStructural places an identity at its chain head: signatures,
-	// links, coordinates and brackets are checked; work proofs are only
-	// checked as far as the ProofChecker can (with PendingSpec, not at all).
-	ModeStructural Mode = "structural"
-	// ModeStrict places an identity at its last proof-verified position.
-	// With PendingSpec that is its spawn point.
+	// ModeStrict places an identity at its last proof-verified position:
+	// every rule is checked, every work proof at Level 1, and a proof the
+	// checker cannot judge (a ride with no Bitcoin line configured, a hop
+	// taller than max_hop_verify_height) is not trusted, so the identity
+	// stands where it was before it. The default.
 	ModeStrict Mode = "strict"
+	// ModeStructural places an identity at its chain head or frozen
+	// position. Every rule and every proof the checker can judge is checked
+	// as in strict mode, but a proof it cannot judge is trusted: with no line,
+	// a ride lands wherever its C says.
+	ModeStructural Mode = "structural"
 )
 
 // Config is the parsed region.yml.
@@ -69,6 +73,14 @@ type Config struct {
 	// events from unknown pubkeys cannot make the relay hammer the chain
 	// relays. Default 16.
 	MaxConcurrentLookups int `yaml:"max_concurrent_lookups"`
+	// MaxHopVerifyHeight is the tallest hop (its h_max, §5.9) whose proof
+	// is checked. Level 1 costs about 2^h_max word additions per sampled
+	// residue and root, so a taller hop that passes its form and its
+	// re-roll price is left unchecked (see Mode). Default 24; at most 65.
+	// The reference verifier's ceiling is 32 and HOSAKA sells hops up to h30:
+	// a hop above the ceiling is not trusted in strict mode, so its mover
+	// stands before it until the ceiling is raised.
+	MaxHopVerifyHeight int `yaml:"max_hop_verify_height"`
 
 	boxes  []Box
 	exempt map[string]bool
@@ -108,7 +120,7 @@ func ParseConfig(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parse region config: %w", err)
 	}
 	if c.Mode == "" {
-		c.Mode = ModeStructural
+		c.Mode = ModeStrict
 	}
 	if c.Mode != ModeStructural && c.Mode != ModeStrict {
 		return nil, fmt.Errorf("region: mode must be %q or %q", ModeStructural, ModeStrict)
@@ -138,6 +150,12 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if c.MaxConcurrentLookups <= 0 {
 		c.MaxConcurrentLookups = 16
+	}
+	if c.MaxHopVerifyHeight <= 0 {
+		c.MaxHopVerifyHeight = DefaultMaxHopHeight
+	}
+	if c.MaxHopVerifyHeight > MaxHopVerifyHeightLimit {
+		return nil, fmt.Errorf("region: max_hop_verify_height %d is above %d, where a hop's residue count no longer fits 64 bits", c.MaxHopVerifyHeight, MaxHopVerifyHeightLimit)
 	}
 	if !c.Enabled {
 		return &c, nil

@@ -1,6 +1,8 @@
 package regiongate
 
 import (
+	"context"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
@@ -44,14 +46,17 @@ const (
 // With ProofInvalid, the string starts with the code of the rule broken, one
 // of the proof codes in Reasons, optionally followed by ": " and a detail. A
 // string with no proof code is reported under the action's proof code.
+//
+// ctx bounds the work: a checker returns promptly once it is done, with any
+// result, which the verifier then discards (VerifyContext).
 type ProofChecker interface {
-	Check(prev, cur Move) (ProofResult, string)
+	Check(ctx context.Context, prev, cur Move) (ProofResult, string)
 }
 
 // Reason codes name the rule that makes a chain invalid. They are the codes
-// of the golden vectors for this revision (arkin0x/cyberspace-cli,
-// vectors/chain-rules-2026-09-28-virtual-brackets.json), so a verdict here
-// can be compared with the reference implementation's, rule for rule.
+// of the golden vectors for this revision (arkin0x/cyberspace,
+// chain-rules-2026-10-08-residue-openings.json), so a verdict here can be
+// compared with the reference implementation's, rule for rule.
 const (
 	ReasonNoSpawn              = "no-spawn"
 	ReasonFork                 = "fork"
@@ -85,11 +90,11 @@ var Reasons = map[string]string{
 	ReasonNoSpawn:              "no authentic spawn event for this pubkey, so there is no chain (§8.7.3 rule 1)",
 	ReasonFork:                 "two or more events whose e genesis names the newest spawn name the same event as e previous (each event's first e previous tag), where the walk from the spawn reaches it; the chain is invalid from the spawn, and the identity stands at its spawn coordinate (§8.7.3)",
 	ReasonATag:                 "the event carries no A tag, more than one, or one with no value (§8.8)",
-	ReasonMalformed:            "a tag a chain rule reads is missing, repeated, valueless or ill-formed: e genesis and e previous on every event but the spawn, e entry on an exit, C on every recognized action, c on every recognized action but the exit, proof on a proof-bearing action, mr, mp, hx, hy and hz on a sidestep, from_height, B and mp on a ride, as_of on the first ride when present; mn may be absent on a sidestep or ride but not repeated",
+	ReasonMalformed:            "a tag a chain rule reads is missing, repeated, valueless or ill-formed: e genesis and e previous on every event but the spawn, e entry on an exit, C on every recognized action, c on every recognized action but the exit, proof on a proof-bearing action, mr, mp, hx, hy and hz on a sidestep, from_height, B and mp on a ride, as_of on the first ride when present; mn on a hop, sidestep or ride, and mp on a hop at the width its depth gives it (§8.4), may be absent (§5.13, §6.16, DECK-0001 §5.8) but not repeated",
 	ReasonSectorTags:           "a recognized action's X, Y, Z or S tag is missing, repeated, or not the value computed from its C (§10)",
 	ReasonSpawnCoordinate:      "the spawn's C is not its pubkey (§8.3)",
 	ReasonCMismatch:            "c is not the C of the nearest recognized action before it (§8.9 item 2, continuity)",
-	ReasonHopProof:             "the hop's proof does not verify (§8.7.1)",
+	ReasonHopProof:             "the hop does not verify at Level 1 (§8.7.1, §5.11): its price or its openings, or it lacks mn or mp; or it is a version 1 hop (no mn and no mp) whose id is not listed in grandfathered-v1-hops.txt (§5.13)",
 	ReasonSidestepProof:        "the sidestep does not verify at Level 1 (§8.7.2)",
 	ReasonEnterHyperspaceMoved: "an enter-hyperspace's C is not its c (DECK-0001 §3.1)",
 	ReasonEnterHyperspaceProof: "the entry proof does not verify (DECK-0001 §3.2)",
@@ -146,8 +151,9 @@ type Verdict struct {
 	PositionEvent string
 	// VerifiedPosition is the position after the longest prefix of the
 	// chain whose every proof the checker verified, and VerifiedEvent the id
-	// of that prefix's last event. With PendingSpec this is the spawn point,
-	// unless the chain carries no proof-bearing action at all.
+	// of that prefix's last event. With a checker that judges nothing
+	// (PendingSpec) this is the spawn point, unless the chain carries no
+	// proof-bearing action at all.
 	VerifiedPosition *Coord
 	VerifiedEvent    string
 	// Head is the id of the active chain's last event, valid or not, which
@@ -186,11 +192,25 @@ func (vd Verdict) Valid() bool { return vd.HasChain && vd.Reason == "" }
 type Verifier struct {
 	Proofs    ProofChecker
 	Signature func(nostr.Event) bool
+	// StopAtUnchecked ends the walk at the first proof the checker cannot
+	// judge, as strict mode needs: nothing after it can move a strict
+	// position, so nothing after it is worth checking. The verdict is then
+	// valid as far as it was walked, with Unchecked counting the events left
+	// and VerifiedPosition where the identity stands. NewGate sets it from
+	// the mode.
+	StopAtUnchecked bool
 }
 
-// Verify resolves and checks a pubkey's chain from the events held for it,
-// under the chain rules of ChainRulesRevision.
+// Verify is VerifyContext with no deadline.
 func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
+	vd, _ := v.VerifyContext(context.Background(), pubkey, events)
+	return vd
+}
+
+// VerifyContext resolves and checks a pubkey's chain from the events held
+// for it, under the chain rules of ChainRulesRevision. When ctx ends first it
+// stops, and returns ctx's error and no verdict.
+func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nostr.Event) (Verdict, error) {
 	// Authentic events only (§8.7.3): every event that is not a valid NIP-01
 	// event by this pubkey is discarded before resolution and treated as if
 	// it never existed. Nobody can end another identity's chain with a
@@ -198,10 +218,41 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	// discarded event is cut off, ending the chain at the event before it.
 	// Signature is validation.CheckSignature in production, which checks the
 	// id hash and the sig; there is no unsigned local chain (§8.2).
+	//
+	// Only the spawns and the events whose e genesis names the newest
+	// authentic spawn take part in resolution (§8.7.3 rules 1 and 2), so the
+	// spawns are checked first and then only those events: an event of any
+	// other chain is never read, authentic or not, and a long history of
+	// old chains costs no signature checks (on the owner's history, 9,476 of
+	// 11,311 events).
+	authentic := func(e nostr.Event) bool { return v.Signature == nil || v.Signature(e) }
 	signed := events[:0:0]
-	for _, e := range events {
-		if e.PubKey == pubkey && e.Kind == KindMovement && (v.Signature == nil || v.Signature(e)) {
+	var newest *nostr.Event
+	for i, e := range events {
+		if e.PubKey != pubkey || e.Kind != KindMovement {
+			continue
+		}
+		if i%256 == 0 && ctx.Err() != nil {
+			return Verdict{}, ctx.Err()
+		}
+		if m, _ := ParseMove(e); m.IsSpawn && authentic(e) {
 			signed = append(signed, e)
+			if newest == nil || newer(e, *newest) {
+				newest = &events[i]
+			}
+		}
+	}
+	if newest != nil {
+		for i, e := range events {
+			if e.PubKey != pubkey || e.Kind != KindMovement {
+				continue
+			}
+			if i%256 == 0 && ctx.Err() != nil {
+				return Verdict{}, ctx.Err()
+			}
+			if m, _ := ParseMove(e); !m.IsSpawn && m.Genesis == newest.ID && authentic(e) {
+				signed = append(signed, e)
+			}
 		}
 	}
 	res := Resolve(pubkey, signed)
@@ -209,7 +260,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	vd := Verdict{Pubkey: pubkey, Length: len(chain), InvalidIndex: -1}
 	if len(chain) == 0 {
 		vd.Reason, vd.Stopped = ReasonNoSpawn, "no spawn event"
-		return vd
+		return vd, nil
 	}
 	vd.HasChain = true
 	vd.Chain = make([]string, len(chain))
@@ -217,10 +268,10 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		vd.Chain[i] = m.Event.ID
 	}
 	vd.Head = vd.Chain[len(chain)-1]
-	invalid := func(i int, reason, detail string) Verdict {
+	invalid := func(i int, reason, detail string) (Verdict, error) {
 		vd.Reason, vd.InvalidAt, vd.InvalidIndex = reason, chain[i].Event.ID, i
 		vd.Stopped = fmt.Sprintf("event %s invalid (%s): %s", chain[i].Event.ID, reason, detail)
-		return vd
+		return vd, nil
 	}
 
 	// The identity's spawn coordinate, where a dead chain leaves it.
@@ -241,7 +292,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		// event the branches name, and it is invalid from the spawn.
 		vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Fork = ReasonFork, chain[0].Event.ID, 0, res.Fork
 		vd.Stopped = fmt.Sprintf("fork: %d chain events name %s as previous (%s)", len(res.Fork), res.ForkedFrom, strings.Join(res.Fork, ", "))
-		return vd
+		return vd, nil
 	}
 
 	spawn := chain[0]
@@ -294,9 +345,16 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 		// Only base and DECK-0001 actions outside a bracket carry a work
 		// proof; brackets and virtual actions carry none (§8.11.2), and a
 		// proof-bearing action inside a bracket was refused by step, which
-		// has also checked the form of its proof tags.
-		if code, bearing := proofOf[cur.Action]; bearing && proofsHold && v.Proofs != nil {
-			res, why := v.Proofs.Check(prev, cur)
+		// has also checked the form of its proof tags. Every proof is
+		// checked, those after an unchecked one included: a proof's validity
+		// rests on its own event and the id it names as previous, never on
+		// an earlier proof, so an invalid one makes the chain invalid however
+		// much before it was left unchecked.
+		if code, bearing := proofOf[cur.Action]; bearing && v.Proofs != nil {
+			res, why := v.Proofs.Check(ctx, prev, cur)
+			if err := ctx.Err(); err != nil {
+				return Verdict{}, err
+			}
 			switch res {
 			case ProofInvalid:
 				if c, _, _ := strings.Cut(why, ":"); proofReasons[c] {
@@ -304,6 +362,14 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 				}
 				return invalid(i, code, "proof: "+why)
 			case ProofUnchecked:
+				if v.StopAtUnchecked {
+					vd.Unchecked = len(chain) - i
+					vd.Stopped = fmt.Sprintf("stopped at event %s, whose proof cannot be judged (%s): nothing after it can move a strict position", cur.Event.ID, why)
+					if w.bracket != nil {
+						vd.OpenBracket = w.bracket.entry.Event.ID
+					}
+					return vd, nil
+				}
 				proofsHold = false
 			}
 		}
@@ -321,7 +387,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 	if w.bracket != nil {
 		vd.OpenBracket = w.bracket.entry.Event.ID
 	}
-	return vd
+	return vd, nil
 }
 
 // checkSpawn checks the first event of the active chain: exactly one A tag
@@ -490,6 +556,9 @@ func (w *walk) outside(cur Move) (string, string) {
 		if why := proofTags(cur); why != "" {
 			return ReasonMalformed, why
 		}
+		if why := hopTags(cur); why != "" {
+			return ReasonMalformed, why
+		}
 	case ActSidestep:
 		if why := proofTags(cur); why != "" {
 			return ReasonMalformed, why
@@ -594,6 +663,30 @@ func proofTags(cur Move) string {
 	return ""
 }
 
+// hopTags checks a hop's mn and mp (§8.4, §8.8): each may be absent, since a
+// listed version 1 hop carries neither (§5.13) and an unlisted hop missing
+// one fails Level 1, but neither may be repeated, mn is 16 lowercase hex
+// characters and mp exactly the width of 16 openings at the depth the hop's
+// c, C and e previous give it. It returns why not, or "".
+func hopTags(cur Move) string {
+	if vs := tagValues(cur.Event, "mn"); len(vs) > 1 || len(vs) == 1 && !isLowerHex(vs[0], 16) {
+		return "mn: expected at most once, 16 lowercase hex characters"
+	}
+	vs := tagValues(cur.Event, "mp")
+	if len(vs) > 1 {
+		return "mp: expected at most once"
+	}
+	if len(vs) == 1 {
+		prev, _ := hex.DecodeString(cur.Previous)
+		from, _ := ParseCoord(cur.From)
+		to, _ := ParseCoord(cur.To)
+		if n := mpLength(newHopGeometry(prev, from, to).depth); !isLowerHex(vs[0], n) {
+			return fmt.Sprintf("mp: expected %d lowercase hex characters, the 16 openings at this hop's depth (§8.4)", n)
+		}
+	}
+	return ""
+}
+
 // isRoots reports whether s is three 32-byte lowercase hex roots joined by
 // colons, the form of a sidestep's mr tag (§8.5).
 func isRoots(s string) bool {
@@ -613,24 +706,15 @@ func onlyDecimal(evt nostr.Event, name string) (*big.Int, bool) {
 	return n, ok
 }
 
-// PendingSpec is the placeholder ProofChecker used until the chain
-// verification rules are implemented here. It verifies no work proofs: every
-// hop, sidestep, enter-hyperspace and hyperjump comes back ProofUnchecked.
-//
-// What this means for the gate: in "structural" mode an identity is placed at
-// its chain head (signatures, links, coordinates, skipped actions, brackets
-// and the ride rules that read only tags are checked; proofs are trusted); in
-// "strict" mode it is placed at its last proof-verified position, which with
-// this checker is its spawn point.
-//
-// Replace it with a checker implementing the rules of ChainRulesRevision:
-// hop proofs (§8.7.1), sidestep Level 1 (§8.7.2) with the mn re-roll price
-// and grandfathered-v2-sidesteps.txt (§6.16), entry proofs (DECK-0001 §3.2),
-// and rides at Level 1 (DECK-0001 §5.5, §5.8) with the line's block data and
-// grandfathered-v1-hyperjumps.txt.
+// PendingSpec is a ProofChecker that verifies no work proof: every hop,
+// sidestep, enter-hyperspace and hyperjump comes back ProofUnchecked. It was
+// the gate's checker until SpecProofs, and it stays for tests of the rules
+// that read only tags. With it, "structural" mode trusts every proof, so a
+// structurally valid chain of forged hops lands anywhere; never run a gate
+// on it.
 type PendingSpec struct{}
 
 // Check implements ProofChecker.
-func (PendingSpec) Check(prev, cur Move) (ProofResult, string) {
-	return ProofUnchecked, "awaiting the chain verification proof checker"
+func (PendingSpec) Check(ctx context.Context, prev, cur Move) (ProofResult, string) {
+	return ProofUnchecked, "PendingSpec checks no proofs"
 }

@@ -130,6 +130,9 @@ func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 	if n <= 0 {
 		n = 16
 	}
+	// Strict mode stops each walk at the first proof it cannot judge:
+	// nothing after it can move a strict position.
+	verifier.StopAtUnchecked = cfg.Mode == ModeStrict
 	return &Gate{
 		cfg: cfg, sources: sources, verifier: verifier, now: time.Now,
 		lookups: make(chan struct{}, n),
@@ -166,29 +169,35 @@ func (g *Gate) AdmitPubkey(ctx context.Context, pubkey string) (bool, string) {
 	if g.cfg.exempt[pubkey] {
 		return true, ""
 	}
+	return g.shared(ctx, pubkey, func() (bool, string) { return g.decide(ctx, pubkey, nil) })
+}
+
+// shared answers for key from the cache when fresh, or waits for the lookup
+// already running for it, or runs decide and keeps its verdict.
+func (g *Gate) shared(ctx context.Context, key string, decide func() (bool, string)) (bool, string) {
 	g.mu.Lock()
-	if c, hit := g.cache[pubkey]; hit && g.now().Before(c.expires) {
+	if c, hit := g.cache[key]; hit && g.now().Before(c.expires) {
 		g.mu.Unlock()
 		return c.ok, c.reason
 	}
-	if c := g.inflight[pubkey]; c != nil {
+	if c := g.inflight[key]; c != nil {
 		g.mu.Unlock()
 		select {
 		case <-c.done:
 			return c.ok, c.reason
 		case <-ctx.Done():
-			return false, "restricted: cyberspace chain lookup timed out, try again"
+			return false, errTimeout
 		}
 	}
 	c := &call{done: make(chan struct{})}
-	g.inflight[pubkey] = c
+	g.inflight[key] = c
 	g.mu.Unlock()
 
-	c.ok, c.reason = g.decide(ctx, pubkey, nil)
+	c.ok, c.reason = decide()
 	g.mu.Lock()
-	delete(g.inflight, pubkey)
+	delete(g.inflight, key)
 	g.mu.Unlock()
-	g.remember(pubkey, c.ok, c.reason)
+	g.remember(key, c.ok, c.reason)
 	close(c.done)
 	return c.ok, c.reason
 }
@@ -226,7 +235,7 @@ func (g *Gate) lookupTimeout() time.Duration {
 }
 
 func (g *Gate) remember(pubkey string, ok bool, reason string) {
-	if reason == errFetch || reason == errBusy || reason == errIncomplete || reason == errTooLong {
+	if reason == errFetch || reason == errBusy || reason == errIncomplete || reason == errTooLong || reason == errTimeout {
 		return // a failed or incomplete lookup is not a verdict
 	}
 	g.mu.Lock()
@@ -249,6 +258,7 @@ const (
 	errBusy       = "restricted: relay busy verifying chains, try again"
 	errIncomplete = "restricted: could not fetch your whole cyberspace chain, so it cannot be verified yet, try again"
 	errTooLong    = "restricted: your cyberspace chain has more events than this relay reads (max_chain_events), so it cannot be verified, try again"
+	errTimeout    = "restricted: cyberspace chain lookup timed out, try again"
 )
 
 // maxGapRounds bounds how many times one lookup asks for missing events.
@@ -337,7 +347,12 @@ func (g *Gate) decide(ctx context.Context, pubkey string, incoming *nostr.Event)
 	// identity inside the region stays admitted until it respawns, and no
 	// event published on a frozen chain, the incoming one included, can move
 	// it in or out. Only a respawn changes its position.
-	vd := g.verifier.Verify(pubkey, events)
+	// The check ends with ctx: a caller that timed out frees its lookup slot
+	// at once, and nothing is cached.
+	vd, err := g.verifier.VerifyContext(ctx, pubkey, events)
+	if err != nil {
+		return false, errTimeout
+	}
 	pos := vd.Position
 	if g.cfg.Mode == ModeStrict {
 		pos = vd.VerifiedPosition
