@@ -60,7 +60,7 @@ func startRegionGate() {
 	}
 	// No Bitcoin line is configured yet, so rides are left unchecked: strict
 	// mode does not trust them, structural mode does (docs/region-gate.md).
-	verifier := regiongate.Verifier{Proofs: regiongate.SpecProofs{MaxHopHeight: cfg.MaxHopVerifyHeight}, Signature: validation.CheckSignature}
+	verifier := regiongate.Verifier{Proofs: regiongate.SpecProofs{MaxHopHeight: cfg.MaxHopVerifyHeight, Progress: regiongate.NewHopProgress(256)}, Signature: validation.CheckSignature}
 	gate := regiongate.NewGate(cfg, verifier, sources...)
 	timeout := time.Duration(cfg.FetchTimeoutSeconds+2) * time.Second
 	handlers.EventGate = func(ctx context.Context, evt nostr.Event) (bool, string) {

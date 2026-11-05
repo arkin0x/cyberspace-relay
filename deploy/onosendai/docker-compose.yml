@@ -14,10 +14,16 @@ services:
       GRAIN_DATA_DIR: /data
       # Claims ownership at first boot, so nobody can claim /setup before the operator.
       GRAIN_OWNER_PUBKEY: ${GRAIN_OWNER_PUBKEY:?set GRAIN_OWNER_PUBKEY to the operator npub}
+      # The relay believes X-Forwarded-For only from this proxy (Caddy, at
+      # its fixed address below), so per-client limits see each client's
+      # own address and nobody can claim another.
+      GRAIN_TRUSTED_PROXIES: 172.30.0.2
     volumes:
       - relay-data:/data
     expose:
       - "8181"
+    networks:
+      - edge
 
   caddy:
     image: caddy:2.8.4-alpine
@@ -32,6 +38,15 @@ services:
       - caddy-config:/config
     depends_on:
       - relay
+    networks:
+      edge:
+        ipv4_address: 172.30.0.2
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 volumes:
   relay-data:

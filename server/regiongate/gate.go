@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -109,13 +110,20 @@ type Gate struct {
 	verifier Verifier
 	now      func() time.Time
 	// rules names the chain rules and the checker settings verdicts rest
-	// on; a cache entry made under others is not used.
+	// on; a cache entry made under others is not used. When rides are
+	// checked against a Bitcoin line, the line's state belongs here too (see
+	// SpecProofs.check).
 	rules string
 
 	queue *workQueue
 
 	mu     sync.Mutex
 	chains *chainCache
+	// failed holds the events walks found invalid, beyond any entry's life;
+	// progress the checkpoints of checks cut short (see saveProgress).
+	failed        *failedSet
+	progress      map[string]*Known
+	progressOrder []string
 }
 
 // NewGate builds a gate. Sources are read in order and merged.
@@ -133,11 +141,18 @@ func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 		cfg: cfg, sources: sources, verifier: verifier, now: time.Now,
 		rules:  fmt.Sprintf("%s mode=%s max_hop_verify_height=%d", ChainRulesRevision, cfg.Mode, orDefault(cfg.MaxHopVerifyHeight, DefaultMaxHopHeight)),
 		chains: newChainCache(orDefault(cfg.MaxCachedChains, 4096)),
+		failed: newFailedSet(), progress: map[string]*Known{},
 	}
-	g.queue = newWorkQueue(orDefault(cfg.MaxConcurrentLookups, 16), orDefault(cfg.MaxQueuedLookups, 256),
+	g.verifier.failed = g.failedEvent
+	g.queue = newWorkQueue(orDefault(cfg.MaxConcurrentLookups, defaultLookups()), orDefault(cfg.MaxQueuedLookups, 256),
 		orDefault(cfg.MaxQueuedPerIP, 8), maxQueuedPerPubkey, time.Duration(orDefault(cfg.CheckTimeoutSeconds, 30))*time.Second, g.run)
 	return g
 }
+
+// defaultLookups is how many checks run at once by default: about one per
+// core the process may use, since a check is CPU-bound once its events are
+// fetched.
+func defaultLookups() int { return max(2, runtime.GOMAXPROCS(0)) }
 
 type clientIPKey struct{}
 
@@ -193,13 +208,21 @@ func (g *Gate) check(ctx context.Context, pubkey string, incoming *nostr.Event) 
 }
 
 // cached is the verdict of pubkey's entry when it is fresh and, for a
-// movement event, already accounts for it: a re-sent event costs nothing.
+// movement event, already accounts for it or would answer the same with it
+// (sameVerdictWith): a re-sent event costs nothing, refused or not.
 func (g *Gate) cached(pubkey string, incoming *nostr.Event) (bool, string, bool) {
 	g.mu.Lock()
 	e := g.chains.get(pubkey, g.rules)
 	g.mu.Unlock()
-	if e == nil || !g.fresh(e) || incoming != nil && !e.accounted(incoming.ID) {
+	if e == nil || !g.fresh(e) {
 		return false, "", false
+	}
+	if incoming != nil && !e.accounted(incoming.ID) {
+		m, _ := ParseMove(*incoming)
+		_, _, failed := g.failedEvent(incoming.ID)
+		if !g.authentic(pubkey)(*incoming) || !e.sameVerdictWith(m, failed) {
+			return false, "", false
+		}
 	}
 	ok, reason := g.judge(e.vd)
 	return ok, reason, true
@@ -223,17 +246,33 @@ func (g *Gate) run(ctx context.Context, pubkey string, incoming *nostr.Event) (b
 	g.mu.Lock()
 	e := g.chains.get(pubkey, g.rules)
 	g.mu.Unlock()
-	next, refusal := g.refresh(ctx, pubkey, e, incoming)
-	if refusal != "" {
-		return false, refusal // a failed or incomplete lookup is not a verdict
-	}
-	if ctx.Err() != nil {
-		return false, errTimeout // nor is one reached after its deadline
+	o := g.refresh(ctx, pubkey, e, incoming)
+	// The incoming event enters the entry only when it is admitted, and so
+	// stored here: a refused one is stored nowhere, and no reader would see
+	// the identity where it puts it.
+	keep := o.base
+	ok, reason := false, o.refusal
+	if o.refusal == "" && o.with != nil {
+		if ok, reason = g.judge(o.with.vd); ok {
+			keep = o.with
+		}
 	}
 	g.mu.Lock()
-	g.chains.put(pubkey, next)
+	for _, x := range []*chainEntry{o.base, o.with} {
+		if x != nil {
+			g.failed.add(x.known)
+		}
+	}
+	if keep != nil {
+		admitted, _ := g.judge(keep.vd)
+		g.chains.put(pubkey, keep, admitted)
+		delete(g.progress, pubkey)
+	}
 	g.mu.Unlock()
-	return g.judge(next.vd)
+	if o.refusal != "" {
+		return false, o.refusal // a failed, incomplete or cut-short lookup is not a verdict
+	}
+	return ok, reason
 }
 
 // LiveAllowed decides, without blocking, whether a live event may be pushed
@@ -254,7 +293,7 @@ func (g *Gate) LiveAllowed(pubkey string) bool {
 	g.mu.Unlock()
 	if (e == nil || !g.fresh(e)) && !g.queue.pending(pubkey) {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), g.lookupTimeout())
+			ctx, cancel := context.WithTimeout(WithClientIP(context.Background(), liveBucket), g.lookupTimeout())
 			defer cancel()
 			g.AdmitPubkey(ctx, pubkey)
 		}()
@@ -313,11 +352,12 @@ func (g *Gate) authentic(pubkey string) func(nostr.Event) bool {
 	}
 }
 
-// whole reads a pubkey's chain whole and verifies it, with an optional new
+// read reads a pubkey's chain whole and verifies it, with an optional new
 // movement event and other new events (extra) appended, and what earlier
-// walks of the chain established (known, used only when the chain is the
-// same one). It returns the entry, or why there is no verdict.
-func (g *Gate) whole(ctx context.Context, pubkey string, incoming *nostr.Event, extra []nostr.Event, known *Known) (*chainEntry, string) {
+// walks established (known; the one about this chain is used). It returns
+// the entry, or why there is no verdict; a walk its deadline cuts short
+// leaves a checkpoint.
+func (g *Gate) read(ctx context.Context, pubkey string, incoming *nostr.Event, extra []nostr.Event, known []*Known) (*chainEntry, string) {
 	added := extra
 	if incoming != nil {
 		added = append(added[:len(added):len(added)], *incoming)
@@ -392,8 +432,9 @@ func (g *Gate) whole(ctx context.Context, pubkey string, incoming *nostr.Event, 
 	}
 
 	// The check ends with ctx: nothing reached after it is cached.
-	vd, k, chain, err := g.verifier.verify(ctx, pubkey, events, known)
+	vd, k, chain, err := g.verifier.verify(ctx, pubkey, events, known...)
 	if err != nil {
+		g.saveProgress(pubkey, k)
 		return nil, errTimeout
 	}
 	log.RegionGate().Debug("Chain verdict", "pubkey", pubkey, "has_chain", vd.HasChain,

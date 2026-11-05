@@ -199,6 +199,10 @@ type Verifier struct {
 	// and VerifiedPosition where the identity stands. NewGate sets it from
 	// the mode.
 	StopAtUnchecked bool
+	// failed, when set, answers for events an earlier walk found invalid
+	// (the gate's failed set): such an event is invalid again for the same
+	// reason without its proof being checked.
+	failed func(id string) (reason, stopped string, ok bool)
 }
 
 // Verify is VerifyContext with no deadline.
@@ -211,7 +215,7 @@ func (v Verifier) Verify(pubkey string, events []nostr.Event) Verdict {
 // for it, under the chain rules of ChainRulesRevision. When ctx ends first it
 // stops, and returns ctx's error and no verdict.
 func (v Verifier) VerifyContext(ctx context.Context, pubkey string, events []nostr.Event) (Verdict, error) {
-	vd, _, _, err := v.verify(ctx, pubkey, events, nil)
+	vd, _, _, err := v.verify(ctx, pubkey, events)
 	return vd, err
 }
 
@@ -240,10 +244,12 @@ type Known struct {
 	StopAt, StopWhy string
 }
 
-// verify is VerifyContext with what an earlier walk of the chain
-// established. It also returns the walk, which can walk on from the head
-// (walker.resume), and the active chain.
-func (v Verifier) verify(ctx context.Context, pubkey string, events []nostr.Event, known *Known) (Verdict, *walker, []Move, error) {
+// verify is VerifyContext with what earlier walks established (the one
+// about the chain walked is used). It also returns the walk, which can walk
+// on from the head (walker.resume), and the active chain. When ctx ends
+// during the walk it returns the walk as far as it got, which a checkpoint
+// keeps, with ctx's error.
+func (v Verifier) verify(ctx context.Context, pubkey string, events []nostr.Event, known ...*Known) (Verdict, *walker, []Move, error) {
 	// Authentic events only (§8.7.3): every event that is not a valid NIP-01
 	// event by this pubkey is discarded before resolution and treated as if
 	// it never existed. Nobody can end another identity's chain with a
@@ -341,25 +347,25 @@ func (v Verifier) verify(ctx context.Context, pubkey string, events []nostr.Even
 	vd.VerifiedPosition, vd.VerifiedEvent = &verified, spawn.Event.ID
 
 	k := &walker{proofs: v.Proofs, stopAtUnchecked: v.StopAtUnchecked, w: walk{carried: spawn.To, lookback: spawn},
-		proofsHold: true, vd: vd, genesis: spawn.Event.ID, passed: spawn.Event.ID}
-	if known != nil && known.Genesis == spawn.Event.ID {
-		k.known, k.knownPassed, k.knownVerified = known, -1, -1
-		for i, m := range chain {
-			switch m.Event.ID {
-			case known.Passed:
-				k.knownPassed = i
-			case known.Verified:
-				k.knownVerified = i
+		proofsHold: true, vd: vd, genesis: spawn.Event.ID, passed: spawn.Event.ID, failed: v.failed}
+	for _, kn := range known {
+		if kn != nil && kn.Genesis == spawn.Event.ID {
+			k.known, k.knownPassed, k.knownVerified = kn, -1, -1
+			for i, m := range chain {
+				if m.Event.ID == kn.Passed {
+					k.knownPassed = i
+				}
+				if m.Event.ID == kn.Verified {
+					k.knownVerified = i
+				}
 			}
-		}
-		if known.Verified == known.Passed {
-			k.knownVerified = k.knownPassed
+			break
 		}
 	}
 	for i := 1; i < len(chain); i++ {
 		end, err := k.step(ctx, i, len(chain), chain[i])
 		if err != nil {
-			return Verdict{}, nil, nil, err
+			return Verdict{}, k, nil, err
 		}
 		if end {
 			return k.vd, k, chain, nil
@@ -388,6 +394,7 @@ type walker struct {
 	// or -1 when they are not on it.
 	known                      *Known
 	knownPassed, knownVerified int
+	failed                     func(id string) (reason, stopped string, ok bool)
 }
 
 // step walks chain event i, cur, of a chain of length events. It returns
@@ -408,6 +415,12 @@ func (k *walker) step(ctx context.Context, i, length int, cur Move) (bool, error
 	if kn := k.known; kn != nil && kn.FailAt == cur.Event.ID {
 		vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Stopped, vd.OpenBracket = kn.FailReason, cur.Event.ID, i, kn.Stopped, ""
 		return true, nil
+	}
+	if k.failed != nil {
+		if reason, stopped, ok := k.failed(cur.Event.ID); ok {
+			vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Stopped, vd.OpenBracket = reason, cur.Event.ID, i, stopped, ""
+			return true, nil
+		}
 	}
 	// Exactly one A tag, with a value, on every event: recognized,
 	// skipped, or inside a bracket (§8.8).
@@ -502,6 +515,20 @@ func (k *walker) knownProof(i int, cur Move) (ProofResult, string, bool) {
 		return ProofUnchecked, "left unchecked by an earlier walk of this chain", true
 	}
 	return 0, "", false
+}
+
+// useKnown has the walk, about to walk on over next, answer from kn (a
+// checkpoint of the same chain) for the events of next it covers.
+func (k *walker) useKnown(kn *Known, next []Move) {
+	k.known, k.knownPassed, k.knownVerified = kn, -1, -1
+	for j, m := range next {
+		if m.Event.ID == kn.Passed {
+			k.knownPassed = k.vd.Length + j
+		}
+		if m.Event.ID == kn.Verified {
+			k.knownVerified = k.vd.Length + j
+		}
+	}
 }
 
 // finish records the bracket still open where the walk ends.

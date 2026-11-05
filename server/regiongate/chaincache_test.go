@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -342,17 +343,20 @@ func TestLookBackCatchesALatePublishedEvent(t *testing.T) {
 // A check cut short by its deadline keeps nothing: the entry stays as it
 // was, the event is not accounted for, and the next try checks it again.
 func TestTimedOutCheckCachesNothing(t *testing.T) {
-	s, target, box := insideTarget(t)
+	// Spawn and hop both inside: a cut-short walk stored by mistake would be
+	// admitted and kept, so the test sees it.
+	s := newSigner(t)
+	box := cubeAround(t, s.pubkey, 40)
 	b := newChain(t, s)
 	src := &fakeSource{events: []nostr.Event{b.spawn}}
 	proofs := newCountingProofs()
 	g, _ := cacheGate(t, ModeStructural, box, proofs, src)
 	g.queue.timeout = 300 * time.Millisecond
-	if ok, _ := g.AdmitPubkey(context.Background(), s.pubkey); ok {
-		t.Fatal("the spawn is outside")
+	if ok, _ := g.AdmitPubkey(context.Background(), s.pubkey); !ok {
+		t.Fatal("the spawn is inside")
 	}
 	before := g.entry(s.pubkey)
-	in := b.move(ActHop, target)
+	in := b.move(ActHop, offset(t, s.pubkey, 1))
 	proofs.mu.Lock()
 	proofs.block[in.ID] = true
 	proofs.mu.Unlock()
@@ -363,7 +367,7 @@ func TestTimedOutCheckCachesNothing(t *testing.T) {
 	}
 	<-proofs.entered
 	waitFor(t, func() bool { return !g.queue.pending(s.pubkey) })
-	if e := g.entry(s.pubkey); e != before || e.accounted(in.ID) {
+	if e := g.entry(s.pubkey); e == nil || e.accounted(in.ID) || e.vd.Head != before.vd.Head || e.vd.PositionEvent != before.vd.PositionEvent {
 		t.Fatal("a check cut short by its deadline changed the entry")
 	}
 	proofs.mu.Lock()
@@ -404,8 +408,11 @@ func TestStrictPositionComesFromTheCachedHead(t *testing.T) {
 		t.Fatalf("an event after the strict stop was checked %d times", n)
 	}
 	e := g.entry(s.pubkey)
-	if e.vd.VerifiedEvent != in.ID || e.vd.Head != after.ID || e.known.StopAt != tall.ID {
-		t.Fatalf("want verified head %s, head %s, stop %s; got %s %s %s", in.ID, after.ID, tall.ID, e.vd.VerifiedEvent, e.vd.Head, e.known.StopAt)
+	// The event after the stop was answered from the entry (it changes
+	// nothing), so the head is still the stop; the relay stores it, and the
+	// next check finds it in the sources.
+	if e.vd.VerifiedEvent != in.ID || e.vd.Head != tall.ID || e.known.StopAt != tall.ID {
+		t.Fatalf("want verified head %s, head %s, stop %s; got %s %s %s", in.ID, tall.ID, tall.ID, e.vd.VerifiedEvent, e.vd.Head, e.known.StopAt)
 	}
 }
 
@@ -909,4 +916,343 @@ func verdictKey(vd Verdict) string {
 	return fmt.Sprintf("pos %s verified %s at %s/%s head %s bracket %q length %d unchecked %d reason %q at %s index %d stopped %q",
 		pos(vd.Position), pos(vd.VerifiedPosition), vd.PositionEvent, vd.VerifiedEvent, vd.Head, vd.OpenBracket,
 		vd.Length, vd.Unchecked, vd.Reason, vd.InvalidAt, vd.InvalidIndex, vd.Stopped)
+}
+
+// ── review round 2 ────────────────────────────────────────────────────
+
+// slowProofs costs per proof a fixed time, giving up when its context ends.
+type slowProofs struct {
+	per  time.Duration
+	mu   sync.Mutex
+	asks int
+}
+
+func (p *slowProofs) Check(ctx context.Context, prev, cur Move) (ProofResult, string) {
+	p.mu.Lock()
+	p.asks++
+	p.mu.Unlock()
+	select {
+	case <-time.After(p.per):
+	case <-ctx.Done():
+	}
+	return ProofVerified, ""
+}
+
+// A chain costlier than one check's deadline is paid for once across
+// retries: each check cut short keeps a checkpoint, and the next walks on
+// from it, read whole or walked on from a cached head alike. Without it the
+// chain never finishes and every retry burns a whole deadline.
+func TestChainCostlierThanOneDeadlineIsPaidForOnce(t *testing.T) {
+	s, target, box := insideTarget(t)
+	b := newChain(t, s)
+	events := []nostr.Event{b.spawn}
+	for i := 0; i < 10; i++ {
+		events = append(events, b.move(ActHop, offset(t, target, int64(i))))
+	}
+	proofs := &slowProofs{per: 60 * time.Millisecond}
+	src := &fakeSource{events: events}
+	g, clock := cacheGate(t, ModeStructural, box, proofs, src)
+	g.queue.timeout = 250 * time.Millisecond
+	settle := func(what string, events int) {
+		t.Helper()
+		before := proofs.asks
+		for tries := 1; ; tries++ {
+			ok, msg := g.AdmitPubkey(context.Background(), s.pubkey)
+			if msg != errTimeout {
+				if !ok {
+					t.Fatalf("%s: %q", what, msg)
+				}
+				asked := proofs.asks - before
+				t.Logf("%s: %d events checked in %d tries, %d proofs asked", what, events, tries, asked)
+				if asked > events+tries {
+					t.Fatalf("%s: %d proofs asked for %d events in %d tries: work was redone", what, asked, events, tries)
+				}
+				return
+			}
+			if tries == 12 {
+				t.Fatalf("%s: never finished in %d tries", what, tries)
+			}
+		}
+	}
+	settle("read whole", 10)
+	// Ten more events, walked on from the cached head.
+	for i := 10; i < 20; i++ {
+		src.mu.Lock()
+		src.events = append(src.events, b.move(ActHop, offset(t, target, int64(i))))
+		src.mu.Unlock()
+	}
+	clock.add(601 * time.Second)
+	settle("walked on from the head", 10)
+}
+
+// A single tall hop costlier than one deadline is paid for once too: the
+// residues a check computed before its deadline are kept, and the next check
+// of that hop computes only the rest. Once judged, the hop's are dropped.
+func TestTallHopResiduesSurviveTheDeadline(t *testing.T) {
+	s := newSigner(t)
+	b := newChain(t, s)
+	hop := forgeTallHop(t, b, 12)
+	cur, _ := ParseMove(hop)
+	n := 0
+	defer func() { residueKept = nil }()
+
+	full := SpecProofs{Progress: NewHopProgress(8)}
+	residueKept = func() { n++ }
+	if res, _ := full.Check(context.Background(), Move{}, cur); res != ProofInvalid {
+		t.Fatal("the forgery must fail at its residues")
+	}
+	whole := n
+
+	progress := NewHopProgress(8)
+	sp := SpecProofs{Progress: progress}
+	ctx, cancel := context.WithCancel(context.Background())
+	n = 0
+	residueKept = func() {
+		if n++; n == 2 {
+			cancel()
+		}
+	}
+	if res, _ := sp.Check(ctx, Move{}, cur); res != ProofUnchecked {
+		t.Fatal("a check cut short judges nothing")
+	}
+	first := n
+	n = 0
+	residueKept = func() { n++ }
+	if res, _ := sp.Check(context.Background(), Move{}, cur); res != ProofInvalid {
+		t.Fatal("the resumed check must reach the verdict")
+	}
+	if first+n != whole || first < 2 {
+		t.Fatalf("residues computed: %d before the deadline + %d after, want %d in all", first, n, whole)
+	}
+	if len(progress.byID) != 0 {
+		t.Fatal("a judged hop's residues must be dropped")
+	}
+}
+
+// Checks run about one per core the process may use by default (a check is
+// CPU-bound once its events are fetched).
+func TestDefaultLookupsFollowTheCores(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(3))
+	c, err := ParseConfig([]byte("enabled: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxConcurrentLookups != 3 {
+		t.Fatalf("with 3 cores max_concurrent_lookups defaults to %d, want 3", c.MaxConcurrentLookups)
+	}
+	if NewGate(&Config{}, verifier()).queue.workers != 3 {
+		t.Fatal("a gate with no setting runs one check per core")
+	}
+}
+
+// Fresh keys cost an attacker nothing, so they must not evict members:
+// refusals and pubkeys with no chain have a cache of their own.
+func TestFreshKeysDoNotEvictMembers(t *testing.T) {
+	ctx := context.Background()
+	s := newSigner(t)
+	box := cubeAround(t, s.pubkey, 40)
+	src := &fakeSource{events: []nostr.Event{newChain(t, s).spawn}}
+	g, _ := cacheGate(t, ModeStructural, box, newCountingProofs(), src)
+	g.chains = newChainCache(8)
+	if ok, _ := g.AdmitPubkey(ctx, s.pubkey); !ok {
+		t.Fatal("member refused")
+	}
+	for i := 0; i < 50; i++ {
+		g.AdmitPubkey(ctx, newSigner(t).pubkey)
+	}
+	if g.entry(s.pubkey) == nil {
+		t.Fatal("50 fresh keys evicted a member")
+	}
+}
+
+// An event a walk found invalid stays known invalid after its pubkey's
+// entry is evicted: re-sent, its proof is not checked again.
+func TestFailedEventSurvivesEviction(t *testing.T) {
+	ctx := context.Background()
+	s, target, box := insideTarget(t)
+	b := newChain(t, s)
+	forged := b.move(ActHop, target) // would move in; invalid, so frozen at the spawn, outside
+	proofs := newCountingProofs()
+	proofs.set(forged.ID, ProofInvalid)
+	src := &fakeSource{events: []nostr.Event{b.spawn}}
+	g, _ := cacheGate(t, ModeStructural, box, proofs, src)
+	g.chains = newChainCache(8)
+	if ok, _ := g.Admit(ctx, forged); ok {
+		t.Fatal("a forged move in must be refused")
+	}
+	for i := 0; i < 20; i++ {
+		g.AdmitPubkey(ctx, newSigner(t).pubkey)
+	}
+	if g.entry(s.pubkey) != nil {
+		t.Fatal("the refusal should have been evicted for this test")
+	}
+	if ok, _ := g.Admit(ctx, forged); ok {
+		t.Fatal("still refused")
+	}
+	if n := proofs.asked(forged.ID); n != 1 {
+		t.Fatalf("after eviction the forged hop was checked %d times, want 1", n)
+	}
+}
+
+// A refused forgery sent again costs nothing either: no proof check, and
+// within the TTL no source is asked.
+func TestResentRefusedForgeryCostsNothing(t *testing.T) {
+	ctx := context.Background()
+	s, target, box := insideTarget(t)
+	b := newChain(t, s)
+	forged := b.move(ActHop, target)
+	proofs := newCountingProofs()
+	proofs.set(forged.ID, ProofInvalid)
+	src := &fakeSource{events: []nostr.Event{b.spawn}}
+	g, clock := cacheGate(t, ModeStructural, box, proofs, src)
+	g.AdmitPubkey(ctx, s.pubkey)
+	if ok, _ := g.Admit(ctx, forged); ok {
+		t.Fatal("refused")
+	}
+	calls := src.calls.Load()
+	for i := 0; i < 50; i++ {
+		if ok, _ := g.Admit(ctx, forged); ok {
+			t.Fatal("a re-send changed the verdict")
+		}
+	}
+	if n := src.calls.Load() - calls; n != 0 {
+		t.Fatalf("re-sends of a refused forgery asked the sources %d times within the TTL", n)
+	}
+	clock.add(61 * time.Second)
+	g.Admit(ctx, forged)
+	if n := proofs.asked(forged.ID); n != 1 {
+		t.Fatalf("the refused forgery was checked %d times, want 1", n)
+	}
+}
+
+// A refused movement event is stored nowhere, so it must not move the
+// cached identity: a member who tried to move out and was refused is still
+// where the sources place them.
+func TestRefusedMoveIsNotKept(t *testing.T) {
+	ctx := context.Background()
+	s, target, box := insideTarget(t)
+	b := newChain(t, s)
+	in := b.move(ActHop, target)
+	src := &fakeSource{events: []nostr.Event{b.spawn, in}}
+	g, clock := cacheGate(t, ModeStructural, box, newCountingProofs(), src)
+	if ok, _ := g.AdmitPubkey(ctx, s.pubkey); !ok {
+		t.Fatal("inside")
+	}
+	if ok, _ := g.Admit(ctx, b.move(ActHop, offset(t, target, 1<<41))); ok {
+		t.Fatal("a move out is refused")
+	}
+	if ok, _ := g.AdmitPubkey(ctx, s.pubkey); !ok {
+		t.Fatal("within the TTL the refused move must not lock the member out")
+	}
+	clock.add(601 * time.Second)
+	if ok, _ := g.AdmitPubkey(ctx, s.pubkey); !ok {
+		t.Fatal("after the TTL the refused move must not lock the member out")
+	}
+	if e := g.entry(s.pubkey); e.vd.Head != in.ID {
+		t.Fatalf("the entry's head moved to a refused event: %s", e.vd.Head)
+	}
+}
+
+// The seen window holds at most maxSeen ids, however many events share one
+// created_at, and the next incremental check still asks one question.
+func TestSeenBoundHoldsWithEqualTimestamps(t *testing.T) {
+	s, target, box := insideTarget(t)
+	b := newChain(t, s)
+	evs := []nostr.Event{b.spawn}
+	for i := 0; i < 3*maxSeen; i++ {
+		b.at = b.spawn.CreatedAt + 100
+		evs = append(evs, b.move(ActHop, offset(t, target, int64(i%2))))
+	}
+	src := &fakeSource{events: evs}
+	g, clock := cacheGate(t, ModeStructural, box, newCountingProofs(), src)
+	g.cfg.MaxChainEvents = 5000
+	g.queue.timeout = 2 * time.Minute // 3,072 signatures, slow under -race
+	if ok, msg := g.AdmitPubkey(context.Background(), s.pubkey); !ok {
+		t.Fatal(msg)
+	}
+	if n := len(g.entry(s.pubkey).seen); n > maxSeen {
+		t.Fatalf("seen holds %d ids, above %d", n, maxSeen)
+	}
+	b.at = b.spawn.CreatedAt + 200
+	next := b.move(ActHop, target)
+	src.mu.Lock()
+	src.events = append(src.events, next)
+	src.mu.Unlock()
+	clock.add(601 * time.Second)
+	calls := src.calls.Load()
+	g.AdmitPubkey(context.Background(), s.pubkey)
+	if n, e := src.calls.Load()-calls, g.entry(s.pubkey); n != 1 || e.vd.Head != next.ID {
+		t.Fatalf("the next check made %d source calls (want 1) and has head %s", n, e.vd.Head)
+	}
+}
+
+// Junk movement events (naming a previous nobody holds) cannot make the gate
+// read the chain whole on each one: at most once every wholeEvery.
+func TestJunkEventsAreRateLimited(t *testing.T) {
+	ctx := context.Background()
+	s, target, box := insideTarget(t)
+	b := newChain(t, s)
+	evs := []nostr.Event{b.spawn, b.move(ActHop, target)}
+	src := &fakeSource{events: evs}
+	g, clock := cacheGate(t, ModeStructural, box, newCountingProofs(), src)
+	g.AdmitPubkey(ctx, s.pubkey)
+	calls := src.calls.Load()
+	for i := 0; i < 10; i++ {
+		junk := s.sign(t, KindMovement, b.at+5, []string{"A", ActHop}, []string{"e", b.spawn.ID, "", "genesis"},
+			[]string{"e", fmt.Sprintf("%064x", i+1), "", "previous"})
+		if ok, msg := g.Admit(ctx, junk); ok || msg != errBusy {
+			t.Fatalf("junk %d: %v %q, want %q", i, ok, msg, errBusy)
+		}
+	}
+	if n := src.calls.Load() - calls; n != 10 {
+		t.Fatalf("10 junk events made %d source calls, want 10 (one incremental question each)", n)
+	}
+	clock.add(wholeEvery)
+	calls = src.calls.Load()
+	junk := s.sign(t, KindMovement, b.at+6, []string{"A", ActHop}, []string{"e", b.spawn.ID, "", "genesis"},
+		[]string{"e", strings.Repeat("ee", 32), "", "previous"})
+	if ok, msg := g.Admit(ctx, junk); ok || msg != errIncomplete {
+		t.Fatalf("after wholeEvery the chain is read whole: %v %q", ok, msg)
+	}
+}
+
+// LiveAllowed's background checks queue under an address of their own, so
+// they count against the per-address limit like any client's.
+func TestLiveRefreshesCountAgainstALimit(t *testing.T) {
+	s := newSigner(t)
+	cfg := &Config{Enabled: true, Mode: ModeStructural, CacheTTLSeconds: 600, NegativeCacheTTLSeconds: 60, FetchTimeoutSeconds: 8,
+		MaxConcurrentLookups: 1, MaxQueuedLookups: 100, MaxQueuedPerIP: 2, boxes: []Box{cubeAround(t, s.pubkey, 40)}, exempt: map[string]bool{}}
+	g := NewGate(cfg, verifier(), &fakeSource{delay: time.Second})
+	for i := 0; i < 10; i++ {
+		g.LiveAllowed(newSigner(t).pubkey)
+	}
+	time.Sleep(100 * time.Millisecond)
+	g.queue.mu.Lock()
+	queued, live := g.queue.queued, g.queue.ipUnits[liveBucket]
+	g.queue.mu.Unlock()
+	if queued > 2 || live > 2 {
+		t.Fatalf("background checks queued %d units (%d under the live bucket), want at most 2", queued, live)
+	}
+}
+
+// One host's IPv6 /64 is one address for the per-address limit.
+func TestIPv6AddressesShareTheirSlash64(t *testing.T) {
+	r := newBlockedRun()
+	defer close(r.release)
+	q := newWorkQueue(1, 100, 2, 4, time.Second, r.run)
+	go q.submit(context.Background(), "2001:db8:1:2::1", "p0", nil)
+	<-r.started
+	go q.submit(context.Background(), "2001:db8:1:2:aaaa::2", "p1", nil)
+	waitFor(t, func() bool { return q.pending("p1") })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if ok, msg := q.submit(ctx, "2001:db8:1:2:ffff::3", "p2", nil); ok || msg != errBusy || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("a third address in the same /64: %v %q after %v, want a prompt %q", ok, msg, time.Since(start), errBusy)
+	}
+	go q.submit(context.Background(), "2001:db8:1:3::1", "p3", nil)
+	waitFor(t, func() bool { return q.pending("p3") })
+	if got := addressBucket("192.0.2.7"); got != "192.0.2.7" {
+		t.Fatalf("an IPv4 address is its own bucket, got %q", got)
+	}
 }

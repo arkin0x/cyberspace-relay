@@ -663,16 +663,16 @@ func TestGateBoundsLookupsAndCache(t *testing.T) {
 	waitFor(t, func() bool { return !g.queue.pending(other.pubkey) })
 	for i := 0; i < 20; i++ {
 		g.mu.Lock()
-		g.chains.put(strings.Repeat("0", 60)+strconv.Itoa(1000+i), &chainEntry{rules: g.rules})
+		g.chains.put(strings.Repeat("0", 60)+strconv.Itoa(1000+i), &chainEntry{rules: g.rules}, true)
 		g.mu.Unlock()
 	}
 	g.mu.Lock()
-	n := g.chains.len()
+	n := g.chains.members.order.Len()
 	newest := g.chains.get(strings.Repeat("0", 60)+"1019", g.rules) != nil
 	oldest := g.chains.get(strings.Repeat("0", 60)+"1000", g.rules) != nil
 	g.mu.Unlock()
 	if n != 8 || !newest || oldest {
-		t.Fatalf("want 8 entries, the newest kept and the oldest dropped: %d %v %v", n, newest, oldest)
+		t.Fatalf("want 8 members, the newest kept and the oldest dropped: %d %v %v", n, newest, oldest)
 	}
 }
 
@@ -698,6 +698,8 @@ func TestGateCachingAndFailures(t *testing.T) {
 	b := newChain(t, s)
 	src := &fakeSource{events: []nostr.Event{b.spawn}, delay: 20 * time.Millisecond}
 	g := gateFor(t, ModeStructural, box, src)
+	clock := &testClock{t: time.Now()}
+	g.now = clock.now
 
 	// Concurrent events from one author share one lookup.
 	var wg sync.WaitGroup
@@ -717,14 +719,12 @@ func TestGateCachingAndFailures(t *testing.T) {
 
 	// A refusal expires after the negative TTL.
 	stranger := newSigner(t)
-	now := time.Now()
-	g.now = func() time.Time { return now }
 	g.Admit(ctx, stranger.sign(t, 1, 1)) // no spawn: one source call
 	g.Admit(ctx, stranger.sign(t, 1, 2))
 	if n := src.calls.Load(); n != 3 {
 		t.Fatalf("refusal not cached: %d source calls", n)
 	}
-	now = now.Add(61 * time.Second)
+	clock.add(61 * time.Second)
 	g.Admit(ctx, stranger.sign(t, 1, 3))
 	if n := src.calls.Load(); n != 4 {
 		t.Fatalf("refusal not re-checked after its TTL: %d source calls", n)

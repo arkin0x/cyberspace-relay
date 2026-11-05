@@ -2,6 +2,7 @@ package regiongate
 
 import (
 	"context"
+	"net"
 	"sync"
 	"time"
 
@@ -91,6 +92,7 @@ func (q *workQueue) pending(pubkey string) bool {
 }
 
 func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, string) {
+	ip = addressBucket(ip)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	j := q.jobs[pubkey]
@@ -224,4 +226,20 @@ func (q *workQueue) work() {
 		}
 		q.mu.Unlock()
 	}
+}
+
+// liveBucket is the address the background checks of LiveAllowed queue
+// under, so they count against a per-address limit like any client's.
+const liveBucket = "live"
+
+// addressBucket is the unit the per-address limit counts: an IPv4 address,
+// or an IPv6 address's /64, since one host is usually given a whole /64 and
+// could otherwise take a fresh address for every request. Anything else
+// (the live bucket, an unreadable address) counts as itself.
+func addressBucket(ip string) string {
+	a := net.ParseIP(ip)
+	if a == nil || a.To4() != nil {
+		return ip
+	}
+	return a.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }

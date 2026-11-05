@@ -113,8 +113,22 @@ and the note of 2026-11-05). Per pubkey it keeps:
 | the ids seen in the look-back window | an event already accounted for is skipped when fetched again |
 | the walk's state at the head (the last action a rule looks back to, an open bracket) | the next events are walked on from the head, without the chain |
 
-It holds at most `max_cached_chains` entries (default 4096), least recently
-used out first, in memory only.
+Admitted members are kept apart from refusals and pubkeys with no chain:
+at most `max_cached_chains` members (default 4096) and a quarter as many
+others, each least recently used out first, so fresh keys (which cost
+nothing) only ever evict other refusals. Every event a walk finds invalid
+also goes into a **failed set** (16,384 ids, oldest out first) that outlives
+any entry: an event id commits to the `e previous` it names, so the walk
+reaches it from the same state every time and it is invalid for the same
+reason, and evicting its pubkey does not make a forged proof worth checking
+again. A fork is never kept there (resolution decides it anew). All of it is
+in memory only.
+
+**Only what the sources hold, and an incoming movement event that is
+admitted (and so stored here), enter an entry.** A refused movement event
+is judged, but the entry stays what the sources say: the event is stored
+nowhere, and keeping it would leave the identity where that event put it,
+which no other reader sees.
 
 **An incremental check** asks each source one question,
 `{"authors":[pk],"kinds":[3333],"since":<highest created_at - 3600>}`,
@@ -131,7 +145,13 @@ skips the ids it has already accounted for, and then:
 
 The look-back (one hour, as ONOSENDAI's TV census reads with
 `READ_OVERLAP_S`) catches an event signed before the head's time and
-published later. Once a day the chain is read whole again, for one signed
+published later. The window remembers at most 1,024 ids; past that it
+starts after the newest second it had to cut into, however many events share
+one `created_at`. New events that force a whole read (a fork, a gap, an event
+naming another genesis) do so at most once every 15 seconds per pubkey, so
+junk events naming an unknown previous cannot make the gate read a chain
+whole on each one ("busy, try again" in between); a newer spawn is never
+held back. Once a day the chain is read whole again, for one signed
 even earlier (ONOSENDAI's `READ_WHOLE_S`). Reading a chain whole again never
 asks the checker about an event it already judged: an event id commits to
 the `e previous` it names, so the events from the spawn up to an id are
@@ -142,14 +162,19 @@ is answered from the cache while it is fresh. One forged proof therefore
 costs one check, however often it is sent and from however many
 connections.
 
-A check that fails to fetch, gets an incomplete answer, or runs out of time
-keeps nothing.
+A check that fails to fetch or gets an incomplete answer keeps nothing. A
+check that runs out of time keeps no verdict but a **checkpoint**: what its
+walk established up to the last event it passed. The next check of that
+pubkey walks on from there, so a chain costlier than one deadline is paid for
+once across retries instead of never finishing. A tall hop cut short keeps
+the residues it computed (`HopProgress`), and its next check computes only
+the rest.
 
 **The work queue** replaces the old cap on lookups in flight:
 
 | Limit | Default | Past it |
 |---|---|---|
-| `max_concurrent_lookups`: checks running | 16 | the check waits its turn |
+| `max_concurrent_lookups`: checks running | one per core (at least 2) | the check waits its turn |
 | `max_queued_lookups`: units of work waiting | 256 | refused at once, "relay busy verifying chains, try again" |
 | `max_queued_per_ip`: units waiting from one client address | 8 | the same |
 | distinct movement events waiting for one pubkey | 4 | the same |
@@ -158,7 +183,13 @@ Work for one pubkey is one job: readers share one check, a movement event
 already waiting adds nothing, and the events of one job are checked one
 after another, each against the entry the one before left. Jobs are taken
 round robin across client addresses, oldest first within each, so one
-address flooding the queue delays only its own work. A check runs under its
+address flooding the queue delays only its own work. An IPv6 client counts
+by its /64. The background checks that live events trigger queue under an
+address of their own. The address is the peer's, or, behind a reverse proxy
+listed in `GRAIN_TRUSTED_PROXIES` (IPs or CIDRs; loopback is always
+trusted), the hop of `X-Forwarded-For` that proxy wrote: the rightmost one
+that is not a trusted proxy. A forwarded header from anyone else is
+ignored. `deploy/onosendai` gives Caddy a fixed address and trusts it. A check runs under its
 own deadline, `check_timeout_seconds` (default 30), not its caller's: a
 caller that stops waiting (writes wait `fetch_timeout_seconds + 2`, reads 10
 seconds) is told to try again, and the check runs on and keeps its verdict

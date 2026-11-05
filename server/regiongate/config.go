@@ -72,7 +72,8 @@ type Config struct {
 	NegativeCacheTTLSeconds int `yaml:"negative_cache_ttl_seconds"`
 	// MaxConcurrentLookups caps chain checks running at once, so a flood of
 	// events from unknown pubkeys cannot make the relay hammer the chain
-	// relays or its CPU. Default 16.
+	// relays or its CPU. Default: the number of cores (at least 2), since a
+	// check is CPU-bound once its events are fetched.
 	MaxConcurrentLookups int `yaml:"max_concurrent_lookups"`
 	// MaxQueuedLookups caps the checks waiting for one of those, and
 	// MaxQueuedPerIP how many of them one client address may have waiting.
@@ -164,7 +165,7 @@ func ParseConfig(data []byte) (*Config, error) {
 		c.NegativeCacheTTLSeconds = 60
 	}
 	if c.MaxConcurrentLookups <= 0 {
-		c.MaxConcurrentLookups = 16
+		c.MaxConcurrentLookups = defaultLookups()
 	}
 	if c.MaxQueuedLookups <= 0 {
 		c.MaxQueuedLookups = 256

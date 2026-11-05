@@ -3,6 +3,7 @@ package regiongate
 import (
 	"container/list"
 	"context"
+	"encoding/hex"
 	"sort"
 	"time"
 
@@ -19,8 +20,13 @@ import (
 // It is also the fix for the re-sent forgery (cyberspace-relay #11 review):
 // an event the entry has accounted for is answered from it, and a chain
 // invalid at an event is invalid there again on any later walk without its
-// proof being checked, so one forged proof costs one check however often it
-// is sent.
+// proof being checked (Known, and the failed set, which outlives the
+// entry), so one forged proof costs one check however often it is sent.
+//
+// Only what the sources hold, and an incoming event that is admitted (and so
+// stored here), enter an entry. A refused incoming event is judged but not
+// kept: it is stored nowhere, and keeping it would leave the identity where
+// that event put it, which no other reader sees.
 
 const (
 	// lookbackSeconds is how far before the highest validated created_at an
@@ -33,13 +39,37 @@ const (
 	// head (ONOSENDAI's READ_WHOLE_S is the same day). The re-read asks the
 	// checker about no proof it already judged (Known).
 	resyncAfter = 24 * time.Hour
-	// maxSeen bounds the ids an entry remembers in its look-back window. Past
-	// it the oldest are dropped and the window starts after them.
+	// wholeEvery is the least time between two whole reads of one pubkey's
+	// chain that new events force (a fork, a gap, another genesis): junk
+	// events naming an unknown previous cannot make the gate read the chain
+	// whole on each one. A newer spawn is never held back.
+	wholeEvery = 15 * time.Second
+	// maxSeen bounds the ids an entry remembers in its look-back window.
 	maxSeen = 1024
 	// maxQueuedPerPubkey bounds the distinct movement events one pubkey can
 	// have waiting.
 	maxQueuedPerPubkey = 4
+	// refusalShare: the cache of refusals and pubkeys with no chain holds
+	// max_cached_chains / refusalShare entries, apart from admitted members,
+	// so a flood of fresh keys never evicts a member.
+	refusalShare = 4
+	// maxFailed bounds the failed set, and maxProgress the checkpoints.
+	maxFailed   = 16384
+	maxProgress = 1024
 )
+
+// eventKey is an event id as 32 bytes, or false when it is not 64 hex
+// characters (no authentic event has such an id).
+func eventKey(id string) ([32]byte, bool) {
+	var k [32]byte
+	if len(id) != 64 {
+		return k, false
+	}
+	if _, err := hex.Decode(k[:], []byte(id)); err != nil {
+		return k, false
+	}
+	return k, true
+}
 
 // chainEntry is one pubkey's cached chain. Once stored it is never changed;
 // a check stores a new one.
@@ -59,9 +89,9 @@ type chainEntry struct {
 	genesis            string
 	genesisAt, highest int64
 	// seen holds the ids, with their created_at, of every event accounted
-	// for in the look-back window, and floor is where the window starts when
-	// maxSeen cut it short.
-	seen  map[string]int64
+	// for in the look-back window; the window starts at floor when maxSeen
+	// cut it short.
+	seen  map[[32]byte]int64
 	floor int64
 	// walk is the walk at the head, when the chain is valid there and can be
 	// walked on; nil for a chain that is invalid or where strict mode
@@ -77,8 +107,10 @@ type chainEntry struct {
 // point, whatever their created_at (a forgery backdated before the window is
 // still answered from the entry when it is sent again).
 func (e *chainEntry) accounted(id string) bool {
-	if _, ok := e.seen[id]; ok {
-		return true
+	if k, ok := eventKey(id); ok {
+		if _, in := e.seen[k]; in {
+			return true
+		}
 	}
 	if id == "" {
 		return false
@@ -86,8 +118,23 @@ func (e *chainEntry) accounted(id string) bool {
 	return id == e.genesis || id == e.vd.Head || e.known != nil && (id == e.known.FailAt || id == e.known.StopAt)
 }
 
-// chainCache is a least recently used cache of chain entries.
-type chainCache struct {
+// sameVerdictWith reports whether the entry's answer stands with m added,
+// whatever m's proof says: an older spawn, an event on a chain dead by a
+// fork, and an event extending the head of a chain that is frozen (invalid,
+// or stopped in strict mode) or with an event the failed set already holds
+// (the chain is then invalid at m, frozen where the head left it).
+func (e *chainEntry) sameVerdictWith(m Move, failed bool) bool {
+	if m.IsSpawn {
+		return !newer(m.Event, nostr.Event{ID: e.genesis, CreatedAt: e.genesisAt})
+	}
+	if !e.vd.HasChain || m.Genesis != e.genesis {
+		return false
+	}
+	return e.vd.Reason == ReasonFork || m.Previous == e.vd.Head && (e.walk == nil || failed)
+}
+
+// lru is a least recently used set of entries.
+type lru struct {
 	max   int
 	order *list.List // front: most recently used
 	byPub map[string]*list.Element
@@ -98,25 +145,20 @@ type cacheItem struct {
 	entry  *chainEntry
 }
 
-func newChainCache(max int) *chainCache {
-	return &chainCache{max: max, order: list.New(), byPub: map[string]*list.Element{}}
+func newLRU(max int) *lru {
+	return &lru{max: max, order: list.New(), byPub: map[string]*list.Element{}}
 }
 
-// get returns the entry for pubkey checked under rules, or nil.
-func (c *chainCache) get(pubkey, rules string) *chainEntry {
+func (c *lru) get(pubkey string) *chainEntry {
 	el := c.byPub[pubkey]
 	if el == nil {
 		return nil
 	}
-	e := el.Value.(*cacheItem).entry
-	if e.rules != rules {
-		return nil
-	}
 	c.order.MoveToFront(el)
-	return e
+	return el.Value.(*cacheItem).entry
 }
 
-func (c *chainCache) put(pubkey string, e *chainEntry) {
+func (c *lru) put(pubkey string, e *chainEntry) {
 	if el := c.byPub[pubkey]; el != nil {
 		el.Value.(*cacheItem).entry = e
 		c.order.MoveToFront(el)
@@ -130,14 +172,154 @@ func (c *chainCache) put(pubkey string, e *chainEntry) {
 	}
 }
 
-func (c *chainCache) len() int { return c.order.Len() }
+func (c *lru) remove(pubkey string) {
+	if el := c.byPub[pubkey]; el != nil {
+		c.order.Remove(el)
+		delete(c.byPub, pubkey)
+	}
+}
+
+// chainCache keeps admitted members apart from refusals and pubkeys with no
+// chain, each least recently used out first, so fresh keys (which cost an
+// attacker nothing) only ever evict other refusals.
+type chainCache struct {
+	members, others *lru
+}
+
+func newChainCache(size int) *chainCache {
+	return &chainCache{members: newLRU(size), others: newLRU(max(1, size/refusalShare))}
+}
+
+// get returns the entry for pubkey checked under rules, or nil.
+func (c *chainCache) get(pubkey, rules string) *chainEntry {
+	e := c.members.get(pubkey)
+	if e == nil {
+		e = c.others.get(pubkey)
+	}
+	if e == nil || e.rules != rules {
+		return nil
+	}
+	return e
+}
+
+// put stores an entry with the cache of its kind: admitted or not.
+func (c *chainCache) put(pubkey string, e *chainEntry, admitted bool) {
+	if admitted {
+		c.others.remove(pubkey)
+		c.members.put(pubkey, e)
+	} else {
+		c.members.remove(pubkey)
+		c.others.put(pubkey, e)
+	}
+}
+
+func (c *chainCache) len() int { return c.members.order.Len() + c.others.order.Len() }
+
+// failedSet holds events a walk found invalid, by id, oldest out first. An
+// event id commits to the e previous it names, so the walk reaches it from
+// the same state every time, and it is invalid for the same reason: the set
+// outlives any entry, so evicting a pubkey does not make its forged proof
+// worth checking again. A fork is never kept (resolution decides it anew).
+type failedSet struct {
+	byID  map[[32]byte]failure
+	order [][32]byte
+}
+
+type failure struct{ reason, stopped string }
+
+func newFailedSet() *failedSet { return &failedSet{byID: map[[32]byte]failure{}} }
+
+func (f *failedSet) add(kn *Known) {
+	if kn == nil || kn.FailAt == "" || kn.FailReason == ReasonFork {
+		return
+	}
+	k, ok := eventKey(kn.FailAt)
+	if !ok {
+		return
+	}
+	if _, in := f.byID[k]; in {
+		return
+	}
+	f.byID[k] = failure{kn.FailReason, kn.Stopped}
+	f.order = append(f.order, k)
+	if len(f.order) > maxFailed {
+		delete(f.byID, f.order[0])
+		f.order = f.order[1:]
+	}
+}
+
+func (f *failedSet) get(id string) (failure, bool) {
+	k, ok := eventKey(id)
+	if !ok {
+		return failure{}, false
+	}
+	x, in := f.byID[k]
+	return x, in
+}
+
+// failedEvent is the failed set's lookup, for walks.
+func (g *Gate) failedEvent(id string) (string, string, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	f, ok := g.failed.get(id)
+	return f.reason, f.stopped, ok
+}
+
+// A checkpoint is the progress of a check its deadline cut short: what the
+// walk established up to the last event it passed. It is never an answer;
+// the next check of the pubkey walks on from it, so a chain costlier than
+// one deadline is paid for once across retries instead of never finishing.
+// A tall hop cut short keeps its computed residues the same way
+// (HopProgress).
+func (g *Gate) saveProgress(pubkey string, k *walker) {
+	if k == nil || k.genesis == "" {
+		return
+	}
+	kn := k.knowledge()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, in := g.progress[pubkey]; !in {
+		g.progressOrder = append(g.progressOrder, pubkey)
+		if len(g.progressOrder) > maxProgress {
+			delete(g.progress, g.progressOrder[0])
+			g.progressOrder = g.progressOrder[1:]
+		}
+	}
+	g.progress[pubkey] = kn
+}
+
+// knownFor is what earlier walks of pubkey's chain established: a
+// checkpoint, then the entry's own. A walk uses the one about its chain.
+func (g *Gate) knownFor(pubkey string, e *chainEntry) []*Known {
+	g.mu.Lock()
+	p := g.progress[pubkey]
+	g.mu.Unlock()
+	var out []*Known
+	if p != nil {
+		if e != nil && e.known != nil && e.known.Genesis == p.Genesis {
+			merged := *p
+			if merged.FailAt == "" {
+				merged.FailAt, merged.FailReason, merged.Stopped = e.known.FailAt, e.known.FailReason, e.known.Stopped
+			}
+			if merged.StopAt == "" {
+				merged.StopAt, merged.StopWhy = e.known.StopAt, e.known.StopWhy
+			}
+			p = &merged
+		}
+		out = append(out, p)
+	}
+	if e != nil && e.known != nil {
+		out = append(out, e.known)
+	}
+	return out
+}
 
 // newEntry builds the entry for a verdict reached by reading the chain
 // whole: vd, the walk (nil when it ended before walking), the active chain,
 // and every event the check held.
 func (g *Gate) newEntry(vd Verdict, k *walker, chain []Move, held []nostr.Event) *chainEntry {
 	now := g.now()
-	e := &chainEntry{rules: g.rules, checkedAt: now, wholeAt: now, vd: summary(vd), seen: map[string]int64{}}
+	e := &chainEntry{rules: g.rules, checkedAt: now, wholeAt: now, vd: summary(vd), seen: map[[32]byte]int64{}}
 	if !vd.HasChain {
 		return e
 	}
@@ -146,8 +328,8 @@ func (g *Gate) newEntry(vd Verdict, k *walker, chain []Move, held []nostr.Event)
 		e.highest = max(e.highest, m.Event.CreatedAt)
 	}
 	for _, ev := range held {
-		if ev.CreatedAt >= e.highest-lookbackSeconds {
-			e.seen[ev.ID] = ev.CreatedAt
+		if k, ok := eventKey(ev.ID); ok && ev.CreatedAt >= e.highest-lookbackSeconds {
+			e.seen[k] = ev.CreatedAt
 		}
 	}
 	e.prune()
@@ -201,7 +383,10 @@ func slim(m Move) Move {
 }
 
 // prune drops the ids older than the look-back window, then, past maxSeen,
-// the oldest, starting the window after them.
+// the oldest seconds: the window then starts after the newest second it had
+// to cut into, so it holds at most maxSeen ids however many share a
+// created_at, and an event of a second it dropped is not fetched again (the
+// daily whole read covers one published late into it).
 func (e *chainEntry) prune() {
 	from := max(e.highest-lookbackSeconds, e.floor)
 	for id, at := range e.seen {
@@ -217,7 +402,7 @@ func (e *chainEntry) prune() {
 		ats = append(ats, at)
 	}
 	sort.Slice(ats, func(i, j int) bool { return ats[i] > ats[j] })
-	e.floor = ats[maxSeen-1]
+	e.floor = ats[maxSeen] + 1 // the newest second not kept whole
 	for id, at := range e.seen {
 		if at < e.floor {
 			delete(e.seen, id)
@@ -225,20 +410,30 @@ func (e *chainEntry) prune() {
 	}
 }
 
+// outcome is what one check found: base, the entry from what the sources
+// hold, which is stored; with, the entry with the incoming event as well,
+// which is the answer for it and is stored instead of base only when it is
+// admitted (the relay then stores the event, so the sources hold it too);
+// and refusal, why there is no answer (base may still be stored).
+type outcome struct {
+	base, with *chainEntry
+	refusal    string
+}
+
 // refresh brings pubkey's entry up to date, with an incoming movement event
 // or none. It reads the chain whole when there is no entry, when the entry
-// holds no chain, or once a day; otherwise it checks only what is new. A
-// refusal that is not a verdict (a failed or incomplete lookup, a deadline)
-// is returned as the reason, and nothing is to be stored.
-func (g *Gate) refresh(ctx context.Context, pubkey string, e *chainEntry, incoming *nostr.Event) (*chainEntry, string) {
+// holds no chain, or once a day; otherwise it checks only what is new.
+func (g *Gate) refresh(ctx context.Context, pubkey string, e *chainEntry, incoming *nostr.Event) outcome {
 	if e == nil || !e.vd.HasChain || g.now().Sub(e.wholeAt) >= resyncAfter {
-		var kn *Known
-		if e != nil {
-			kn = e.known
-		}
-		return g.whole(ctx, pubkey, incoming, nil, kn)
+		return g.whole(ctx, pubkey, incoming, nil, g.knownFor(pubkey, e), e)
 	}
 	return g.extend(ctx, pubkey, e, incoming)
+}
+
+// wholeAllowed reports whether new events may make the chain be read whole
+// now (wholeEvery).
+func (g *Gate) wholeAllowed(e *chainEntry) bool {
+	return g.now().Sub(e.wholeAt) >= wholeEvery
 }
 
 // extend is the incremental check: one question per source, for the
@@ -250,25 +445,22 @@ func (g *Gate) refresh(ctx context.Context, pubkey string, e *chainEntry, incomi
 // move the identity. Anything else is read whole: a newer spawn or an event
 // naming another genesis (the chain may have changed: checked from scratch),
 // and an event that names anything but the head as previous (a fork or a
-// gap). A chain dead by a fork stays dead whatever is added to it, until a
-// newer spawn.
-func (g *Gate) extend(ctx context.Context, pubkey string, e *chainEntry, incoming *nostr.Event) (*chainEntry, string) {
+// gap); but for a newer spawn, not twice within wholeEvery. A chain dead by
+// a fork stays dead whatever is added to it, until a newer spawn.
+func (g *Gate) extend(ctx context.Context, pubkey string, e *chainEntry, incoming *nostr.Event) outcome {
 	authentic := g.authentic(pubkey)
 	since := max(e.highest-lookbackSeconds, e.floor, 1)
 	evs, cov, ok := g.gather(ctx, pubkey, ChainQuery{Since: since, Keep: func(ev nostr.Event) bool {
 		return !e.accounted(ev.ID) && authentic(ev)
 	}})
 	if !ok {
-		return nil, errFetch
+		return outcome{refusal: errFetch}
 	}
 	switch {
 	case cov.Capped:
-		return nil, errTooLong
+		return outcome{refusal: errTooLong}
 	case cov.Partial:
-		return nil, errIncomplete
-	}
-	if incoming != nil && !e.accounted(incoming.ID) && authentic(*incoming) {
-		evs = append(evs, *incoming)
+		return outcome{refusal: errIncomplete}
 	}
 	var fresh []nostr.Event
 	dup := map[string]bool{}
@@ -279,34 +471,55 @@ func (g *Gate) extend(ctx context.Context, pubkey string, e *chainEntry, incomin
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, errTimeout
+		return outcome{refusal: errTimeout}
 	}
 	next := *e
 	next.checkedAt = g.now()
-	if len(fresh) == 0 {
-		return &next, ""
-	}
 
 	genesis := nostr.Event{ID: e.genesis, CreatedAt: e.genesisAt}
 	var links []Move
+	respawn, other := false, false
 	for _, ev := range fresh {
 		m, _ := ParseMove(ev)
 		switch {
-		case m.IsSpawn && newer(ev, genesis), !m.IsSpawn && m.Genesis != e.genesis:
-			return g.whole(ctx, pubkey, incoming, fresh, e.known)
+		case m.IsSpawn && newer(ev, genesis):
+			respawn = true
+		case !m.IsSpawn && m.Genesis != e.genesis:
+			other = true
 		case !m.IsSpawn:
 			links = append(links, m)
 		}
 		// An older spawn is history resolution never reads (§8.7.3 rule 1).
 	}
-	if e.vd.Reason == ReasonFork {
+	var base *chainEntry
+	switch {
+	case respawn || other:
+	case e.vd.Reason == ReasonFork:
 		next.account(fresh, nil)
-		return &next, ""
+		base = &next
+	default:
+		if order, linear := extension(e.vd.Head, links); linear {
+			var refusal string
+			if base, refusal = g.extendLocal(ctx, pubkey, &next, order, fresh); refusal != "" {
+				return outcome{refusal: refusal}
+			}
+		}
 	}
-	order, linear := extension(e.vd.Head, links)
-	if !linear {
-		return g.whole(ctx, pubkey, incoming, fresh, e.known)
+	if base == nil {
+		if !respawn && !g.wholeAllowed(e) {
+			return outcome{refusal: errBusy}
+		}
+		return g.whole(ctx, pubkey, incoming, fresh, g.knownFor(pubkey, e), e)
 	}
+	return g.withIncoming(ctx, pubkey, base, incoming, fresh, g.wholeAllowed(e))
+}
+
+// extendLocal walks e on over order, events that extend its head one after
+// another, and accounts for fresh, the new events held. A walk its deadline
+// cuts short leaves a checkpoint and no entry.
+func (g *Gate) extendLocal(ctx context.Context, pubkey string, e *chainEntry, order []Move, fresh []nostr.Event) (*chainEntry, string) {
+	next := *e
+	next.checkedAt = g.now()
 	if len(order) > 0 {
 		if e.walk == nil {
 			next.vd.Head = order[len(order)-1].Event.ID
@@ -316,7 +529,13 @@ func (g *Gate) extend(ctx context.Context, pubkey string, e *chainEntry, incomin
 			}
 		} else {
 			k := *e.walk
+			for _, kn := range g.knownFor(pubkey, nil) {
+				if kn.Genesis == e.genesis {
+					k.useKnown(kn, order)
+				}
+			}
 			if err := k.resume(ctx, order); err != nil {
+				g.saveProgress(pubkey, &k)
 				return nil, errTimeout
 			}
 			next.vd, next.known, next.walk = summary(k.vd), k.knowledge(), nil
@@ -329,15 +548,104 @@ func (g *Gate) extend(ctx context.Context, pubkey string, e *chainEntry, incomin
 	return &next, ""
 }
 
+// withIncoming is the answer for the incoming event, on top of base: base
+// itself when the event changes nothing, base walked on by it when it
+// extends the head, or else the chain read whole with it (not twice within
+// wholeEvery, unless it is a newer spawn).
+func (g *Gate) withIncoming(ctx context.Context, pubkey string, base *chainEntry, incoming *nostr.Event, fresh []nostr.Event, allowWhole bool) outcome {
+	o := outcome{base: base, with: base}
+	if incoming == nil || base.accounted(incoming.ID) || !g.authentic(pubkey)(*incoming) {
+		return o
+	}
+	m, _ := ParseMove(*incoming)
+	_, _, failed := g.failedEvent(incoming.ID)
+	switch {
+	case base.sameVerdictWith(m, failed):
+		return o
+	case !m.IsSpawn && base.vd.HasChain && m.Genesis == base.genesis && m.Previous == base.vd.Head:
+		o.with, o.refusal = g.extendLocal(ctx, pubkey, base, []Move{m}, []nostr.Event{*incoming})
+		return o
+	case m.IsSpawn || allowWhole:
+		w := g.whole(ctx, pubkey, incoming, fresh, []*Known{base.known}, base)
+		if w.base != nil {
+			o.base = w.base
+		}
+		o.with, o.refusal = w.with, w.refusal
+		return o
+	}
+	o.with, o.refusal = nil, errBusy
+	return o
+}
+
+// whole reads the chain whole: base from what the sources hold (and extra,
+// new events they returned), and with, the same with the incoming event.
+// When the incoming event extends base's head it is walked on from there;
+// otherwise the chain is read again with it, since it may fill a gap the
+// sources leave, fork the chain or start a new one. The ids prev (the entry
+// it replaces, or nil) accounted for stay accounted: the whole read weighed
+// every event the sources hold, events of older chains included, so they
+// must not send the next incremental check back to a whole read.
+func (g *Gate) whole(ctx context.Context, pubkey string, incoming *nostr.Event, extra []nostr.Event, known []*Known, prev *chainEntry) outcome {
+	o := g.wholeRead(ctx, pubkey, incoming, extra, known)
+	if prev != nil {
+		for _, x := range []*chainEntry{o.base, o.with} {
+			if x != nil {
+				x.carry(prev)
+			}
+		}
+	}
+	return o
+}
+
+// carry adds the ids prev accounted for to a new entry's window.
+func (e *chainEntry) carry(prev *chainEntry) {
+	if prev.seen == nil || e.seen == nil {
+		return
+	}
+	for id, at := range prev.seen {
+		if _, in := e.seen[id]; !in {
+			e.seen[id] = at
+		}
+	}
+	e.prune()
+}
+
+func (g *Gate) wholeRead(ctx context.Context, pubkey string, incoming *nostr.Event, extra []nostr.Event, known []*Known) outcome {
+	base, refusal := g.read(ctx, pubkey, nil, extra, known)
+	if incoming == nil {
+		return outcome{base: base, with: base, refusal: refusal}
+	}
+	if base != nil {
+		if base.accounted(incoming.ID) {
+			return outcome{base: base, with: base}
+		}
+		m, _ := ParseMove(*incoming)
+		if base.sameVerdictWith(m, false) {
+			return outcome{base: base, with: base}
+		}
+		if !m.IsSpawn && base.vd.HasChain && m.Genesis == base.genesis && m.Previous == base.vd.Head {
+			with, refusal := g.extendLocal(ctx, pubkey, base, []Move{m}, []nostr.Event{*incoming})
+			return outcome{base: base, with: with, refusal: refusal}
+		}
+		known = append([]*Known{base.known}, known...)
+	} else if refusal != errIncomplete {
+		return outcome{refusal: refusal} // the incoming event cannot help
+	}
+	with, refusal := g.read(ctx, pubkey, incoming, extra, known)
+	return outcome{base: base, with: with, refusal: refusal}
+}
+
 // account adds the new events to the entry's window, raising the highest
 // created_at by the chain events among them.
 func (e *chainEntry) account(fresh []nostr.Event, chain []Move) {
-	seen := make(map[string]int64, len(e.seen)+len(fresh))
+	seen := make(map[[32]byte]int64, len(e.seen)+len(fresh))
 	for id, at := range e.seen {
 		seen[id] = at
 	}
 	for _, ev := range fresh {
-		seen[ev.ID] = ev.CreatedAt
+		if k, ok := eventKey(ev.ID); ok {
+			seen[k] = ev.CreatedAt
+		}
 	}
 	for _, m := range chain {
 		e.highest = max(e.highest, m.Event.CreatedAt)
