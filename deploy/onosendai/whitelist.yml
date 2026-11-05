@@ -1,7 +1,10 @@
 # ONOSENDAI default relay: who and what may publish (arkinox, 2026-10-11).
 # Anyone may publish these kinds; every other kind is refused with
 # "not allowed: event kind is not whitelisted". To accept a new kind, add it
-# here (grain hot-reloads this file) and to the table in deploy/onosendai/README.md.
+# here and to the table in deploy/onosendai/README.md. grain reloads this file
+# when it is written in place (README.md, "Changing the config on the droplet").
+# Refused on purpose: 1, 4, 1059, 9735, 30023 (DMs go to inbox relays).
+# config/deploy_onosendai_test.go checks this file.
 
 pubkey_whitelist:
   enabled: false # anyone may publish the kinds below
@@ -19,6 +22,9 @@ kind_whitelist:
     - "11333"  # avatars
     - "23330"  # ephemeral chat envelope (not stored); its 23333 line rides inside, never bare
     - "321"    # block anchors (DECK-0001), from the NTH publisher: the hyperspace stops
+    - "23334"  # TV watching ping (ephemeral, not stored): without it every set reads 1 WATCHING
+    - "33340"  # item listings, the ITEM FEED (DECK-0004 §4)
+    - "3367"   # color palettes an SNO object names by nevent (DECK-0003 §1.3b)
     # Nostr plumbing ONOSENDAI publishes
     - "0"      # profiles (agents carry bot + operator here)
     - "5"      # deletions (NIP-09): retract objects, derezz, cleanup
@@ -27,6 +33,7 @@ kind_whitelist:
     - "10002"  # relay lists (NIP-65)
     - "10050"  # DM inbox relay lists (NIP-17): agents copy their operator's
     - "10063"  # Blossom server lists
+    - "10000"  # mute lists (NIP-51): BLOCK and MUTE THIS ITEM
 
 domain_whitelist:
   enabled: false

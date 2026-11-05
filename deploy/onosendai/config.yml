@@ -81,7 +81,7 @@ server:
   write_timeout: 20 # Timeout for writing a single WebSocket message to client
   idle_timeout: 1200 # Connection-level timeout for inactive clients (in seconds); 0 disables.
   max_connections: 1000 # ONOSENDAI: was 100. Hard cap on concurrent WebSocket clients. 0 disables the gate. Without this set, the relay accepts unlimited connections — set it on every production deployment.
-  max_subscriptions_per_client: 50 # ONOSENDAI: was 10; the client opens several REQs per relay (chain, bags, objects, avatars, chat, comments)
+  max_subscriptions_per_client: 50 # ONOSENDAI: was 10; the client opens several REQs per relay (chain, bags, objects, avatars, chat, comments). Measured 2026-11-05: at most 21 open at once (/tv, logged out). At the cap a new REQ closes the OLDEST, which is a live one (chat, a spectated chain).
   implicit_req_limit: 500 # Default limit applied to REQ when no limit is specified
   connection_rate_limit_per_ip: 30 # Per-IP connection attempts per minute. Rejected before WS upgrade with HTTP 429. 0 disables.
 
@@ -141,12 +141,25 @@ event_time_constraints:
   max_created_at_string: now+5m # Use a string to set a date for max created at in the future or past from current time
 
 rate_limit:
-  ws_limit: 50 # WebSocket messages per second per client (any frame: EVENT, REQ, CLOSE, etc.)
-  ws_burst: 100 # Allowed burst of WebSocket messages
+  # ONOSENDAI, 2026-11-05: limits per connection, from one real page load each
+  # against this relay (logged out, read only, PR ONOSENDAI #606). Peaks:
+  #   /    74 REQs in 30 s; 19 in 1 s, 24 in 3 s, 39 in 10 s; 21 frames in 1 s
+  #   /tv  109 REQs in 30 s; 21 in 1 s, 27 in 3 s, 49 in 10 s; 23 frames in 1 s
+  #   a chain walk (spectate, every chain read): one 500-event page at a time,
+  #   1.6 to 4.4 REQs a second
+  # At 10/s burst 30, /tv left 11 of 30 REQ tokens, so a signed-in load on top
+  # would be refused. At 20/s burst 80 it leaves 62 of 80.
+  # Keep ws above what REQ and EVENT allow together (REQ + its CLOSE + EVENT:
+  # ws_limit >= 2 x req_limit + event_limit, ws_burst >= 2 x req_burst +
+  # event_burst): going over ws_limit drops the connection, while going over
+  # req_limit only refuses that REQ (CLOSED "rate-limited:").
+  # config/deploy_onosendai_test.go checks both.
+  ws_limit: 60 # ONOSENDAI: was 50. WebSocket messages per second per client (any frame: EVENT, REQ, CLOSE, etc.)
+  ws_burst: 200 # ONOSENDAI: was 100. Allowed burst of WebSocket messages
   event_limit: 10 # EVENT messages per second per client
   event_burst: 20 # Allowed burst of EVENTs
-  req_limit: 10 # REQ subscription messages per second per client. Clients commonly fire several REQs at startup (one per filter shape), so don't set this too tight.
-  req_burst: 30 # Allowed burst of REQs
+  req_limit: 20 # ONOSENDAI: was 10. REQ subscription messages per second per client.
+  req_burst: 80 # ONOSENDAI: was 30. Allowed burst of REQs
   max_event_size: 524288 # 512KB — reasonable for most Nostr events; applies to both event validation AND the WebSocket message buffer
   max_content_length: 0 # Max characters in an event's `content` field. 0 = no limit (max_event_size still applies). When >0 it's enforced at ingest and advertised as NIP-11 limitation.max_content_length.
 
@@ -155,6 +168,8 @@ rate_limit:
   # — same numbers, so a fresh deploy gets sensible defaults
   # before the operator ever opens /admin.
   kind_size_limits:
+    # ONOSENDAI, 2026-11-05, real events on this relay: kind 0 p99 3.1 KB, max
+    # 3.4 KB (136); kind 7 max 1.0 KB (500). Both caps stand.
     - kind: 0 # User metadata (profile info)
       max_size: 8192 # 8KB - sufficient for detailed profiles with images
     - kind: 1 # Text notes
