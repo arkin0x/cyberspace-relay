@@ -26,21 +26,30 @@ type workQueue struct {
 	workers, max, perIP, perPubkey int
 	timeout                        time.Duration
 	run                            func(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string)
+	// member, when set, reports whether a pubkey is a known member (an
+	// admitted cached entry). Members' jobs are taken before anyone
+	// else's, so fresh keys building costly chains cannot starve players.
+	member func(pubkey string) bool
 
-	mu      sync.Mutex
-	jobs    map[string]*job   // by pubkey, queued or running
-	byIP    map[string][]*job // queued jobs, oldest first, by the address that queued them
-	ring    []string          // addresses with queued jobs, in turn order
-	turn    int               // index into ring of the next address served
-	queued  int               // units waiting
-	ipUnits map[string]int    // units waiting, by address
-	running int               // workers running
+	mu sync.Mutex
+	// jobs holds the job of each pubkey, queued or running. lines[c] are
+	// the queued jobs of class c (0 members, 1 the rest), oldest first, by
+	// the address that queued them; rings[c] the addresses with such jobs,
+	// in turn order, and turns[c] whose turn is next.
+	jobs    map[string]*job
+	lines   [2]map[string][]*job
+	rings   [2][]string
+	turns   [2]int
+	queued  int            // units waiting
+	ipUnits map[string]int // units waiting, by address
+	running int            // workers running
 }
 
 // job is the work waiting or running for one pubkey.
 type job struct {
 	pubkey  string
 	ip      string
+	class   int // 0 a known member, 1 anyone else
 	waiters []*waiter
 	running bool
 }
@@ -59,7 +68,7 @@ type waiter struct {
 func newWorkQueue(workers, max, perIP, perPubkey int, timeout time.Duration,
 	run func(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string)) *workQueue {
 	return &workQueue{workers: workers, max: max, perIP: perIP, perPubkey: perPubkey, timeout: timeout, run: run,
-		jobs: map[string]*job{}, byIP: map[string][]*job{}, ipUnits: map[string]int{}}
+		jobs: map[string]*job{}, lines: [2]map[string][]*job{{}, {}}, ipUnits: map[string]int{}}
 }
 
 // submit queues a check of pubkey, with an incoming movement event or none
@@ -93,6 +102,10 @@ func (q *workQueue) pending(pubkey string) bool {
 
 func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, string) {
 	ip = addressBucket(ip)
+	class := 1
+	if q.member != nil && q.member(pubkey) {
+		class = 0
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	j := q.jobs[pubkey]
@@ -128,7 +141,7 @@ func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, 
 		q.ipUnits[ip] += units
 	}
 	if j == nil {
-		j = &job{pubkey: pubkey, ip: ip}
+		j = &job{pubkey: pubkey, ip: ip, class: class}
 		q.jobs[pubkey] = j
 		q.push(j)
 	}
@@ -140,33 +153,38 @@ func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, 
 	return w, ""
 }
 
-// push puts a queued job at the back of its address's line.
+// push puts a queued job at the back of its address's line in its class.
 func (q *workQueue) push(j *job) {
-	if len(q.byIP[j.ip]) == 0 {
-		q.ring = append(q.ring, j.ip)
+	c := j.class
+	if len(q.lines[c][j.ip]) == 0 {
+		q.rings[c] = append(q.rings[c], j.ip)
 	}
-	q.byIP[j.ip] = append(q.byIP[j.ip], j)
+	q.lines[c][j.ip] = append(q.lines[c][j.ip], j)
 }
 
-// next takes the oldest queued job of the address whose turn it is.
+// next takes a known member's job first, if any is queued, else anyone's:
+// within a class, the oldest job of the address whose turn it is.
 func (q *workQueue) next() *job {
-	if len(q.ring) == 0 {
-		return nil
+	for c := range q.rings {
+		if len(q.rings[c]) == 0 {
+			continue
+		}
+		if q.turns[c] >= len(q.rings[c]) {
+			q.turns[c] = 0
+		}
+		ip := q.rings[c][q.turns[c]]
+		line := q.lines[c][ip]
+		j := line[0]
+		if len(line) == 1 {
+			delete(q.lines[c], ip)
+			q.rings[c] = append(q.rings[c][:q.turns[c]], q.rings[c][q.turns[c]+1:]...)
+		} else {
+			q.lines[c][ip] = line[1:]
+			q.turns[c]++
+		}
+		return j
 	}
-	if q.turn >= len(q.ring) {
-		q.turn = 0
-	}
-	ip := q.ring[q.turn]
-	line := q.byIP[ip]
-	j := line[0]
-	if len(line) == 1 {
-		delete(q.byIP, ip)
-		q.ring = append(q.ring[:q.turn], q.ring[q.turn+1:]...)
-	} else {
-		q.byIP[ip] = line[1:]
-		q.turn++
-	}
-	return j
+	return nil
 }
 
 // work runs queued jobs until none is left. A job's waiters are answered in
@@ -232,14 +250,18 @@ func (q *workQueue) work() {
 // under, so they count against a per-address limit like any client's.
 const liveBucket = "live"
 
-// addressBucket is the unit the per-address limit counts: an IPv4 address,
-// or an IPv6 address's /64, since one host is usually given a whole /64 and
+// addressBucket is the unit the per-address limit counts: an IPv4 address
+// (an IPv4-mapped IPv6 address counts as its IPv4 one), or an IPv6
+// address's /64, since one host is usually given a whole /64 and
 // could otherwise take a fresh address for every request. Anything else
 // (the live bucket, an unreadable address) counts as itself.
 func addressBucket(ip string) string {
 	a := net.ParseIP(ip)
-	if a == nil || a.To4() != nil {
+	if a == nil {
 		return ip
+	}
+	if v4 := a.To4(); v4 != nil { // IPv4, or IPv4-mapped IPv6 (::ffff:a.b.c.d)
+		return v4.String()
 	}
 	return a.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }

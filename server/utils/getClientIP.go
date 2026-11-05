@@ -82,7 +82,9 @@ func GetClientIP(r *http.Request) string {
 	if !isTrustedProxy(peer) {
 		return peer
 	}
-	xff := r.Header.Get("X-Forwarded-For")
+	// Every X-Forwarded-For line, in order: a proxy may add its own line
+	// rather than append to the client's.
+	xff := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
 	if xff == "" {
 		return peer
 	}

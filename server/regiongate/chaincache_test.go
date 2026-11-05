@@ -1255,4 +1255,132 @@ func TestIPv6AddressesShareTheirSlash64(t *testing.T) {
 	if got := addressBucket("192.0.2.7"); got != "192.0.2.7" {
 		t.Fatalf("an IPv4 address is its own bucket, got %q", got)
 	}
+	if got := addressBucket("::ffff:192.0.2.7"); got != "192.0.2.7" {
+		t.Fatalf("an IPv4-mapped IPv6 address counts as its IPv4 one, got %q", got)
+	}
+}
+
+// ── review round 3 ────────────────────────────────────────────────────
+
+// Anyone can replay an identity's old, public chain events. Dated before
+// the window and not extending the head, they are answered from the entry
+// (the daily whole read covers them, as for events the sources return), so
+// replays cost no source call within the TTL and no whole read after it.
+// On first contact, the whole read that already holds the event answers
+// for it without reading again.
+func TestReplayedOldEventsCostNothing(t *testing.T) {
+	ctx := context.Background()
+	s, target, box := insideTarget(t)
+	b := newChain(t, s)
+	evs := []nostr.Event{b.spawn}
+	for i := 0; i < 200; i++ {
+		evs = append(evs, b.move(ActHop, offset(t, target, int64(i%2))))
+	}
+	b.at += 2 * lookbackSeconds // the head is well after the old events
+	evs = append(evs, b.move(ActHop, target))
+	src := &fakeSource{events: evs}
+
+	first, _ := cacheGate(t, ModeStructural, box, newCountingProofs(), src)
+	if ok, msg := first.Admit(ctx, evs[5]); !ok {
+		t.Fatalf("first contact with a replayed old event: %s", msg)
+	}
+	if n := src.calls.Load(); n != 2 {
+		t.Fatalf("first contact with a replayed old event made %d source calls, want 2 (one whole read)", n)
+	}
+
+	g, clock := cacheGate(t, ModeStructural, box, newCountingProofs(), src)
+	g.AdmitPubkey(ctx, s.pubkey)
+	calls := src.calls.Load()
+	for i := 0; i < 20; i++ {
+		clock.add(16 * time.Second) // past wholeEvery each time, within the TTL
+		if ok, msg := g.Admit(ctx, evs[1+i]); !ok {
+			t.Fatalf("replay %d: %s", i, msg)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		g.Admit(ctx, evs[30+i])
+	}
+	if n := src.calls.Load() - calls; n != 0 {
+		t.Fatalf("40 replays within the TTL made %d source calls, want 0", n)
+	}
+	clock.add(601 * time.Second)
+	calls = src.calls.Load()
+	for i := 0; i < 20; i++ {
+		clock.add(16 * time.Second)
+		g.Admit(ctx, evs[60+i])
+	}
+	if n := src.calls.Load() - calls; n > 1 {
+		t.Fatalf("20 replays after the TTL made %d source calls, want at most 1 (one incremental question)", n)
+	}
+}
+
+// Only proof failures go into the failed set: structural junk is cheap to
+// find again and must not push a forged proof out.
+func TestOnlyProofFailuresAreKept(t *testing.T) {
+	f := newFailedSet()
+	junk, forged := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	f.add(&Known{FailAt: junk, FailReason: ReasonCMismatch, Stopped: "c-mismatch"})
+	f.add(&Known{FailAt: forged, FailReason: ReasonHopProof, Stopped: "hop-proof"})
+	if _, in := f.get(junk); in {
+		t.Fatal("a structural failure was kept")
+	}
+	if _, in := f.get(forged); !in {
+		t.Fatal("a proof failure was not kept")
+	}
+}
+
+// Known members' jobs are taken before anyone else's: fresh keys building
+// costly chains cannot starve players.
+func TestQueueServesKnownMembersFirst(t *testing.T) {
+	r := newBlockedRun()
+	q := newWorkQueue(1, 100, 100, 4, time.Second, r.run)
+	q.member = func(pubkey string) bool { return strings.HasPrefix(pubkey, "m") }
+	go q.submit(context.Background(), "z", "z0", nil)
+	<-r.started
+	for _, pk := range []string{"u0", "u1", "u2", "m0", "u3", "m1"} {
+		go q.submit(context.Background(), "a", pk, nil)
+		waitFor(t, func() bool { return q.pending(pk) })
+	}
+	close(r.release)
+	waitFor(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.order) == 7
+	})
+	want := "z0 m0 m1 u0 u1 u2 u3"
+	if got := strings.Join(r.order, " "); got != want {
+		t.Fatalf("order %q, want %q", got, want)
+	}
+}
+
+// The gate tells its queue who its members are: a member whose entry has
+// expired is checked ahead of a flood of unknown keys.
+func TestGateServesKnownMembersFirst(t *testing.T) {
+	ctx := context.Background()
+	s := newSigner(t)
+	box := cubeAround(t, s.pubkey, 40)
+	src := &fakeSource{events: []nostr.Event{newChain(t, s).spawn}}
+	cfg := &Config{Enabled: true, Mode: ModeStructural, CacheTTLSeconds: 600, NegativeCacheTTLSeconds: 60, FetchTimeoutSeconds: 8,
+		MaxConcurrentLookups: 1, MaxQueuedLookups: 100, MaxQueuedPerIP: 100, boxes: []Box{box}, exempt: map[string]bool{}}
+	g := NewGate(cfg, verifier(), src)
+	clock := &testClock{t: time.Now()}
+	g.now = clock.now
+	if ok, _ := g.AdmitPubkey(ctx, s.pubkey); !ok {
+		t.Fatal("member refused")
+	}
+	clock.add(601 * time.Second)
+	src.mu.Lock()
+	src.delay = 50 * time.Millisecond
+	src.mu.Unlock()
+	for i := 0; i < 10; i++ {
+		go g.AdmitPubkey(WithClientIP(ctx, "198.51.100.9"), newSigner(t).pubkey)
+	}
+	time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	if ok, msg := g.AdmitPubkey(WithClientIP(ctx, "198.51.100.9"), s.pubkey); !ok {
+		t.Fatal(msg)
+	}
+	if took := time.Since(start); took > 300*time.Millisecond {
+		t.Fatalf("the member waited %v behind 10 unknown keys (about 50 ms each)", took)
+	}
 }

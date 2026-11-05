@@ -13,6 +13,9 @@ primary_region = "ord"
 
 [env]
   GRAIN_DATA_DIR = "/data"
+  # Set GRAIN_TRUSTED_PROXIES to the address Fly's proxy connects from (the
+  # peer address the relay logs), or every client looks like the proxy:
+  # see deploy/onosendai/README.md, "Trusted proxy".
 
 [[mounts]]
   source = "cyberspace_data"

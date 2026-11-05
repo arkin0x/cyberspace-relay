@@ -116,8 +116,9 @@ and the note of 2026-11-05). Per pubkey it keeps:
 Admitted members are kept apart from refusals and pubkeys with no chain:
 at most `max_cached_chains` members (default 4096) and a quarter as many
 others, each least recently used out first, so fresh keys (which cost
-nothing) only ever evict other refusals. Every event a walk finds invalid
-also goes into a **failed set** (16,384 ids, oldest out first) that outlives
+nothing) only ever evict other refusals. Every event whose proof a walk
+finds invalid also goes into a **failed set** (only proof failures, which
+are what costs a check, so structural junk cannot push them out) (16,384 ids, oldest out first) that outlives
 any entry: an event id commits to the `e previous` it names, so the walk
 reaches it from the same state every time and it is invalid for the same
 reason, and evicting its pubkey does not make a forged proof worth checking
@@ -142,6 +143,7 @@ skips the ids it has already accounted for, and then:
 | the same, on a chain already invalid, or stopped in strict mode | nothing is checked: nothing published after that point moves the identity |
 | an event naming anything but the head as previous (a fork, or a gap) | the chain is read whole |
 | anything, on a chain dead by a fork | the entry stands: only a newer spawn changes it |
+| a movement event sent here, dated before the window and not extending the head (an old, public event replayed) | answered from the entry, as an event the sources return before the window is; the daily whole read covers it |
 
 The look-back (one hour, as ONOSENDAI's TV census reads with
 `READ_OVERLAP_S`) catches an event signed before the head's time and
@@ -181,15 +183,22 @@ the rest.
 
 Work for one pubkey is one job: readers share one check, a movement event
 already waiting adds nothing, and the events of one job are checked one
-after another, each against the entry the one before left. Jobs are taken
-round robin across client addresses, oldest first within each, so one
-address flooding the queue delays only its own work. An IPv6 client counts
-by its /64. The background checks that live events trigger queue under an
+after another, each against the entry the one before left. Jobs of known
+members (pubkeys with an admitted entry, fresh or not) are taken before
+anyone else's, so fresh keys building costly chains cannot starve players.
+Within each of the two classes, jobs are taken round robin across client
+addresses, oldest first within each, so one address flooding the queue
+delays only its own work. An IPv6 client counts
+by its /64, and an IPv4-mapped IPv6 address as its IPv4 one. The background checks that live events trigger queue under an
 address of their own. The address is the peer's, or, behind a reverse proxy
 listed in `GRAIN_TRUSTED_PROXIES` (IPs or CIDRs; loopback is always
 trusted), the hop of `X-Forwarded-For` that proxy wrote: the rightmost one
 that is not a trusted proxy. A forwarded header from anyone else is
-ignored. `deploy/onosendai` gives Caddy a fixed address and trusts it. A check runs under its
+ignored. `deploy/onosendai` gives Caddy a fixed address and trusts it.
+This is a breaking change for every deployment behind a proxy, the
+speakeasy profile on Fly included: without `GRAIN_TRUSTED_PROXIES` every
+client looks like the proxy and grain's per-IP limits apply to the whole
+relay. See `deploy/onosendai/README.md`, "Trusted proxy", before deploying. A check runs under its
 own deadline, `check_timeout_seconds` (default 30), not its caller's: a
 caller that stops waiting (writes wait `fetch_timeout_seconds + 2`, reads 10
 seconds) is told to try again, and the check runs on and keeps its verdict

@@ -100,7 +100,13 @@ type chainEntry struct {
 	// known is what the walks of this chain established, for a whole
 	// re-read of it.
 	known *Known
+	// held is every event id the whole read that made the entry held,
+	// while that check runs; it is dropped before the entry is stored.
+	held map[[32]byte]bool
 }
+
+// windowStart is the oldest created_at an incremental check asks for.
+func (e *chainEntry) windowStart() int64 { return max(e.highest-lookbackSeconds, e.floor) }
 
 // accounted reports whether the event id is already part of the entry: in
 // its look-back window, or its spawn, head, failure point or strict stop
@@ -122,10 +128,17 @@ func (e *chainEntry) accounted(id string) bool {
 // whatever m's proof says: an older spawn, an event on a chain dead by a
 // fork, and an event extending the head of a chain that is frozen (invalid,
 // or stopped in strict mode) or with an event the failed set already holds
-// (the chain is then invalid at m, frozen where the head left it).
+// (the chain is then invalid at m, frozen where the head left it). An event
+// dated before the window that does not extend the head is answered from
+// the entry too, as the incremental check leaves such events to the daily
+// whole read: otherwise replaying an identity's old, public chain events
+// would make the gate read its whole chain again on each one.
 func (e *chainEntry) sameVerdictWith(m Move, failed bool) bool {
 	if m.IsSpawn {
 		return !newer(m.Event, nostr.Event{ID: e.genesis, CreatedAt: e.genesisAt})
+	}
+	if e.vd.HasChain && m.Event.CreatedAt < e.windowStart() && m.Previous != e.vd.Head {
+		return true
 	}
 	if !e.vd.HasChain || m.Genesis != e.genesis {
 		return false
@@ -229,8 +242,10 @@ type failure struct{ reason, stopped string }
 
 func newFailedSet() *failedSet { return &failedSet{byID: map[[32]byte]failure{}} }
 
+// Only proof failures are kept: they are what costs a check, and a flood
+// of structural junk (cheap to find again) cannot push them out.
 func (f *failedSet) add(kn *Known) {
-	if kn == nil || kn.FailAt == "" || kn.FailReason == ReasonFork {
+	if kn == nil || kn.FailAt == "" || !proofReasons[kn.FailReason] {
 		return
 	}
 	k, ok := eventKey(kn.FailAt)
@@ -333,6 +348,12 @@ func (g *Gate) newEntry(vd Verdict, k *walker, chain []Move, held []nostr.Event)
 		}
 	}
 	e.prune()
+	e.held = map[[32]byte]bool{}
+	for _, ev := range held {
+		if k, ok := eventKey(ev.ID); ok {
+			e.held[k] = true
+		}
+	}
 	if k != nil {
 		e.known = k.knowledge()
 		if k.atHead() {
@@ -386,7 +407,14 @@ func slim(m Move) Move {
 // the oldest seconds: the window then starts after the newest second it had
 // to cut into, so it holds at most maxSeen ids however many share a
 // created_at, and an event of a second it dropped is not fetched again (the
-// daily whole read covers one published late into it).
+// daily whole read covers one published late into it). Two cases put the
+// window's start past the head's second, both only for an identity with
+// more than maxSeen of its own events (nobody else can sign them) in one
+// second or dated after its head: an event dated within the head's second,
+// or between the head and that start, published later elsewhere, is then
+// seen at the daily whole read, or at once when published here. Holding
+// the start at the head instead would refetch the dropped ids of that
+// second on every check and send each check to a whole read.
 func (e *chainEntry) prune() {
 	from := max(e.highest-lookbackSeconds, e.floor)
 	for id, at := range e.seen {
@@ -587,6 +615,11 @@ func (g *Gate) withIncoming(ctx context.Context, pubkey string, base *chainEntry
 // must not send the next incremental check back to a whole read.
 func (g *Gate) whole(ctx context.Context, pubkey string, incoming *nostr.Event, extra []nostr.Event, known []*Known, prev *chainEntry) outcome {
 	o := g.wholeRead(ctx, pubkey, incoming, extra, known)
+	for _, x := range []*chainEntry{o.base, o.with} {
+		if x != nil {
+			x.held = nil
+		}
+	}
 	if prev != nil {
 		for _, x := range []*chainEntry{o.base, o.with} {
 			if x != nil {
@@ -616,7 +649,9 @@ func (g *Gate) wholeRead(ctx context.Context, pubkey string, incoming *nostr.Eve
 		return outcome{base: base, with: base, refusal: refusal}
 	}
 	if base != nil {
-		if base.accounted(incoming.ID) {
+		// The read held the incoming event already: the sources have it, and
+		// base is the answer with it. Reading again would read the same.
+		if k, ok := eventKey(incoming.ID); ok && base.held[k] || base.accounted(incoming.ID) {
 			return outcome{base: base, with: base}
 		}
 		m, _ := ParseMove(*incoming)

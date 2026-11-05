@@ -146,6 +146,7 @@ func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 	g.verifier.failed = g.failedEvent
 	g.queue = newWorkQueue(orDefault(cfg.MaxConcurrentLookups, defaultLookups()), orDefault(cfg.MaxQueuedLookups, 256),
 		orDefault(cfg.MaxQueuedPerIP, 8), maxQueuedPerPubkey, time.Duration(orDefault(cfg.CheckTimeoutSeconds, 30))*time.Second, g.run)
+	g.queue.member = g.isMember
 	return g
 }
 
@@ -155,6 +156,15 @@ func NewGate(cfg *Config, verifier Verifier, sources ...Source) *Gate {
 func defaultLookups() int { return max(2, runtime.GOMAXPROCS(0)) }
 
 type clientIPKey struct{}
+
+// isMember reports whether pubkey has an admitted entry in the chain cache,
+// fresh or not: the work queue serves known members first.
+func (g *Gate) isMember(pubkey string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.chains.members.byPub[pubkey]
+	return e != nil && e.Value.(*cacheItem).entry.rules == g.rules
+}
 
 // WithClientIP returns ctx carrying the address of the client a request
 // came from, which the gate's work queue limits per address.

@@ -37,4 +37,13 @@ func TestGetClientIPTrustsOnlyTheProxy(t *testing.T) {
 			t.Errorf("peer %s, X-Forwarded-For %q: got %q, want %q", c.peer, c.xff, got, c.want)
 		}
 	}
+	// A proxy may add its own X-Forwarded-For line rather than append to
+	// the client's: every line is read, in order.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "172.30.0.2:4000"
+	r.Header.Add("X-Forwarded-For", "6.6.6.6")
+	r.Header.Add("X-Forwarded-For", "198.51.100.1")
+	if got := GetClientIP(r); got != "198.51.100.1" {
+		t.Errorf("two X-Forwarded-For lines: got %q, want the proxy's hop 198.51.100.1", got)
+	}
 }
