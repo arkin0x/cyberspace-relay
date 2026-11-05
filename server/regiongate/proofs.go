@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"math/bits"
 	"strings"
+	"sync"
 )
 
 // SpecProofs is the ProofChecker of the chain rules of ChainRulesRevision:
@@ -38,7 +39,88 @@ type SpecProofs struct {
 	// ListedV1Hops replaces grandfathered-v1-hops.txt when non-nil, as the
 	// golden vectors do with their own test list.
 	ListedV1Hops map[string]bool
+	// Progress, when set, keeps the residues of tall hops whose check was
+	// cut short (see HopProgress).
+	Progress *HopProgress
 }
+
+// HopProgress keeps, by event id, the residues of hops whose check its
+// deadline cut short, so the next check of the same hop computes only the
+// rest: a hop costlier than one deadline is paid for once across retries.
+// A residue is hop_n mod p_j, fixed by the hop's c, C and e previous, which
+// the event id commits to. It is a checkpoint, never a verdict: an entry is
+// dropped once its hop is judged, and the oldest go first past max.
+type HopProgress struct {
+	mu    sync.Mutex
+	max   int
+	byID  map[string]map[uint64]uint64
+	order []string
+}
+
+// NewHopProgress keeps the residues of at most max hops.
+func NewHopProgress(max int) *HopProgress {
+	return &HopProgress{max: max, byID: map[string]map[uint64]uint64{}}
+}
+
+// hopResidues is one hop's view of a HopProgress (nil keeps nothing).
+type hopResidues struct {
+	p  *HopProgress
+	id string
+}
+
+func (h *hopResidues) get(j uint64) (uint64, bool) {
+	if h == nil {
+		return 0, false
+	}
+	h.p.mu.Lock()
+	defer h.p.mu.Unlock()
+	r, ok := h.p.byID[h.id][j]
+	return r, ok
+}
+
+func (h *hopResidues) put(j, r uint64) {
+	if h == nil {
+		return
+	}
+	h.p.mu.Lock()
+	defer h.p.mu.Unlock()
+	m := h.p.byID[h.id]
+	if m == nil {
+		m = map[uint64]uint64{}
+		h.p.byID[h.id] = m
+		h.p.order = append(h.p.order, h.id)
+		if len(h.p.order) > h.p.max {
+			delete(h.p.byID, h.p.order[0])
+			h.p.order = h.p.order[1:]
+		}
+	}
+	m[j] = r
+	if residueKept != nil {
+		residueKept()
+	}
+}
+
+// done drops a judged hop's residues.
+func (h *hopResidues) done() {
+	if h == nil {
+		return
+	}
+	h.p.mu.Lock()
+	defer h.p.mu.Unlock()
+	if _, ok := h.p.byID[h.id]; !ok {
+		return
+	}
+	delete(h.p.byID, h.id)
+	for i, id := range h.p.order {
+		if id == h.id {
+			h.p.order = append(h.p.order[:i], h.p.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// residueKept, when set (tests), is called after each residue is kept.
+var residueKept func()
 
 // DefaultMaxHopHeight is the tallest h_max verified unless configured: Level
 // 1 of a hop costs about 2^h_max word additions per root and sample, about
@@ -77,6 +159,11 @@ func (s SpecProofs) check(ctx context.Context, prev, cur Move) (ProofResult, str
 			return ProofInvalid, ReasonEnterHyperspaceProof + ": " + why
 		}
 	case ActHyperjump:
+		// For the block data PR: a ride the line cannot judge yet (as_of or
+		// B above the line's tip) must not become a permanent failure point
+		// (Known.FailAt, the gate's failed set): either answer it
+		// ProofUnchecked, or put the line's state (its tip) in Gate.rules so
+		// entries and failures made under a shorter line are not used.
 		if s.Line == nil {
 			return ProofUnchecked, "no line: a ride needs Bitcoin's block data (DECK-0001 §5.5)"
 		}
@@ -108,10 +195,15 @@ func (s SpecProofs) hop(ctx context.Context, cur Move) (ProofResult, string) {
 	if ceiling == 0 {
 		ceiling = DefaultMaxHopHeight
 	}
-	why, err := verifyHopLevel1(ctx, prev, from, to, tagValues(cur.Event, "proof")[0], first(mn), first(mp), ceiling)
-	if err != nil { // too tall (ErrHopTooTall), or cut short
+	var kept *hopResidues
+	if s.Progress != nil {
+		kept = &hopResidues{p: s.Progress, id: cur.Event.ID}
+	}
+	why, err := verifyHopLevel1Kept(ctx, prev, from, to, tagValues(cur.Event, "proof")[0], first(mn), first(mp), ceiling, kept)
+	if err != nil { // too tall (ErrHopTooTall), or cut short (its residues are kept)
 		return ProofUnchecked, err.Error()
 	}
+	kept.done()
 	if why != "" {
 		return ProofInvalid, ReasonHopProof + ": " + why
 	}

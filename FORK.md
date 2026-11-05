@@ -24,7 +24,7 @@ Conflicts can only happen in the few grain files this repo changes:
 
 | File | Change |
 |---|---|
-| `server/handlers/event.go` | `EventGate` admission hook after rate limits |
+| `server/handlers/event.go` | `EventGate` admission hook after rate limits; the gate's context carries the client address |
 | `server/handlers/req.go`, `server/handlers/count.go` | read-gate call after rate limits (hook lives in new `readgate.go`); `pagedTextSearch` pages with `PageCursor` |
 | `server/db/nostrdb/count.go`, `purge.go`, `expiration.go` | page with `PageCursor` (page sizes are variables so tests can cross page boundaries) |
 | `.gitmodules` | nostrdb from arkin0x/nostrdb `cyberspace/inclusive-until` until upstream takes the fix; keep ours on a conflict, then `git submodule sync` |
@@ -32,6 +32,7 @@ Conflicts can only happen in the few grain files this repo changes:
 | `server/startup.go` | installs the gate; watches `region.yml`; NIP-11 `restricted_writes`/`auth_required`; `httpGuard(mux)` |
 | `server/types/filter.go` | `MarshalJSON` (drops out once upstream takes the fix) |
 | `server/utils/log/components.go` | `region-gate` log component |
+| `server/utils/getClientIP.go` | `X-Forwarded-For` believed only from loopback and `GRAIN_TRUSTED_PROXIES`, rightmost untrusted hop |
 | `.gitignore` | nostrdb build outputs; deploy profile configs |
 
 Everything else this repo adds lives in new files. After merging, build and test:

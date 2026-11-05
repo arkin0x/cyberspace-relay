@@ -203,8 +203,8 @@ func TestRuling1008LateBranchChangesTheVerdict(t *testing.T) {
 	fork := *b
 	src := &fakeSource{events: []nostr.Event{b.spawn, h1}}
 	g := gateFor(t, ModeStructural, box, src)
-	now := time.Now()
-	g.now = func() time.Time { return now }
+	clock := &testClock{t: time.Now()}
+	g.now = clock.now
 	if ok, msg := g.Admit(ctx, s.sign(t, 1, 1)); !ok {
 		t.Fatalf("inside: %s", msg)
 	}
@@ -216,7 +216,7 @@ func TestRuling1008LateBranchChangesTheVerdict(t *testing.T) {
 	if ok, _ := g.Admit(ctx, s.sign(t, 1, 2)); !ok {
 		t.Fatal("within cache_ttl_seconds the cached admission still answers")
 	}
-	now = now.Add(601 * time.Second)
+	clock.add(601 * time.Second)
 	if ok, _ := g.Admit(ctx, s.sign(t, 1, 3)); ok {
 		t.Fatal("after the TTL the fork is seen: dead at the spawn coordinate, outside")
 	}

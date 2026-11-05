@@ -157,7 +157,7 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 	}
 
 	// Duplicate check, then the admission gate (admitNew says why in that order).
-	if ok, msg, notice := admitNew(evt, db.CheckDuplicateEvent, EventGate); !ok {
+	if ok, msg, notice := admitNew(gateContext(context.Background(), client), evt, db.CheckDuplicateEvent, EventGate); !ok {
 		response.SendOK(client, evt.ID, false, msg)
 		if notice != "" {
 			response.SendNotice(client, notice)
@@ -281,7 +281,7 @@ func isClientFacingReject(msg string) bool {
 // stored (and so already judged) must never reach it again. It returns false
 // with the OK message, and a notice to send after it, when the event is
 // refused.
-func admitNew(evt nostr.Event, isDuplicate func(nostr.Event) (bool, error), gate func(context.Context, nostr.Event) (bool, string)) (ok bool, msg, notice string) {
+func admitNew(ctx context.Context, evt nostr.Event, isDuplicate func(nostr.Event) (bool, error), gate func(context.Context, nostr.Event) (bool, string)) (ok bool, msg, notice string) {
 	duplicate, err := isDuplicate(evt)
 	if err != nil {
 		log.Event().Error("Error checking for duplicate event",
@@ -294,7 +294,7 @@ func admitNew(evt nostr.Event, isDuplicate func(nostr.Event) (bool, error), gate
 		return false, "duplicate: already have this event", fmt.Sprintf("event %s was rejected because the relay already stores it", evt.ID)
 	}
 	if gate != nil {
-		if ok, msg := gate(context.TODO(), evt); !ok {
+		if ok, msg := gate(ctx, evt); !ok {
 			log.Event().Info("Event rejected by event gate",
 				"event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
 			return false, msg, ""

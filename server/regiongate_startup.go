@@ -60,22 +60,26 @@ func startRegionGate() {
 	}
 	// No Bitcoin line is configured yet, so rides are left unchecked: strict
 	// mode does not trust them, structural mode does (docs/region-gate.md).
-	verifier := regiongate.Verifier{Proofs: regiongate.SpecProofs{MaxHopHeight: cfg.MaxHopVerifyHeight}, Signature: validation.CheckSignature}
+	verifier := regiongate.Verifier{Proofs: regiongate.SpecProofs{MaxHopHeight: cfg.MaxHopVerifyHeight, Progress: regiongate.NewHopProgress(256)}, Signature: validation.CheckSignature}
 	gate := regiongate.NewGate(cfg, verifier, sources...)
 	timeout := time.Duration(cfg.FetchTimeoutSeconds+2) * time.Second
 	handlers.EventGate = func(ctx context.Context, evt nostr.Event) (bool, string) {
-		ctx, cancel := context.WithTimeout(ctx, timeout)
+		ctx, cancel := context.WithTimeout(regiongate.WithClientIP(ctx, handlers.ClientIP(ctx)), timeout)
 		defer cancel()
 		return gate.Admit(ctx, evt)
 	}
 	if *cfg.GateReads {
-		handlers.ReadGate = gate.AdmitPubkey
+		handlers.ReadGate = func(ctx context.Context, pubkey string) (bool, string) {
+			return gate.AdmitPubkey(regiongate.WithClientIP(ctx, handlers.ClientIP(ctx)), pubkey)
+		}
 		handlers.LiveReadGate = gate.LiveAllowed
 		httpGuard = speakeasyHTTP
 	}
 	log.RegionGate().Info("Region gate enabled",
 		"chain_rules", regiongate.ChainRulesRevision, "mode", cfg.Mode, "gate_reads", *cfg.GateReads, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
-		"proof_checker", "SpecProofs (Level 1; rides unchecked: no Bitcoin line)", "max_hop_verify_height", cfg.MaxHopVerifyHeight)
+		"proof_checker", "SpecProofs (Level 1; rides unchecked: no Bitcoin line)", "max_hop_verify_height", cfg.MaxHopVerifyHeight,
+		"max_concurrent_lookups", cfg.MaxConcurrentLookups, "max_queued_lookups", cfg.MaxQueuedLookups, "max_queued_per_ip", cfg.MaxQueuedPerIP,
+		"check_timeout_seconds", cfg.CheckTimeoutSeconds, "max_cached_chains", cfg.MaxCachedChains)
 }
 
 // httpGuard wraps the HTTP handler. It is the identity unless the region gate
