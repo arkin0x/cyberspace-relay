@@ -48,14 +48,17 @@ type workQueue struct {
 	netUnits  map[string]int // units waiting, by network (IPv4 /24, IPv6 /48)
 	// classUnits are the units waiting, members' then anyone else's.
 	classUnits [2]int
-	running    int // workers running
+	seq        uint64 // jobs created so far
+	running    int    // workers running
 }
 
 // job is the work waiting or running for one pubkey.
 type job struct {
 	pubkey  string
 	ip      string
-	class   int // 0 a known member, 1 anyone else
+	class   int    // 0 a known member, 1 anyone else
+	network string // the network that queued it (networkBucket, or its address)
+	seq     uint64 // order of creation: the newest has the highest
 	waiters []*waiter
 	running bool
 }
@@ -152,15 +155,16 @@ func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, 
 			switch {
 			case class == 0:
 				// A member is never refused while anyone else holds work: it
-				// takes the place of the newest job of the address holding
+				// takes the place of the newest job of the network holding
 				// the most, or, when all of theirs is running already (and
-				// frees soon), goes over the cap by that much at most.
-				if !q.evict(pubkey, 1) && q.classUnits[1] == 0 {
+				// frees soon), goes over the cap by that much at most: once
+				// eviction fails, classUnits[1] is exactly the running part.
+				if !q.evict(pubkey, 1) && q.queued+units > q.max+q.classUnits[1] {
 					return nil, errBusy
 				}
 			case ip != "" && q.ipUnits[ip] == 0:
 				// An address with nothing waiting takes the place of the
-				// newest job of the address holding the most (which keeps
+				// newest job of the network holding the most (which keeps
 				// some), so every address gets in.
 				if !q.evict(pubkey, 2) {
 					return nil, errBusy
@@ -173,7 +177,12 @@ func (q *workQueue) enqueue(ip, pubkey string, incoming *nostr.Event) (*waiter, 
 	w := &waiter{incoming: incoming, ip: ip, network: network, class: class, units: units, done: make(chan struct{})}
 	q.hold(w)
 	if j == nil {
-		j = &job{pubkey: pubkey, ip: ip, class: class}
+		q.seq++
+		netKey := network
+		if netKey == "" {
+			netKey = "address " + ip
+		}
+		j = &job{pubkey: pubkey, ip: ip, class: class, network: netKey, seq: q.seq}
 		q.jobs[pubkey] = j
 		q.push(j)
 	}
@@ -357,53 +366,63 @@ func (q *workQueue) release(w *waiter) {
 }
 
 // evict drops the newest queued job (not one running) of a non-member,
-// from the address whose queued non-member jobs hold the most units, when
-// that address holds at least min of them; its waiters are told "busy, try
-// again", which is never cached. A job of pubkey itself is never dropped.
-// It reports whether one was.
+// from the network (IPv4 /24, IPv6 /48) whose queued non-member jobs hold
+// the most units, when that network holds at least min of them; its
+// waiters are told "busy, try again", which is never cached. Choosing by
+// network rather than by address means filling the door with one-unit
+// addresses takes as many networks as the queue holds units. A job of
+// pubkey itself is never dropped. It reports whether one was.
 func (q *workQueue) evict(pubkey string, min int) bool {
-	best, bestUnits := "", 0
+	units := map[string]int{}
 	for _, ip := range q.rings[1] {
-		units := 0
 		for _, j := range q.lines[1][ip] {
 			for _, w := range j.waiters {
-				units += w.units
+				units[j.network] += w.units
 			}
 		}
-		if units > bestUnits {
-			best, bestUnits = ip, units
+	}
+	best, bestUnits := "", 0
+	for n, u := range units {
+		if u > bestUnits || u == bestUnits && n < best {
+			best, bestUnits = n, u
 		}
 	}
 	if best == "" || bestUnits < min {
 		return false
 	}
-	line := q.lines[1][best]
-	for i := len(line) - 1; i >= 0; i-- {
-		j := line[i]
-		if j.pubkey == pubkey {
-			continue
-		}
-		q.lines[1][best] = append(line[:i:i], line[i+1:]...)
-		if len(q.lines[1][best]) == 0 {
-			delete(q.lines[1], best)
-			for k, a := range q.rings[1] {
-				if a == best {
-					q.rings[1] = append(q.rings[1][:k], q.rings[1][k+1:]...)
-					if k < q.turns[1] {
-						q.turns[1]--
-					}
-					break
-				}
+	var victim *job
+	at := -1
+	for _, ip := range q.rings[1] {
+		for i, j := range q.lines[1][ip] {
+			if j.network == best && j.pubkey != pubkey && (victim == nil || j.seq > victim.seq) {
+				victim, at = j, i
 			}
 		}
-		delete(q.jobs, j.pubkey)
-		for _, w := range j.waiters {
-			q.release(w)
-			w.ok, w.reason = false, errBusy
-			close(w.done)
-		}
-		j.waiters = nil
-		return true
 	}
-	return false
+	if victim == nil {
+		return false
+	}
+	ip := victim.ip
+	line := q.lines[1][ip]
+	q.lines[1][ip] = append(line[:at:at], line[at+1:]...)
+	if len(q.lines[1][ip]) == 0 {
+		delete(q.lines[1], ip)
+		for k, a := range q.rings[1] {
+			if a == ip {
+				q.rings[1] = append(q.rings[1][:k], q.rings[1][k+1:]...)
+				if k < q.turns[1] {
+					q.turns[1]--
+				}
+				break
+			}
+		}
+	}
+	delete(q.jobs, victim.pubkey)
+	for _, w := range victim.waiters {
+		q.release(w)
+		w.ok, w.reason = false, errBusy
+		close(w.done)
+	}
+	victim.waiters = nil
+	return true
 }

@@ -1479,7 +1479,7 @@ func TestMembersAreNeverRefusedAtAFullDoor(t *testing.T) {
 }
 
 // At a full door an address with nothing waiting takes the place of the
-// newest job of the address holding the most, so every address gets in; an
+// newest job of the network holding the most, so every address gets in; an
 // address that already has work waiting is refused, at once.
 func TestEveryAddressGetsInAtAFullDoor(t *testing.T) {
 	r := newBlockedRun()
@@ -1494,7 +1494,7 @@ func TestEveryAddressGetsInAtAFullDoor(t *testing.T) {
 	go q.submit(context.Background(), "203.0.113.7", "c1", nil)
 	waitFor(t, func() bool { return q.pending("c1") })
 	if q.pending("a3") || !q.pending("a2") {
-		t.Fatal("want the newest job of the fullest address (a3) to make room, and a2 kept")
+		t.Fatal("want the newest job of the fullest network (a3) to make room, and a2 kept")
 	}
 	for _, try := range []struct{ ip, pk string }{{"203.0.113.7", "c2"}, {"198.51.100.1", "a4"}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1584,5 +1584,57 @@ func TestNewcomerGetsInAmongAFlood(t *testing.T) {
 	t.Logf("newcomer among %d flooding addresses: %d tries, %d refused, worst wait %v", addrs, tries, refused, worst)
 	if refused > 0 || worst > 500*time.Millisecond {
 		t.Fatalf("a newcomer was refused %d of %d times (worst wait %v)", refused, tries, worst)
+	}
+}
+
+// Over the cap, members go only as far as the non-members' work already
+// running: the reviewer's probe (one slow unknown job holds the only
+// worker; 200 members from fresh /24s) stays within cap + that work.
+func TestMembersPastTheCapAreBounded(t *testing.T) {
+	release := make(chan struct{})
+	run := func(ctx context.Context, pubkey string, incoming *nostr.Event) (bool, string) {
+		if pubkey[0] == 'u' {
+			<-release
+		}
+		return true, ""
+	}
+	const capQ = 8
+	q := newWorkQueue(1, capQ, 8, 4, 30*time.Second, run)
+	q.member = func(pk string) bool { return pk[0] == 'm' }
+	defer close(release)
+	go q.submit(context.Background(), "198.51.100.1", "u0", nil)
+	waitFor(t, func() bool { q.mu.Lock(); defer q.mu.Unlock(); return q.running == 1 && len(q.rings[1]) == 0 })
+	admitted := 0
+	for i := 0; i < 200; i++ {
+		if w, refusal := q.enqueue(fmt.Sprintf("10.%d.%d.1", i/200, i%200), fmt.Sprintf("m%d", i), nil); refusal == "" && w != nil {
+			admitted++
+		}
+	}
+	q.mu.Lock()
+	queued, running := q.queued, q.classUnits[1]
+	q.mu.Unlock()
+	if queued > capQ+running || admitted != capQ {
+		t.Fatalf("cap %d with %d unknown unit running: %d members admitted, %d units queued; want %d and at most %d", capQ, running, admitted, queued, capQ, capQ+running)
+	}
+}
+
+// The job that makes room comes from the network holding the most queued
+// work, not the address: three one-unit addresses of one /24 outweigh one
+// address with two units elsewhere.
+func TestEvictionChoosesTheFullestNetwork(t *testing.T) {
+	r := newBlockedRun()
+	defer close(r.release)
+	q := newWorkQueue(1, 6, 8, 4, time.Second, r.run)
+	go q.submit(context.Background(), "192.0.2.1", "z0", nil)
+	<-r.started
+	for _, x := range []struct{ ip, pk string }{{"198.51.100.1", "b1"}, {"198.51.100.1", "b2"},
+		{"10.0.0.1", "n1"}, {"10.0.0.2", "n2"}, {"10.0.0.3", "n3"}} {
+		go q.submit(context.Background(), x.ip, x.pk, nil)
+		waitFor(t, func() bool { return q.pending(x.pk) })
+	}
+	go q.submit(context.Background(), "203.0.113.7", "c1", nil)
+	waitFor(t, func() bool { return q.pending("c1") })
+	if q.pending("n3") || !q.pending("b2") {
+		t.Fatalf("want the newest job of the fullest network (n3) to make room, b2 kept: n3 %v b2 %v", q.pending("n3"), q.pending("b2"))
 	}
 }
