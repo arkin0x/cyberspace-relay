@@ -242,6 +242,27 @@ type Known struct {
 	// StopAt is the proof strict mode stopped at, which the checker could
 	// not judge for the reason StopWhy.
 	StopAt, StopWhy string
+	// LineWait, when not 0, is the lowest block height a ride the walk left
+	// unchecked was waiting for (the line had not reached it). Once the
+	// line holds it, the proofs this Known answers as unchecked are asked
+	// again; those it answers as verified stay verified.
+	LineWait uint64
+	// rules is the gate's rules a checkpoint was made under (saveProgress);
+	// under others it is not used.
+	rules string
+}
+
+// lineAware is a ProofChecker that checks rides against a line that grows
+// (SpecProofs).
+type lineAware interface {
+	LineState() string
+	LineReached(height uint64) bool
+}
+
+// lineReached reports whether the line now holds the height kn waits for.
+func lineReached(p ProofChecker, kn *Known) bool {
+	la, ok := p.(lineAware)
+	return ok && kn != nil && kn.LineWait > 0 && la.LineReached(kn.LineWait)
 }
 
 // verify is VerifyContext with what earlier walks established (the one
@@ -395,6 +416,9 @@ type walker struct {
 	known                      *Known
 	knownPassed, knownVerified int
 	failed                     func(id string) (reason, stopped string, ok bool)
+	// lineWait is the lowest height a ride this walk left unchecked waits
+	// for (Known.LineWait).
+	lineWait uint64
 }
 
 // step walks chain event i, cur, of a chain of length events. It returns
@@ -474,6 +498,9 @@ func (k *walker) step(ctx context.Context, i, length int, cur Move) (bool, error
 			}
 			return invalid(code, "proof: "+why)
 		case ProofUnchecked:
+			if h, ok := awaitedHeight(why); ok && (k.lineWait == 0 || h < k.lineWait) {
+				k.lineWait = h
+			}
 			if k.stopAtUnchecked {
 				vd.Unchecked = length - i
 				vd.Stopped = fmt.Sprintf("stopped at event %s, whose proof cannot be judged (%s): nothing after it can move a strict position", cur.Event.ID, why)
@@ -504,13 +531,18 @@ func (k *walker) step(ctx context.Context, i, length int, cur Move) (bool, error
 // at Known.StopAt.
 func (k *walker) knownProof(i int, cur Move) (ProofResult, string, bool) {
 	kn := k.known
+	grown := lineReached(k.proofs, kn)
 	switch {
 	case kn == nil:
 		return 0, "", false
-	case kn.StopAt == cur.Event.ID:
-		return ProofUnchecked, kn.StopWhy, true
 	case i <= k.knownPassed && i <= k.knownVerified:
 		return ProofVerified, "", true
+	case grown:
+		// The line has grown to a block a ride was waiting for: whatever
+		// was left unchecked is asked again.
+		return 0, "", false
+	case kn.StopAt == cur.Event.ID:
+		return ProofUnchecked, kn.StopWhy, true
 	case i <= k.knownPassed:
 		return ProofUnchecked, "left unchecked by an earlier walk of this chain", true
 	}
@@ -546,7 +578,14 @@ func (k *walker) atHead() bool { return k.vd.Reason == "" && k.stopAt == "" }
 
 // knowledge is what this walk established, for a later walk of the same chain.
 func (k *walker) knowledge() *Known {
-	kn := &Known{Genesis: k.genesis, Passed: k.passed, Verified: k.vd.VerifiedEvent, StopAt: k.stopAt, StopWhy: k.stopWhy}
+	kn := &Known{Genesis: k.genesis, Passed: k.passed, Verified: k.vd.VerifiedEvent, StopAt: k.stopAt, StopWhy: k.stopWhy, LineWait: k.lineWait}
+	// Unchecked answers taken from an earlier walk still wait for what
+	// that walk waited for, until the line holds it (then they were asked
+	// again, and lineWait has what they wait for now).
+	if old := k.known; old != nil && old.Genesis == k.genesis && old.LineWait > 0 && !lineReached(k.proofs, old) &&
+		(kn.LineWait == 0 || old.LineWait < kn.LineWait) {
+		kn.LineWait = old.LineWait
+	}
 	if k.vd.Reason != "" && k.vd.Reason != ReasonFork && k.vd.InvalidIndex > 0 {
 		kn.FailAt, kn.FailReason, kn.Stopped = k.vd.InvalidAt, k.vd.Reason, k.vd.Stopped
 	}

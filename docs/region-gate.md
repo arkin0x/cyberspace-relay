@@ -107,7 +107,8 @@ and the note of 2026-11-05). Per pubkey it keeps:
 | chain genesis id (and its `created_at`) | the active chain; a newer spawn starts a new one |
 | highest validated `created_at` | the next check asks only for events newer than this, less a look-back |
 | head event id, and the position it leaves the identity at in each mode | a region check is one comparison; strict mode reads the proof-verified position |
-| rules revision (`ChainRulesRevision`, the mode and `max_hop_verify_height`) | an entry made under other rules or settings is not used |
+| rules revision (`ChainRulesRevision`, the mode, `max_hop_verify_height`, and the line's state: its source and how many times it has reorganized) | an entry made under other rules or settings, or on another line, is not used; failures in the failed set are kept with their rules too |
+| the lowest block height a ride left unchecked waits for (`Known.LineWait`) | once the line holds it the entry is stale at once and the chain is read again, whatever the cache's life |
 | failure point: the event where the chain stopped being valid, and why | a chain invalid at an event is answered from the cache, and its proof is never checked again |
 | strict stop point: the first proof strict mode could not judge | nothing after it can move a strict position, so nothing after it is checked |
 | the ids seen in the look-back window | an event already accounted for is skipped when fetched again |
@@ -385,6 +386,9 @@ Beside them, from the real network and the spec:
 | Test | File | What |
 |---|---|---|
 | `TestRealChainVectors` | `chain-rules-2026-10-08-residue-openings-real.json` | 12 real chains read from `wss://cyberspace.nostr1.com` on 2026-11-04 (9 valid, 3 frozen by unlisted version 1 sidesteps), each with the reference verifier's verdict under the real lists and no line; a chain that rides is cut before its first ride. Each vector names its identity. Copied unchanged from the root of arkin0x/cyberspace (arkin0x/cyberspace#87, sha256 `54fc6318…`), which is canonical: every implementation tests against that one file (owner ruling 2026-11-05). |
+| `TestRealRideVectors` | `chain-rules-2026-10-08-residue-openings-real-rides.json` | the whole active chains of the 14 identities that board or ride, read from `wss://relay.onosendai.tech` on 2026-11-05 (10 valid, 4 invalid; a chain invalid at event i is kept to i), each with the reference's verdict (cyberspace-cli af6eee8) against Bitcoin mainnet's line 0 to 974,696; and all 21 real rides judged alone (`verify_ride_event`), the 5 with `mn` among them. The line in the file is sparse: the 162 blocks the reference read and every stop as near each boarding as its station, so a station computed over it is the reference's, and the test fails if the gate reads a block it lacks. `REGIONGATE_REF_LINE=<line.tsv>` runs them again on the whole line through `AnchorLine`'s station index (`TestRealRideVectorsOnTheWholeLine`). |
+| `TestLandfall*`, `TestDecimalAgreesWithPython` | `landfall-mainnet-sample.json`, `decimal-ops.json` | the DECK's 8 golden landfalls, 1,000 mainnet landfalls, and 3,115 operations of Python's decimal module at precisions 96 and 28 with exact halves among them. `REGIONGATE_REF_LINE` compares every landfall of a whole line: on mainnet 0 to 974,696, 487,278 landfalls, none different. |
+| `TestAnchorLineLoadsMainnet` | (`REGIONGATE_ANCHORS=<jsonl>`) | loads the line from real anchors, signatures checked and landfalls derived, and logs time and memory; with `REGIONGATE_REF_LINE` every stop is compared with the reference's; `REGIONGATE_FALLBACK=1` fills gaps from mempool.space (network). |
 | `TestRealProofs` | `real-proofs-2026-11-04.json` | 124 real proof-bearing events (version 2 hops at every h_max seen, every sidestep with `mn`, every boarding, one of which is invalid), each with the reference's verdict. `REGIONGATE_REAL_PROOFS=<path>` runs the full set of 553 in its place. |
 | `TestResidue*` | `hop-residue-vectors.json` | the spec's machine-readable vectors of residue openings (§5.10): primes, roots modulo p, residues, attempts, prices, sizes and 26 Level 1 verdicts. |
 | `TestParseRegionPathVectors` | `region-prefix-vectors.json` | 64 region strings (43 valid), each with its box (per-axis min, max, height and size, and the plane or none) and points inside and outside it: what `relay.onosendai.tech/<hex>` names, which is exactly what `www.onosendai.tech/C/<hex>` names (speakeasy ruling D7). Written from ONOSENDAI's own route code (origin/v2 `366e9df`, `src/lib/coordRoute.ts`) by `onosendai-region-vectors.ts`. Copied unchanged from the root of arkin0x/cyberspace (arkin0x/cyberspace#88), which is canonical; `TestRegionVectorsAreTheSpecCopy` holds the copy to its sha256 (`4dc1cca6…`). |
@@ -392,10 +396,11 @@ Beside them, from the real network and the spec:
 
 The tools that made and cross-check these files are in
 `server/regiongate/testdata/tools/`: `fetch-chains.mjs` (read only, a
-throwaway AUTH key), `build-real-vectors.py` and `real-proofs.py` (expected
-verdicts from the reference verifier), `reference-verdicts.py` (the reference
-over any vectors file) and `onosendai-run-vectors.ts` (ONOSENDAI's own chain
-review, `buildChain` and `firstBreak` from origin/v2, over any vectors file), and `onosendai-region-vectors.ts` (writes
+throwaway AUTH key), `build-real-vectors.py`, `build-ride-vectors.py` and
+`real-proofs.py` (expected verdicts from the reference verifier),
+`decimal-ops.py` (cases from Python's decimal), `reference-verdicts.py` (the reference
+over any vectors file), `onosendai-run-vectors.ts` (ONOSENDAI's own chain
+review, `buildChain` and `firstBreak` from origin/v2, over any vectors file) and `onosendai-region-vectors.ts` (writes
 `region-prefix-vectors.json` from ONOSENDAI's `parseCoordRoute` and
 `prefixRegion`).
 
@@ -419,11 +424,10 @@ NIP-01 hash.
 Two things leave a proof unchecked instead of judged, as the reference raises
 instead of giving a verdict:
 
-- **A ride, when no `Line` is configured.** Checking a ride needs Bitcoin
-  mainnet's block line: every stop up to `as_of` for the station, the stop of
-  `B`, and the hashes of the sampled blocks. `regiongate.Line` is the seam;
-  `StaticLine` holds a line in memory (the vectors use it). No production
-  source is wired yet, so every ride is unchecked.
+- **A ride the line cannot judge yet**: its `as_of` or `B` is above the
+  line's tip (see The Bitcoin line), or `check_rides` is off. This is never a
+  failure: the identity is not frozen, nothing goes into the failed set, and
+  once the line holds the height the chain is checked again at once.
 - **A hop taller than `max_hop_verify_height`** (default 24, at most 65) that passes its
   form and its price. Level 1 costs about 2^h_max word additions per sampled
   residue and root; the price, checked first, costs one attempt.
@@ -431,7 +435,7 @@ instead of giving a verdict:
 | Mode | A proof the checker cannot judge |
 |---|---|
 | `strict` (default) | not trusted: the identity stands where the chain left it before that proof. Someone who rode since their last spawn stands where they boarded. |
-| `structural` | trusted: the identity stands at its head. With no line a ride lands wherever its `C` says, so a speakeasy must not run in this mode. |
+| `structural` | trusted: the identity stands at its head. A ride the line cannot judge yet lands wherever its `C` says, so a speakeasy must not run in this mode. |
 
 An invalid proof makes the chain invalid in both modes. In strict mode the walk
 also stops at the first proof it cannot judge, since nothing after it can move
@@ -459,13 +463,71 @@ ceiling stays at 24 in this revision; the owner's ruling raises it to 30.
 | a real sidestep with `mn` (14) / a real boarding (37) | median 0.21 ms / 0.15 ms, max 1.0 ms / 6.4 ms |
 | the 16 residues of a hop, one tall axis (three tall axes), single core | h16 1.7 ms (5.3 ms); h20 17 ms (51 ms); h24 0.30 s (0.73 s); h28 4.7 s (16 s) |
 | the exact temporal tree of a sidestep or boarding | K8 0.1 ms, K12 1.0 ms, K16 27 ms |
-| an exact ride tree (attempt: h16; leaves: h6 to h22) | h14 19 ms, h16 0.13 s, h18 1.1 s, h20 8.6 s |
+| an exact ride tree (attempt: h16; leaves: h6 to h22), with FFT squaring | h16 90 ms, h18 0.48 s, h20 2.4 s, h22 14 s and 370 MB at its peak (math/big alone: h20 7.9 s, h22 about a minute) |
+| the 5 real rides with `mn` (101 to 661,038 blocks), unloaded | 1.7 s to 4.1 s each (the reference: 15 s to 83 s) |
+| a ride on mainnet: 32 samples at their expected cost / the costliest any ride can force | about 2.2 s / about 18.5 s: a ride of 32 blocks or fewer pays no re-roll price, so its 32 samples can be made to cover all of its blocks, and the costliest 32 consecutive blocks on the line (724,409 to 724,440) take that long; only 13 blocks are h22. Across as many deadlines as it takes (checkpoints). |
 | the owner's whole history (11,311 events held, 1,832 on the active chain, 1,795 hops) | 0.51 s, mostly signatures |
 | other real histories (8 to 517 events) | 0.6 ms to 158 ms |
 
 From h_max 20 a hop's 16 residues run in parallel. Signatures are checked only
 on the events resolution reads (the spawns and the events naming the newest
 one as genesis): on the owner's history that skips 9,476 of 11,311.
+
+## The Bitcoin line
+
+Rides (DECK-0001) are checked against Bitcoin mainnet's line, which
+`AnchorLine` (`server/regiongate/line.go`) builds from the block anchor
+events (kind 321) that `line_publisher` signed, as this relay's own store
+holds them (owner ruling 2026-11-05: our NTH publisher, `c6e74d44…`). A ride
+needs, from the line: every stop up to `as_of` for the station (§4.2), the
+stop of `B` (§5.5 step 2), and the hashes of its sampled blocks (§5.3).
+
+- **Reading.** The line asks the store for heights by name (a `#B` filter of
+  500 heights), never by paging with `until`: a backfill signs thousands of
+  anchors in one second. An answer that fills the store's cap is asked again
+  in halves. It reads up to past the highest anchored height, then every
+  `line_poll_seconds` (default 30) asks for the heights above its tip.
+- **Each anchor**, as `cyberspace_core.hyperspace.resolve_stop` resolves it
+  (§2.2, §2.3): its signature checked (the import does not check them);
+  `C`, `B`, `H` and `P` exactly once and `M` at most once; without `M`, `C`
+  is the merkle root; a port's stop is its merkle root; a landfall's stop is
+  always derived here from `H` (§1.2, `landfall.go`, the CYBERSPACE_V2 §9.5
+  decimal arithmetic in `decimal.go`), and with `M` it must equal `C`.
+- **One chain.** Each block must name the one below it as `P`, so the line
+  is a chain of block hashes. Where two anchored chains part, the longer wins
+  and a tie keeps the line, as a Bitcoin node does; a change below the tip is
+  a reorganization, which changes the line's state in the gate's rules, so
+  no verdict or failure made on the old line is used again, and a check that
+  a reorganization cut across keeps nothing.
+- **Gaps.** The line stops at the first height no anchor covers. With
+  `line_fallback: true`, a gap of up to 64 blocks between two anchors is
+  filled from block headers (`line_fallback_urls`, by default mempool.space
+  and blockstream.info): each is fetched by the hash the anchor above names
+  as `P`, must hash to it, and the lowest must name the line's tip, so the
+  source is trusted for nothing.
+- **The station** is the sorted lookup of §4.4: the stops ordered by
+  coordinate (plane bit aside, ties by height), a segment tree of the least
+  height over any run, and a binary search on the shared prefix; the heights
+  added since the last rebuild (every 4,096) are scanned. 4 µs on the whole
+  line.
+- **Not reached yet.** A ride whose `as_of` or `B` is above the tip is left
+  unchecked, waiting for that height, never failed (owner ruling 2026-11-05).
+  The reference judges against mainnet's whole line, where such a ride is
+  invalid until Bitcoin reaches the height; this line lags mainnet, so here
+  it means only that the answer is not known yet. Only a line that is the
+  whole of its world (the golden vectors' synthetic `StaticLine`) says such a
+  ride is invalid, as the reference does.
+- **The work.** Samples on one block are computed once; the sampled blocks
+  are computed cheapest first, so a forged root fails on the cheapest leaf;
+  squaring is by FFT (`bigfft`) from 8,192 words; one leaf of h20 or more is
+  computed at a time in the whole process; and a check cut short by its
+  deadline keeps its G, its finished leaves and the one tall tree in progress
+  (`RideProgress`, by event id and block hash), so the next check goes on
+  from there.
+
+Measured on mainnet 0 to 974,696 (975k real anchors): loading, signatures
+and 487,278 landfalls on 8 workers, 63 s; the line then holds 78 MB; every
+stop equals the reference's.
 
 ## Region forms
 
@@ -490,17 +552,22 @@ shared vectors above lock every rule.
 
 ## Known limits
 
-- Rides are not checked until a Bitcoin line is configured (see Proofs). In
-  strict mode an identity that rode since its last spawn stands where it
-  boarded, so it is admitted only if that is inside the region.
+- The line lags mainnet: the publisher anchors a block at six confirmations,
+  and the line stops at the first height no anchor covers (on 2026-11-05 the
+  relay lacks 12 anchors, 962,775 to 962,863, so without `line_fallback` the
+  line ends at 962,774 and every ride with a later `as_of` or `B` waits). A
+  ride that waits leaves its rider, in strict mode, where they boarded.
 - Version 1 sidesteps (one opening path per axis, §6.15) are invalid and on
   no list. Census 2026-11-04 on nostr1: 98 of them, by 16 identities, from
   2026-08-25 to 2026-09-07, the owner's main key among them. A chain with one
   on it is frozen just before it. ONOSENDAI does not check incoming proofs,
   so it shows those chains as valid.
-- An exact Cantor tree (a sidestep's or a boarding's temporal tree, a ride's
-  leaves and attempt) is built with Go's math/big, which has no FFT
-  multiplication: a ride leaf at h20 to h22 costs seconds to a minute.
+- A ride's leaves are exact Cantor trees whose roots reach 32 MB (h22). A
+  forged ride costs its sender nothing and costs the gate its cheapest
+  sampled leaf, and a short ride over the costliest blocks forces those
+  leaves (at most about 18.5 s of one core on mainnet): one such check per
+  throwaway key, bounded by the work queue and the failed set, as a forged
+  tall hop is.
 
 - An admitted author stays admitted for `cache_ttl_seconds` even if they move
   out through another relay. A move published here re-verifies at once.

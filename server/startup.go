@@ -339,7 +339,7 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 	handlers.OnEventStored = BroadcastEvent
 
 	// Optional admission gate (region.yml).
-	startRegionGate()
+	startRegionGate(ctx)
 
 	// Initialize client package with server configuration. This must happen
 	// BEFORE InitializePubkeyCache because the initial blacklist refresh

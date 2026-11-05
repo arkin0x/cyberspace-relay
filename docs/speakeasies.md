@@ -63,6 +63,7 @@ Per pubkey, store:
 2. **The relay migration is finished**, and relay.onosendai.tech is canonical.
 3. **The grain build stack-size fix is merged** (the musl thread stack overflow found in the 11-04 import).
 4. **Region strings agree.** The relay reads `/0fe6b3deeb67e952f852e8c1df15` as exactly the same cube as ONOSENDAI's `/C/0fe6b3deeb67e952f852e8c1df15` (prefix length to cube size, axis interleaving). There should be one shared test-vector file.
+5. **The relay checks rides** (owner ruling 2026-11-05, prerequisite B): the Bitcoin line from the relay's own kind 321 anchors by our publisher, the landfall math in Go, and Level 1 of ride proofs, with a ride the line has not reached yet left unchecked, never failed. See "The Bitcoin line" in `docs/region-gate.md`.
 
 ## 6. Open decisions (one at a time)
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"time"
@@ -17,10 +18,13 @@ import (
 
 const regionConfigFile = "region.yml"
 
+var errNoDB = errors.New("the store is not open yet")
+
 // startRegionGate installs the region gate when region.yml exists and is
-// enabled. An invalid region.yml fails closed: every event is refused until
+// enabled; ctx is the server instance's, which ends on a restart (the
+// Bitcoin line's loader stops with it). An invalid region.yml fails closed: every event is refused until
 // it is fixed, because an open relay is the wrong failure for a gated one.
-func startRegionGate() {
+func startRegionGate(ctx context.Context) {
 	handlers.EventGate = nil
 	handlers.ReadGate = nil
 	handlers.LiveReadGate = nil
@@ -58,9 +62,35 @@ func startRegionGate() {
 			AuthKey: key,
 		})
 	}
-	// No Bitcoin line is configured yet, so rides are left unchecked: strict
-	// mode does not trust them, structural mode does (docs/region-gate.md).
-	verifier := regiongate.Verifier{Proofs: regiongate.SpecProofs{MaxHopHeight: cfg.MaxHopVerifyHeight, Progress: regiongate.NewHopProgress(256)}, Signature: validation.CheckSignature}
+	proofs := regiongate.SpecProofs{MaxHopHeight: cfg.MaxHopVerifyHeight, Progress: regiongate.NewHopProgress(256), RideProgress: regiongate.NewRideProgress(256)}
+	lineState := "rides unchecked: check_rides is off"
+	if *cfg.CheckRides {
+		// The line is built in the background from this relay's own block
+		// anchors; until it holds the heights a ride needs, the ride is left
+		// unchecked and its chain is checked again once it does
+		// (docs/region-gate.md).
+		lcfg := regiongate.AnchorLineConfig{
+			Publisher: cfg.LinePublisher,
+			Query: func(f []nostr.Filter, limit int) ([]nostr.Event, error) {
+				db := nostrdb.GetDB()
+				if db == nil {
+					return nil, errNoDB
+				}
+				return db.Query(f, limit)
+			},
+			MaxResults: nostrdb.MaxQueryResults,
+			Signature:  validation.CheckSignature,
+			Log:        func(msg string, args ...any) { log.RegionGate().Info(msg, args...) },
+		}
+		if cfg.LineFallback {
+			lcfg.Fallback = regiongate.HTTPHeaders{Bases: cfg.LineFallbackURLs}
+		}
+		line := regiongate.NewAnchorLine(lcfg)
+		proofs.Line = line
+		go line.Run(ctx, time.Duration(cfg.LinePollSeconds)*time.Second)
+		lineState = "rides checked against " + line.Name()
+	}
+	verifier := regiongate.Verifier{Proofs: proofs, Signature: validation.CheckSignature}
 	gate := regiongate.NewGate(cfg, verifier, sources...)
 	timeout := time.Duration(cfg.FetchTimeoutSeconds+2) * time.Second
 	handlers.EventGate = func(ctx context.Context, evt nostr.Event) (bool, string) {
@@ -77,7 +107,7 @@ func startRegionGate() {
 	}
 	log.RegionGate().Info("Region gate enabled",
 		"chain_rules", regiongate.ChainRulesRevision, "mode", cfg.Mode, "gate_reads", *cfg.GateReads, "regions", len(cfg.Regions), "chain_relays", len(cfg.ChainRelays),
-		"proof_checker", "SpecProofs (Level 1; rides unchecked: no Bitcoin line)", "max_hop_verify_height", cfg.MaxHopVerifyHeight,
+		"proof_checker", "SpecProofs (Level 1; "+lineState+")", "line_fallback", cfg.LineFallback, "max_hop_verify_height", cfg.MaxHopVerifyHeight,
 		"max_concurrent_lookups", cfg.MaxConcurrentLookups, "max_queued_lookups", cfg.MaxQueuedLookups, "max_queued_per_ip", cfg.MaxQueuedPerIP,
 		"check_timeout_seconds", cfg.CheckTimeoutSeconds, "max_cached_chains", cfg.MaxCachedChains)
 }

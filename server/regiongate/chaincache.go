@@ -238,13 +238,15 @@ type failedSet struct {
 	order [][32]byte
 }
 
-type failure struct{ reason, stopped string }
+// A failure is kept with the rules it was found under: a ride's can rest
+// on the line, which a reorganization changes.
+type failure struct{ reason, stopped, rules string }
 
 func newFailedSet() *failedSet { return &failedSet{byID: map[[32]byte]failure{}} }
 
 // Only proof failures are kept: they are what costs a check, and a flood
 // of structural junk (cheap to find again) cannot push them out.
-func (f *failedSet) add(kn *Known) {
+func (f *failedSet) add(kn *Known, rules string) {
 	if kn == nil || kn.FailAt == "" || !proofReasons[kn.FailReason] {
 		return
 	}
@@ -252,10 +254,13 @@ func (f *failedSet) add(kn *Known) {
 	if !ok {
 		return
 	}
-	if _, in := f.byID[k]; in {
+	if x, in := f.byID[k]; in {
+		if x.rules != rules {
+			f.byID[k] = failure{kn.FailReason, kn.Stopped, rules}
+		}
 		return
 	}
-	f.byID[k] = failure{kn.FailReason, kn.Stopped}
+	f.byID[k] = failure{kn.FailReason, kn.Stopped, rules}
 	f.order = append(f.order, k)
 	if len(f.order) > maxFailed {
 		delete(f.byID, f.order[0])
@@ -263,20 +268,20 @@ func (f *failedSet) add(kn *Known) {
 	}
 }
 
-func (f *failedSet) get(id string) (failure, bool) {
+func (f *failedSet) get(id, rules string) (failure, bool) {
 	k, ok := eventKey(id)
 	if !ok {
 		return failure{}, false
 	}
 	x, in := f.byID[k]
-	return x, in
+	return x, in && x.rules == rules
 }
 
 // failedEvent is the failed set's lookup, for walks.
 func (g *Gate) failedEvent(id string) (string, string, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	f, ok := g.failed.get(id)
+	f, ok := g.failed.get(id, g.rules())
 	return f.reason, f.stopped, ok
 }
 
@@ -291,6 +296,7 @@ func (g *Gate) saveProgress(pubkey string, k *walker) {
 		return
 	}
 	kn := k.knowledge()
+	kn.rules = g.rules()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if _, in := g.progress[pubkey]; !in {
@@ -309,6 +315,9 @@ func (g *Gate) knownFor(pubkey string, e *chainEntry) []*Known {
 	g.mu.Lock()
 	p := g.progress[pubkey]
 	g.mu.Unlock()
+	if p != nil && p.rules != g.rules() {
+		p = nil // made on another line (a reorganization since)
+	}
 	var out []*Known
 	if p != nil {
 		if e != nil && e.known != nil && e.known.Genesis == p.Genesis {
@@ -318,6 +327,9 @@ func (g *Gate) knownFor(pubkey string, e *chainEntry) []*Known {
 			}
 			if merged.StopAt == "" {
 				merged.StopAt, merged.StopWhy = e.known.StopAt, e.known.StopWhy
+			}
+			if merged.LineWait == 0 || e.known.LineWait > 0 && e.known.LineWait < merged.LineWait {
+				merged.LineWait = e.known.LineWait
 			}
 			p = &merged
 		}
@@ -334,7 +346,7 @@ func (g *Gate) knownFor(pubkey string, e *chainEntry) []*Known {
 // and every event the check held.
 func (g *Gate) newEntry(vd Verdict, k *walker, chain []Move, held []nostr.Event) *chainEntry {
 	now := g.now()
-	e := &chainEntry{rules: g.rules, checkedAt: now, wholeAt: now, vd: summary(vd), seen: map[[32]byte]int64{}}
+	e := &chainEntry{rules: g.rules(), checkedAt: now, wholeAt: now, vd: summary(vd), seen: map[[32]byte]int64{}}
 	if !vd.HasChain {
 		return e
 	}
@@ -452,7 +464,9 @@ type outcome struct {
 // or none. It reads the chain whole when there is no entry, when the entry
 // holds no chain, or once a day; otherwise it checks only what is new.
 func (g *Gate) refresh(ctx context.Context, pubkey string, e *chainEntry, incoming *nostr.Event) outcome {
-	if e == nil || !e.vd.HasChain || g.now().Sub(e.wholeAt) >= resyncAfter {
+	// An entry whose walk left a ride waiting for a height the line now
+	// holds is read whole, so the ride is judged (Known.LineWait).
+	if e == nil || !e.vd.HasChain || g.now().Sub(e.wholeAt) >= resyncAfter || lineReached(g.verifier.Proofs, e.known) {
 		return g.whole(ctx, pubkey, incoming, nil, g.knownFor(pubkey, e), e)
 	}
 	return g.extend(ctx, pubkey, e, incoming)

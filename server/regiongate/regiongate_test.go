@@ -663,13 +663,13 @@ func TestGateBoundsLookupsAndCache(t *testing.T) {
 	waitFor(t, func() bool { return !g.queue.pending(other.pubkey) })
 	for i := 0; i < 20; i++ {
 		g.mu.Lock()
-		g.chains.put(strings.Repeat("0", 60)+strconv.Itoa(1000+i), &chainEntry{rules: g.rules}, true)
+		g.chains.put(strings.Repeat("0", 60)+strconv.Itoa(1000+i), &chainEntry{rules: g.rules()}, true)
 		g.mu.Unlock()
 	}
 	g.mu.Lock()
 	n := g.chains.members.order.Len()
-	newest := g.chains.get(strings.Repeat("0", 60)+"1019", g.rules) != nil
-	oldest := g.chains.get(strings.Repeat("0", 60)+"1000", g.rules) != nil
+	newest := g.chains.get(strings.Repeat("0", 60)+"1019", g.rules()) != nil
+	oldest := g.chains.get(strings.Repeat("0", 60)+"1000", g.rules()) != nil
 	g.mu.Unlock()
 	if n != 8 || !newest || oldest {
 		t.Fatalf("want 8 members, the newest kept and the oldest dropped: %d %v %v", n, newest, oldest)
