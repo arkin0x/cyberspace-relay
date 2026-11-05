@@ -522,7 +522,8 @@ func (s *heightStore) query(filters []nostr.Filter, limit int) ([]nostr.Event, e
 // them), signatures checked and landfalls derived, and logs the time, the
 // memory and where it stops. With REGIONGATE_REF_LINE every stop is
 // compared with the reference's; with REGIONGATE_FALLBACK=1 gaps are filled
-// from mempool.space and blockstream.info (network).
+// from mempool.space and blockstream.info (network); with REGIONGATE_RIDES=1
+// the real ride vectors run on the loaded line.
 func TestAnchorLineLoadsMainnet(t *testing.T) {
 	path := os.Getenv("REGIONGATE_ANCHORS")
 	if path == "" {
@@ -594,5 +595,14 @@ func TestAnchorLineLoadsMainnet(t *testing.T) {
 			}
 		}
 		t.Logf("%d stops compared with the reference, %d differ", min(uint64(len(rows)), tip+1), bad)
+	}
+	// REGIONGATE_RIDES=1: the real ride vectors on the line just loaded,
+	// which must reach at least the vectors' tip.
+	if os.Getenv("REGIONGATE_RIDES") == "1" {
+		f := loadRealRides(t)
+		if tip < f.Line.Tip {
+			t.Fatalf("the line ends at %d, below the vectors' tip %d", tip, f.Line.Tip)
+		}
+		runRealRides(t, f, l)
 	}
 }
