@@ -187,7 +187,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		hints := []string{urlB, strings.Replace(urlB, "127.0.0.1", "localhost", 1), wsBase + "/0X" + strings.ToUpper(idB) + "/"}
 		for _, h := range hints {
 			if code, leaked := anon("/api/v1/events/" + secret.ID + "?relays=" + url.QueryEscape(h)); leaked {
-				t.Fatalf("anonymous /api/v1/events/{id}?relays=%s: %d, leaked", h, code)
+				t.Errorf("anonymous /api/v1/events/{id}?relays=%s: %d, leaked", h, code)
 			}
 		}
 		// The member logs in to the web client and tries to answer the
@@ -208,14 +208,16 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		resp.Body.Close()
 		var reqs []struct{ Relay, Challenge string }
 		json.Unmarshal(ab, &reqs)
-		challenge := "none-held"
+		challenge, relay := "none-held", urlB
 		for _, r := range reqs {
 			if strings.HasSuffix(strings.TrimRight(r.Relay, "/"), "/"+idB) {
-				t.Fatalf("the web client holds a challenge from the speakeasy %s: it dialed it", r.Relay)
+				// Go on with it, as the member would, to show what it leaks.
+				t.Errorf("the web client holds a challenge from the speakeasy %s: it dialed it", r.Relay)
+				challenge, relay = r.Challenge, r.Relay
 			}
 		}
 		authEvt := kAB.sign(t, 22242, "", []string{"relay", urlB}, []string{"challenge", challenge})
-		sb, _ := json.Marshal(map[string]any{"relay": urlB, "event": authEvt})
+		sb, _ := json.Marshal(map[string]any{"relay": relay, "event": authEvt})
 		resp, err = web.Post(base+"/api/v1/client/auth", "application/json", bytes.NewReader(sb))
 		if err != nil {
 			t.Fatal(err)
@@ -223,7 +225,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		rb, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if strings.Contains(string(rb), `"success":true`) {
-			t.Fatalf("the web client answered a speakeasy's AUTH: %s", rb)
+			t.Errorf("the web client answered a speakeasy's AUTH: %s", rb)
 		}
 		t.Logf("WEBAPI member AUTH through the web client: %s", strings.TrimSpace(string(rb)))
 		time.Sleep(time.Second)
@@ -235,7 +237,8 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		} {
 			code, leaked := anon(p)
 			if leaked {
-				t.Fatalf("anonymous %s: %d, the speakeasy's note leaked", p, code)
+				t.Errorf("anonymous %s: %d, the speakeasy's note leaked", strings.Replace(p, secret.ID, "<secret id>", 1), code)
+				continue
 			}
 			t.Logf("WEBAPI anonymous %s: %d, leaked=false", strings.Replace(p, secret.ID, "<secret id>", 1), code)
 		}
