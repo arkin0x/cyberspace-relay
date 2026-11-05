@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"github.com/0ceanslim/grain/config"
-	"github.com/0ceanslim/grain/server/db/nostrdb"
 	"github.com/0ceanslim/grain/server/handlers/response"
 	nostr "github.com/0ceanslim/grain/server/types"
 	"github.com/0ceanslim/grain/server/utils/log"
@@ -84,14 +83,21 @@ func HandleCount(client nostr.ClientInterface, message []interface{}) {
 
 	sendPrefixMatchNotice(client, filters)
 
-	db := nostrdb.GetDB()
-	if db == nil {
+	scope := ScopeOf(client)
+	db, release, err := acquireDB(scope)
+	if err != nil {
+		if scope != nil {
+			log.Req().Warn("Speakeasy database not available for COUNT", "sub_id", subID, "path", scope.Path, "error", err)
+			response.SendClosed(client, subID, "error: "+err.Error())
+			return
+		}
 		log.Req().Error("Database not available for COUNT", "sub_id", subID)
 		response.SendClosed(client, subID, "error: database not available")
 		return
 	}
 
 	count, approximate, err := db.CountFiltered(filters)
+	release()
 	if err != nil {
 		log.Req().Error("COUNT query failed", "sub_id", subID, "error", err)
 		response.SendClosed(client, subID, "error: could not count events")

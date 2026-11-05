@@ -114,9 +114,18 @@ func VerifyAuthEvent(client nostr.ClientInterface, evt nostr.Event) error {
 		return errors.New("invalid: challenge does not match or is missing")
 	}
 
-	cfg := config.GetConfig().Auth
-	if !relayurl.Match(relayURL, cfg.RelayURL, relayurl.ParseMode(cfg.RelayURLMatch)) {
-		return errors.New("invalid: relay URL does not match")
+	// A speakeasy's AUTH names its own URL, compared strictly (the path is
+	// significant), so an AUTH for one speakeasy is never one for another or
+	// for the root. The root keeps its configured match.
+	if s := ScopeOf(client); s != nil {
+		if s.RelayURL == "" || !relayurl.Match(relayURL, s.RelayURL, relayurl.ModeStrict) {
+			return errors.New("invalid: relay URL does not match")
+		}
+	} else {
+		cfg := config.GetConfig().Auth
+		if !relayurl.Match(relayURL, cfg.RelayURL, relayurl.ParseMode(cfg.RelayURLMatch)) {
+			return errors.New("invalid: relay URL does not match")
+		}
 	}
 
 	if !validation.CheckSignature(evt) {
