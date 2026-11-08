@@ -76,7 +76,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	kinds := onosendaiKinds(t)
 	// Every kind a client publishes to the canonical relay (kind audit,
 	// 2026-11-05: ONOSENDAI, cyberspace-mcp, NTH; cyberspace-cli, snocrash and
-	// HOSAKA publish nothing here).
+	// HOSAKA publish nothing here; glyphbyte added 2026-11-08).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -95,6 +95,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		10002: "relay lists",
 		10050: "DM inbox relay lists",
 		10063: "Blossom server lists",
+		1738:  "glyphbyte cairns",
+		35129: "glyphbyte napplet",
 	}
 	for k, what := range published {
 		if !kinds[k] {
