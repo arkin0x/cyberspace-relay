@@ -16,6 +16,7 @@ region.)
 | 23330 | ephemeral chat envelope (relayed, never stored); its 23333 line rides inside it, never bare | anyone |
 | 23334 | TV watching ping (ephemeral, never stored); without it every TV set reads 1 WATCHING | anyone |
 | 33340, 3367 | item listings (the ITEM FEED, DECK-0004 §4), color palettes objects name by nevent (DECK-0003 §1.3b) | anyone |
+| 1738, 35129 | glyphbyte: cairns (one URL, found by event-id prefix) and the glyphbyte napplet | anyone |
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
 
@@ -33,6 +34,10 @@ the droplet"). `config/deploy_onosendai_test.go` checks that this table,
 23334, 33340, 3367 and 10000 were added on 2026-11-05, from a kind audit of
 every client before the cutover (ONOSENDAI #606): ONOSENDAI publishes all four
 here, and the relay refused them.
+
+1738 and 35129 were added on 2026-11-08 for glyphbyte (arkinox: "make sure
+the onosendai relay accepts glyphbyte event kinds"). glyphbyte's notes
+without a link are kind 1 and stay refused under the kind 1 ruling.
 
 ## Rate limits
 
