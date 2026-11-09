@@ -1,6 +1,6 @@
 # Speakeasies on relay.onosendai.tech: design (2026-11-04)
 
-Status: **all 7 decisions ruled 2026-11-04; not started.** The owner's vision is from 2026-11-04. Build starts with the prerequisites (section 5), then the PR plan (section 7).
+Status: **all 7 decisions ruled 2026-11-04; PR plan steps 1 to 3 merged (#11, #15, #19, #21) and ride checks merged (#20); steps 4 to 6 in progress (2026-11-09).** The owner's vision is from 2026-11-04. Build starts with the prerequisites (section 5), then the PR plan (section 7).
 
 ## 1. The owner's vision (his words, 2026-11-04)
 
@@ -112,3 +112,12 @@ The #11 review found a CPU attack: once proofs are checked, re-sending one expen
 - **#11 decision 2 RULED (2026-11-05): Bitcoin block data before launch.** No speakeasy launches until the relay checks rides: a block data source, the landfall math in Go, and ride proof checks (probably GMP for the large proofs). Riders get their true position from day one. This becomes a prerequisite (section 5) and a PR before Create Speakeasy.
 - **#11 decision 3 RULED (2026-11-05): hop ceiling 30 after PR 2.** Stays 24 until the chain cache and queue land; raise to 30 (HOSAKA's tallest) only after measuring that re-sending a forged tall hop costs one check in total.
 - **#11 decision 5 RULED (2026-11-05): shared real-chain vectors live at the spec repo root** (arkin0x/cyberspace), next to the normative vectors; every implementation (relay, ONOSENDAI, CLI, MCP) tests against that one file. Spec PR, the owner merges.
+
+## Rulings 2026-11-09 (applied under "apply my recommendations"; the owner said "Speaky forward")
+
+- **A prefix speakeasy spans both planes**, as ONOSENDAI's `/C/` draws a prefix in the viewer's plane.
+- **Reorganization depth cap: 6 blocks.** Once loaded, the Bitcoin line refuses a reorganization that displaces more than 6 anchored blocks, keeps its chain, and logs for the operator (#20 decision 9; `docs/region-gate.md`, "The Bitcoin line").
+- **The per-network queue limit (32 units per /24 or /48) is accepted** as is, though it also slows campus and carrier NAT networks.
+- **Short paths are huge regions** (membership there is nearly free). Noted only; the price is the same; revisit if abused.
+- **D2 detail:** NWC limited to make_invoice and lookup_invoice; the relay makes the invoice itself; the connection string is a secret file outside the repo, never logged, rotatable.
+- **Prices:** 1,000 sats for a speakeasy, 7,000 sats for a name.

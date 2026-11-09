@@ -36,6 +36,21 @@ import (
 // line are not used (Gate.rules). The publisher anchors a block only once it
 // has six confirmations, so this should not happen.
 //
+// Once loaded, the line accepts a reorganization only if it displaces at
+// most MaxReorgDepth blocks (owner ruling 2026-11-09: 6). Since anchors
+// come at six confirmations, a deeper one would mean a mainnet
+// reorganization more than a dozen blocks deep, which has not happened
+// since 2013, so it is far more likely a leaked publisher key rewriting
+// history: the line keeps its chain, reports it through Alert once per
+// rival tip, drops the rival's blocks, and needs the operator.
+//
+// The cap protects only history below the tip. A leaked key can still
+// extend the tip with fake blocks (they link to the real tip, so they are
+// no reorganization), and once more than MaxReorgDepth of them are on the
+// line, the cap keeps the real chain from displacing them. An update that
+// appends more than MaxReorgDepth blocks at once is therefore reported
+// through Alert too: the operator should check them against a Bitcoin node.
+//
 // A height no anchor covers, between two that do, can be filled from block
 // headers fetched from a public source (Fallback): each header is fetched by
 // the hash the anchor above names as previous and must hash to it, so the
@@ -55,7 +70,36 @@ type AnchorLine struct {
 
 	update sync.Mutex // one Load or Update at a time
 	gapLog uint64     // the gap last logged, so each is logged once
+	// refused holds the deep rivals already reported (fork height and
+	// rival tip), so each is reported once, not at every poll.
+	refused map[[2]uint64]bool
+	// The stuck path (blocks at the tip that do not link) re-reads below
+	// the tip when what sits at the tip changed (stuckSig), when the store
+	// holds anchors signed after the newest one read (newest), or at least
+	// every stuckEvery polls (stuckPolls): never at every poll for nothing,
+	// never missing a reorganization for good. Touched under update.
+	stuckSig   string
+	stuckPolls int
+	newest     int64
+	// fillFailed holds when each block above a gap last failed to lead
+	// down to the tip through the fallback, for the tip in fillTip: it is
+	// asked again only after fillRetry, not at every poll (a rival's block
+	// never will; a fallback that was down may next time). Like stuckSig,
+	// touched only by fill, which runs under update (Load, Update): so it
+	// needs no lock of mu's, though fill reads it while holding mu's read
+	// lock for the line itself.
+	fillFailed map[[32]byte]time.Time
+	fillTip    uint64
 }
+
+// stuckEvery is the most polls the stuck path waits between re-reads when
+// nothing it can see has changed: anchors below the tip signed before the
+// newest one read are only found this way.
+const stuckEvery = 10
+
+// fillRetry is how long a block that failed to fill a gap waits before the
+// fallback is asked about it again.
+const fillRetry = 5 * time.Minute
 
 // AnchorLineConfig configures an AnchorLine.
 type AnchorLineConfig struct {
@@ -73,9 +117,21 @@ type AnchorLineConfig struct {
 	MaxFallbackGap int
 	// Workers derive landfalls and check signatures; default half the cores.
 	Workers int
+	// MaxReorgDepth is the most blocks a reorganization may displace once
+	// the line is loaded. Default DefaultMaxReorgDepth.
+	MaxReorgDepth int
 	// Log reports progress and problems; nil is silent.
 	Log func(msg string, args ...any)
+	// Alert reports what needs the operator (a refused deep
+	// reorganization); nil uses Log.
+	Alert func(msg string, args ...any)
 }
+
+// DefaultMaxReorgDepth is the deepest reorganization a loaded line accepts
+// (owner ruling 2026-11-09). The publisher anchors at six confirmations, so
+// displacing even one anchored block already takes a deep mainnet
+// reorganization.
+const DefaultMaxReorgDepth = 6
 
 // HeaderSource returns the 80-byte header of the block with a given hash.
 // Nothing it returns is trusted: the line checks that the header hashes to
@@ -104,7 +160,13 @@ func NewAnchorLine(cfg AnchorLineConfig) *AnchorLine {
 	if cfg.Workers <= 0 {
 		cfg.Workers = max(1, runtime.GOMAXPROCS(0)/2)
 	}
-	return &AnchorLine{cfg: cfg, pending: map[uint64][]anchorBlock{}}
+	if cfg.MaxReorgDepth <= 0 {
+		cfg.MaxReorgDepth = DefaultMaxReorgDepth
+	}
+	if cfg.Alert == nil {
+		cfg.Alert = cfg.Log
+	}
+	return &AnchorLine{cfg: cfg, pending: map[uint64][]anchorBlock{}, refused: map[[2]uint64]bool{}}
 }
 
 func (l *AnchorLine) log(msg string, args ...any) {
@@ -265,6 +327,10 @@ func isCanonicalHeight(s string) bool {
 // when the anchor carries M, §2.3). Events that fail are reported and left
 // out.
 func (l *AnchorLine) resolveAnchors(evs []nostr.Event) []anchorBlock {
+	// An anchor whose block is already on the line at its height is not
+	// checked again (signature, landfall): add would drop it anyway, and a
+	// re-read below the tip returns about 1,000 of them.
+	onLine := l.snapshotHashes()
 	out := make([]anchorBlock, len(evs))
 	okAt := make([]bool, len(evs))
 	var wg sync.WaitGroup
@@ -275,7 +341,7 @@ func (l *AnchorLine) resolveAnchors(evs []nostr.Event) []anchorBlock {
 			defer wg.Done()
 			for i := range next {
 				ev := evs[i]
-				if ev.Kind != KindBlockAnchor || ev.PubKey != l.cfg.Publisher {
+				if ev.Kind != KindBlockAnchor || ev.PubKey != l.cfg.Publisher || alreadyOnLine(ev, onLine) {
 					continue
 				}
 				if l.cfg.Signature != nil && !l.cfg.Signature(ev) {
@@ -335,6 +401,9 @@ func (l *AnchorLine) readHeights(from, to uint64) ([]nostr.Event, error) {
 	evs, err := l.cfg.Query([]nostr.Filter{{Authors: []string{l.cfg.Publisher}, Kinds: []int{KindBlockAnchor}, Tags: map[string][]string{"B": names}}}, limit)
 	if err != nil {
 		return nil, err
+	}
+	for _, e := range evs {
+		l.newest = max(l.newest, e.CreatedAt)
 	}
 	if len(evs) >= limit {
 		if from == to {
@@ -426,9 +495,23 @@ func (l *AnchorLine) Update(ctx context.Context) error {
 	}
 	l.add(l.resolveAnchors(evs))
 	l.mu.RLock()
-	stuck := len(l.pending[uint64(len(l.hashes))]) > 0
+	atTip := l.pending[uint64(len(l.hashes))]
+	sig := fmt.Sprint(uint64(len(l.hashes)), len(atTip))
+	for _, b := range atTip {
+		sig += hex.EncodeToString(b.hash[:4])
+	}
 	l.mu.RUnlock()
+	stuck := len(atTip) > 0
 	if stuck && next > 0 {
+		l.stuckPolls++
+		fresh, err := l.freshAnchors()
+		if err != nil {
+			return err
+		}
+		stuck = sig != l.stuckSig || fresh || l.stuckPolls >= stuckEvery
+	}
+	if stuck && next > 0 {
+		l.stuckSig, l.stuckPolls = sig, 0
 		// A block above the tip names something else as previous: read
 		// the recent blocks again, competing anchors included.
 		from := uint64(0)
@@ -444,8 +527,27 @@ func (l *AnchorLine) Update(ctx context.Context) error {
 	l.fill(ctx)
 	l.mu.Lock()
 	l.reindex(false)
+	grown := uint64(len(l.hashes)) - next
 	l.mu.Unlock()
+	if len(l.snapshotHashes()) > 0 && next > 0 && grown > uint64(l.cfg.MaxReorgDepth) && l.cfg.Alert != nil {
+		// Normal after downtime or a republished gap; also what a leaked
+		// key extending the tip with fake blocks looks like.
+		l.cfg.Alert("line: one update appended more blocks than the reorganization cap; check them against a Bitcoin node (the cap would keep fake ones)",
+			"from_height", next, "blocks", grown, "max_depth", l.cfg.MaxReorgDepth)
+	}
 	return nil
+}
+
+// freshAnchors reports whether the store holds anchors by the publisher
+// signed after the newest one read: one indexed question for one event.
+// Called under update.
+func (l *AnchorLine) freshAnchors() (bool, error) {
+	since := time.Unix(l.newest+1, 0)
+	evs, err := l.cfg.Query([]nostr.Filter{{Authors: []string{l.cfg.Publisher}, Kinds: []int{KindBlockAnchor}, Since: &since}}, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(evs) > 0, nil
 }
 
 // Run loads the line, then updates it every interval until ctx ends.
@@ -492,6 +594,21 @@ func (l *AnchorLine) pendingCount() int {
 		n += len(bs)
 	}
 	return n
+}
+
+// alreadyOnLine reports whether an anchor names (by B and H) a block that
+// is on the line at that height.
+func alreadyOnLine(ev nostr.Event, onLine [][32]byte) bool {
+	bs, hs := tagValues(ev, "B"), tagValues(ev, "H")
+	if len(bs) != 1 || len(hs) != 1 {
+		return false
+	}
+	h, err := strconv.ParseUint(bs[0], 10, 64)
+	if err != nil || h >= uint64(len(onLine)) || strconv.FormatUint(h, 10) != bs[0] {
+		return false
+	}
+	raw, err := hex.DecodeString(hs[0])
+	return err == nil && len(raw) == 32 && [32]byte(raw) == onLine[h]
 }
 
 // ── linking ──────────────────────────────────────────────────────────────
@@ -602,12 +719,24 @@ func (l *AnchorLine) longest(starts []anchorBlock) []anchorBlock {
 
 // reorganize replaces the top of the line with a longer pending chain that
 // parts from it below the tip, if there is one. The blocks it displaces go
-// to pending. Called with mu held.
+// to pending. Once the line is loaded, a chain that would displace more
+// than MaxReorgDepth blocks is refused and reported (once per rival tip): the
+// line keeps its chain. During Load the cap does not apply, since the line
+// is still being built in batches of heights and a rival read in one batch
+// may only prove longer in the next. Called with mu held.
 func (l *AnchorLine) reorganize() bool {
 	tip := uint64(len(l.hashes))
 	var bestFork uint64
 	var best []anchorBlock
-	for h, bs := range l.pending {
+	// Map order is random; walk the fork heights in order so the result
+	// and the reports never depend on it.
+	heights := make([]uint64, 0, len(l.pending))
+	for h := range l.pending {
+		heights = append(heights, h)
+	}
+	slices.Sort(heights)
+	for _, h := range heights {
+		bs := l.pending[h]
 		if h == 0 || h >= tip {
 			continue
 		}
@@ -621,6 +750,20 @@ func (l *AnchorLine) reorganize() bool {
 			continue
 		}
 		chain := l.longest(starts)
+		if end := h + uint64(len(chain)); end > tip && l.loaded && tip-h > uint64(l.cfg.MaxReorgDepth) {
+			if key := [2]uint64{h, end}; !l.refused[key] {
+				l.refused[key] = true
+				if l.cfg.Alert != nil {
+					l.cfg.Alert("line: REFUSED a reorganization deeper than the cap; the line keeps its chain and needs the operator (a leaked publisher key?)",
+						"from_height", h, "depth", tip-h, "max_depth", l.cfg.MaxReorgDepth, "tip", tip-1, "rival_tip", end-1,
+						"rival_hash", hex.EncodeToString(chain[len(chain)-1].hash[:]))
+				}
+			}
+			// Refused for good: drop its blocks, so they neither block
+			// the fallback at the tip nor keep the stuck path re-reading.
+			l.dropPending(chain)
+			continue
+		}
 		if h+uint64(len(chain)) > tip && (best == nil || h+uint64(len(chain)) > bestFork+uint64(len(best))) {
 			bestFork, best = h, chain
 		}
@@ -644,7 +787,30 @@ func (l *AnchorLine) reorganize() bool {
 	l.epoch++
 	l.index = nil
 	l.log("line: reorganized", "from_height", bestFork, "old_tip", tip-1, "new_tip", len(l.hashes)-1, "epoch", l.epoch)
+	if depth := tip - bestFork; !l.loaded && depth > uint64(l.cfg.MaxReorgDepth) && l.cfg.Alert != nil {
+		// The cap does not apply while loading, but the operator should
+		// know the store holds a fork that deep.
+		l.cfg.Alert("line: the load took a reorganization deeper than the cap; check the anchors (a leaked publisher key?)",
+			"from_height", bestFork, "depth", depth, "max_depth", l.cfg.MaxReorgDepth, "new_tip", len(l.hashes)-1)
+	}
 	return true
+}
+
+// dropPending removes blocks from pending. Called with mu held.
+func (l *AnchorLine) dropPending(blocks []anchorBlock) {
+	for _, b := range blocks {
+		rest := l.pending[b.height][:0]
+		for _, p := range l.pending[b.height] {
+			if p.hash != b.hash {
+				rest = append(rest, p)
+			}
+		}
+		if len(rest) == 0 {
+			delete(l.pending, b.height)
+		} else {
+			l.pending[b.height] = rest
+		}
+	}
 }
 
 // ── the fallback ─────────────────────────────────────────────────────────
@@ -667,14 +833,24 @@ func (l *AnchorLine) fill(ctx context.Context) {
 				above, ok = h, true
 			}
 		}
-		var top anchorBlock
-		if ok {
-			top = l.pending[above][0]
+		// fillTip and fillFailed are fill's own, under update (see the type).
+		if l.fillTip != tip || l.fillFailed == nil {
+			l.fillTip, l.fillFailed = tip, map[[32]byte]time.Time{}
 		}
-		atTip := len(l.pending[tip]) > 0
+		var tops []anchorBlock
+		if ok {
+			for _, b := range l.pending[above] {
+				if failed, seen := l.fillFailed[b.hash]; !seen || time.Since(failed) >= fillRetry {
+					tops = append(tops, b)
+				}
+			}
+		}
+		// Only a block at the tip that links to it closes the gap; a rival
+		// sitting there (named another previous) must not stop the fill.
+		atTip := slices.ContainsFunc(l.pending[tip], func(b anchorBlock) bool { return b.prev == tipHash })
 		l.mu.RUnlock()
-		if !ok || atTip {
-			return
+		if !ok || atTip || len(tops) == 0 {
+			return // nothing above, the tip linked, or every candidate failed for this tip
 		}
 		if l.cfg.Fallback == nil || above-tip > uint64(l.cfg.MaxFallbackGap) {
 			if l.gapLog != tip {
@@ -683,7 +859,18 @@ func (l *AnchorLine) fill(ctx context.Context) {
 			}
 			return
 		}
-		blocks, err := l.headersDown(ctx, top.prev, above-1, tip, tipHash)
+		// Each block anchored just above the gap, in turn: one may be a
+		// rival's, whose headers do not lead down to the tip.
+		var blocks []anchorBlock
+		var err error
+		for _, top := range tops {
+			if blocks, err = l.headersDown(ctx, top.prev, above-1, tip, tipHash); err == nil {
+				break
+			}
+			if ctx.Err() == nil {
+				l.fillFailed[top.hash] = time.Now() // not again for a while
+			}
+		}
 		if err != nil {
 			l.log("line: fallback did not fill the gap", "missing_from", tip, "next_anchored", above, "error", err.Error())
 			return

@@ -616,12 +616,41 @@ stop of `B` (§5.5 step 2), and the hashes of its sampled blocks (§5.3).
   a reorganization, which changes the line's state in the gate's rules, so
   no verdict or failure made on the old line is used again, and a check that
   a reorganization cut across keeps nothing.
+- **Reorganization cap** (owner ruling 2026-11-09). Once loaded, the line
+  takes a reorganization only if it displaces at most 6 blocks
+  (`DefaultMaxReorgDepth`). Anchors come at six confirmations, so a deeper
+  one means a mainnet reorganization more than a dozen blocks deep, which
+  has not happened since 2013; it is far more likely a leaked publisher key
+  rewriting history. The line keeps its chain and goes on growing along it
+  (a gap above it is still filled from headers), drops the rival's blocks,
+  and logs `line: REFUSED a reorganization deeper than the cap` at error
+  level once per rival tip. The cap does not apply while the line loads,
+  since it is built in batches of heights and a rival may prove longer only
+  in a later batch; a reorganization deeper than the cap during the load is
+  logged at error level (`line: the load took a reorganization deeper than
+  the cap`).
+- **What the cap does not protect.** It protects only history below the
+  tip. A leaked key can still extend the tip with fake blocks: they link to
+  the real tip, so they are no reorganization, and once more than 6 of them
+  are on the line, the cap keeps the real chain from displacing them. An
+  update that appends more than 6 blocks at once is therefore logged at
+  error level (`line: one update appended more blocks than the
+  reorganization cap`); that is also normal after downtime or a republished
+  gap, so the operator checks those blocks against a Bitcoin node.
 - **Gaps.** The line stops at the first height no anchor covers. With
   `line_fallback: true`, a gap of up to 64 blocks between two anchors is
   filled from block headers (`line_fallback_urls`, by default mempool.space
   and blockstream.info): each is fetched by the hash the anchor above names
   as `P`, must hash to it, and the lowest must name the line's tip, so the
-  source is trusted for nothing.
+  source is trusted for nothing. A block above the gap whose headers do not lead
+  down to the tip (a rival's) is asked about again only after 5 minutes,
+  not at every poll.
+- **Blocks at the tip that do not link** (a rival, or a block whose parent
+  is not read yet) make the line read the 1,000 heights below the tip
+  again: when what sits at the tip changed, when the store holds anchors
+  signed after the newest one read (one indexed question), and at least
+  every 10 polls, since anchors signed earlier but stored later are found
+  only that way.
 - **The station** is the sorted lookup of §4.4: the stops ordered by
   coordinate (plane bit aside, ties by height), a segment tree of the least
   height over any run, and a binary search on the shared prefix; the heights
@@ -736,3 +765,7 @@ shared vectors above lock every rule.
   daily whole read, or at once if it is published here.
 - The chain cache is in memory: after a restart every identity's chain is
   read and checked whole again at its first check.
+- A refused deep reorganization is refused only by a running line. A
+  restart reads the store again, where the longer anchored chain wins. After
+  the refusal log, the operator must remove the rival anchors (or change
+  `line_publisher`, if the key leaked) before the next restart.
