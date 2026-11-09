@@ -624,11 +624,22 @@ stop of `B` (§5.5 step 2), and the hashes of its sampled blocks (§5.3).
   (`DefaultMaxReorgDepth`). Anchors come at six confirmations, so a deeper
   one means a mainnet reorganization more than a dozen blocks deep, which
   has not happened since 2013; it is far more likely a leaked publisher key
-  rewriting history. The line keeps its chain and goes on growing along it,
+  rewriting history. The line keeps its chain and goes on growing along it
+  (a gap above it is still filled from headers), drops the rival's blocks,
   and logs `line: REFUSED a reorganization deeper than the cap` at error
   level once per rival tip. The cap does not apply while the line loads,
   since it is built in batches of heights and a rival may prove longer only
-  in a later batch.
+  in a later batch; a reorganization deeper than the cap during the load is
+  logged at error level (`line: the load took a reorganization deeper than
+  the cap`).
+- **What the cap does not protect.** It protects only history below the
+  tip. A leaked key can still extend the tip with fake blocks: they link to
+  the real tip, so they are no reorganization, and once more than 6 of them
+  are on the line, the cap keeps the real chain from displacing them. An
+  update that appends more than 6 blocks at once is therefore logged at
+  error level (`line: one update appended more blocks than the
+  reorganization cap`); that is also normal after downtime or a republished
+  gap, so the operator checks those blocks against a Bitcoin node.
 - **Gaps.** The line stops at the first height no anchor covers. With
   `line_fallback: true`, a gap of up to 64 blocks between two anchors is
   filled from block headers (`line_fallback_urls`, by default mempool.space

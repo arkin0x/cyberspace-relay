@@ -111,6 +111,9 @@ func (rt *speakeasyRuntime) servePage(w http.ResponseWriter, r *http.Request) bo
 		}
 		region, canonical = parsed, "/"+parsed.Hex
 	}
+	// The same URL answers a websocket, NIP-11 or this page by its
+	// headers: a cache must keep them apart.
+	w.Header().Add("Vary", "Accept")
 	if path != canonical {
 		http.Redirect(w, r, canonical, http.StatusMovedPermanently)
 		return true

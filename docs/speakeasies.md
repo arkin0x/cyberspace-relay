@@ -112,7 +112,7 @@ While speakeasies are open, a browser at `relay.onosendai.tech/<region>` (a GET 
 | How to join: head in the region, add the address, AUTH (NIP-42), share it | fixed copy |
 | A link to the same region in ONOSENDAI (`www.onosendai.tech/C/<hex>`) | |
 
-Any region string gets the page, registered or not. Another spelling of a region (case, `0x`, trailing `/`, escapes) is a 301 to the canonical path. A path that is not a region goes on to grain's usual handlers. The page uses grain's theme (its saved palette, tokens and fonts), with the grain palette as fallback where those files are not served. It is served ahead of the root region gate's HTTP guard: it shows nothing a speakeasy's NIP-11 does not.
+Any region string gets the page, registered or not. It answers with `Vary: Accept`, since the same URL is also the speakeasy's websocket and NIP-11. Another spelling of a region (case, `0x`, trailing `/`, escapes) is a 301 to the canonical path. A path that is not a region goes on to grain's usual handlers. The page uses grain's theme (its saved palette, tokens and fonts), with the grain palette as fallback where those files are not served. It is served ahead of the root region gate's HTTP guard: it shows nothing a speakeasy's NIP-11 does not.
 
 ### Discovery: `GET /.well-known/cyberspace-speakeasies?coord=<64 hex>`
 
@@ -121,7 +121,7 @@ ONOSENDAI asks this to show a position's speakeasies (step 7). The contract:
 | Case | Answer |
 |---|---|
 | A coordinate (64 hex, either case) | `200` `{"speakeasies":[{"region":"<normalized hex>","name":<string or null>,"url":"wss://relay.onosendai.tech/<region>","created_at":<unix>}]}` |
-| Order | every registered speakeasy whose region holds the coordinate, the longest region string (the smallest region) first, then by region |
+| Order | every registered speakeasy whose region holds the coordinate, the longest region string (the smallest region) first. Found by the coordinate's 64 hex prefixes (64 map lookups, about 3 µs with 100,000 registered), never by scanning the registry |
 | Planes | a prefix speakeasy holds the coordinate in either plane (the `planes` setting, default both); a 64-character speakeasy only in its own |
 | Nothing holds it, none registered, or speakeasies off | `200` `{"speakeasies":[]}` |
 | A bad or missing `coord` | `400` `{"error":"..."}` |

@@ -164,6 +164,9 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 	if public == "" {
 		return closed("no public URL: set public_url in speakeasies.yml or auth.relay_url in config.yml", nil)
 	}
+	if err := speakeasy.CheckPublicURL(public); err != nil {
+		return closed("the public URL (public_url, or auth.relay_url) is not a websocket URL", err)
+	}
 
 	sources, err := gateSources(sc.GateConfig)
 	if err != nil {
