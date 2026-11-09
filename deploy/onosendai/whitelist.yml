@@ -26,6 +26,7 @@ kind_whitelist:
     - "3333"   # movement chain (spawn, hops, sidesteps, hyperspace)
     - "33330"  # hidden bags (h tag is a height, never a NIP-29 group)
     - "33331"  # objects (SNO shards)
+    - "33335"  # sealed entries: one entry of a hidden bag as its own event (spec §7.6, cyberspace #89)
     - "11333"  # avatars
     - "23330"  # ephemeral chat envelope (not stored); its 23333 line rides inside, never bare
     - "321"    # block anchors (DECK-0001), from the NTH publisher: the hyperspace stops
