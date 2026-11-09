@@ -69,6 +69,7 @@ are independent.
 | `/` | the root relay | the root relay, unchanged |
 | `/C/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
 | the bare `/<region>`, `/c/<region>`, or another spelling after `/C/` (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11 and the page: 301 to `/C/<region>` (`Vary: Accept`); websocket: 400 naming the `/C/` address |
+| `/C` or `/C/` alone | the root relay | 404 for every request type (it names no region) |
 | another spelling of a registered region (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11: 301 to the one URL; websocket: 400 naming it |
 | any other path | the root relay | websocket, NIP-11, NIP-86: 404 "not a relay" |
 | a browser (GET or HEAD, `Accept` with `text/html`) at `/C/<region>` for any region string | grain's usual handlers | the region dashboard (step 4; the bare `/<region>`, `/c/` and other spellings 301 to `/C/<region>`) |

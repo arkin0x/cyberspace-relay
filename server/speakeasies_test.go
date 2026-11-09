@@ -510,8 +510,8 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 				t.Fatalf("unregistered path %s NIP-11: want 404, got %d", p, code)
 			}
 		}
-		// (A bare "/C" or "/C/" reads as the region "c", and is sent to /C/c.)
-		for _, p := range []string{"/C/" + idA + "/x", "/C/zz", "/C//" + idA} {
+		// /C and /C/ alone name nothing: 404, not the region "c".
+		for _, p := range []string{"/C/" + idA + "/x", "/C/zz", "/C//" + idA, "/C", "/C/"} {
 			if code, _, _ := nip11(t, r.root+p); code != 404 {
 				t.Fatalf("%s NIP-11: want 404, got %d", p, code)
 			}

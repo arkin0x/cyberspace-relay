@@ -109,6 +109,7 @@ The owner: "yes /C/ for speakeasies on the relay". A region's speakeasy is `wss:
 |---|---|
 | `/C/<hex>` (canonical) | the speakeasy: websocket, NIP-11, and the page for a browser |
 | bare `/<hex>`, `/c/<hex>`, or another spelling after `/C/` (case, `0x`, trailing `/`, escapes) | browser or NIP-11: 301 to `/C/<hex>` with `Vary: Accept`; websocket: 400 naming the `/C/` address (no redirect: AUTH signs the exact URL) |
+| `/C` or `/C/` alone (no region after the prefix) | 404 for every request type: it names nothing, not the region `c` (which is at `/C/c`) |
 
 The lowercase `/c/` is treated strictly, as any other non-canonical spelling: never served, only redirected (browsers) or refused (websockets), so no AUTH is ever signed for a second URL of one speakeasy. The string after `/C/` is read by the same `ParseRegionPath` rules and shared vectors as before.
 
