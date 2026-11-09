@@ -101,6 +101,35 @@ Each PR gets an independent adversarial review. PR 5 and anything that touches m
 - **D6 (2026-11-04):** any kind except kinds the relay blocks outright. A speakeasy is a private room, and access is already gated by location.
 - **D7 (2026-11-04):** the region in the URL is exactly ONOSENDAI's `/C/` hex-prefix form, so relay.onosendai.tech/<hex> is the same cube as www.onosendai.tech/C/<hex>. One shared test-vector file keeps the two in step.
 
+## The region dashboard and discovery (step 4, 2026-11-09)
+
+While speakeasies are open, a browser at `relay.onosendai.tech/<region>` (a GET or HEAD whose `Accept` has `text/html`; a websocket upgrade or NIP-11 request is still the speakeasy) gets a read-only page:
+
+| Shows | From |
+|---|---|
+| Region hex, size, planes, each axis's first and last gibson, the low corner | `regiongate.ParseRegionPath`, as ONOSENDAI's `/C/` reads it |
+| Speakeasy or not; its relay address; since when; its name, once one is reserved | the registry |
+| How to join: head in the region, add the address, AUTH (NIP-42), share it | fixed copy |
+| A link to the same region in ONOSENDAI (`www.onosendai.tech/C/<hex>`) | |
+
+Any region string gets the page, registered or not. Another spelling of a region (case, `0x`, trailing `/`, escapes) is a 301 to the canonical path. A path that is not a region goes on to grain's usual handlers. The page uses grain's theme (its saved palette, tokens and fonts), with the grain palette as fallback where those files are not served. It is served ahead of the root region gate's HTTP guard: it shows nothing a speakeasy's NIP-11 does not.
+
+### Discovery: `GET /.well-known/cyberspace-speakeasies?coord=<64 hex>`
+
+ONOSENDAI asks this to show a position's speakeasies (step 7). The contract:
+
+| Case | Answer |
+|---|---|
+| A coordinate (64 hex, either case) | `200` `{"speakeasies":[{"region":"<normalized hex>","name":<string or null>,"url":"wss://relay.onosendai.tech/<region>","created_at":<unix>}]}` |
+| Order | every registered speakeasy whose region holds the coordinate, the longest region string (the smallest region) first, then by region |
+| Planes | a prefix speakeasy holds the coordinate in either plane (the `planes` setting, default both); a 64-character speakeasy only in its own |
+| Nothing holds it, none registered, or speakeasies off | `200` `{"speakeasies":[]}` |
+| A bad or missing `coord` | `400` `{"error":"..."}` |
+| Another method | `405` (OPTIONS answers a CORS preflight with `204`) |
+| Headers | `Content-Type: application/json`, `Cache-Control: public, max-age=30`, `Access-Control-Allow-Origin` echoing `https://www.onosendai.tech` or any `http(s)://localhost`, `127.0.0.1` or `[::1]` origin (any port), with `Vary: Origin` |
+
+`url` is always the region's canonical address (the one its AUTH names), also once the speakeasy has a name; `name` carries the name.
+
 ## Later: a region picker (owner, 2026-11-04)
 
 An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.

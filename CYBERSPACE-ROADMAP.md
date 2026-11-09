@@ -23,7 +23,7 @@ Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/sp
 | Bitcoin block data + ride checks (landfall math in Go) | DONE (#20); reorganization cap of 6 blocks 2026-11-09 |
 | Incremental chain cache plus bounded queue | DONE (#15) |
 | Path routing, per-path NIP-11 and AUTH, separate storage | DONE (#19, #21) |
-| Region dashboard | not started |
+| Region dashboard and discovery endpoint | in review 2026-11-09 |
 | Create Speakeasy (Lightning) | not started |
 | Named speakeasies | not started |
 | ONOSENDAI: show a region's speakeasy and offer to add it | not started |

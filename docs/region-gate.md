@@ -44,7 +44,7 @@ can succeed, so nothing can be read or written.
 |---|---|
 | `REQ`, `COUNT` | After the per-client rate limits: refused `auth-required:` without AUTH, `restricted:` unless the authenticated pubkey is inside the region (same lookup, cache and exemptions as writers). |
 | Live events (after EOSE) | Pushed only to connections whose pubkey is admitted, decided from the chain cache without blocking. An expired entry keeps answering while a background check refreshes it, so someone who leaves the region (moving elsewhere) stops receiving within `cache_ttl_seconds` plus one check; an unknown pubkey gets nothing until its check completes. |
-| HTTP | Everything except the websocket, NIP-11 and NIP-86 at `/` answers 404: grain's web client and API (`/api/v1/events/*`, `/api/v1/client/*`, stats, the dashboard) read through the server's own relay pool, and a browser can sign AUTH for that shared pool, so they would be a way around the gate. Manage the relay through its config files and NIP-86. |
+| HTTP | Everything except the websocket, NIP-11 and NIP-86 at `/` answers 404: grain's web client and API (`/api/v1/events/*`, `/api/v1/client/*`, stats, the dashboard) read through the server's own relay pool, and a browser can sign AUTH for that shared pool, so they would be a way around the gate. Manage the relay through its config files and NIP-86. The speakeasy region dashboard and the discovery endpoint still answer (they read no events, only the registry). |
 
 NIP-11 advertises `auth_required` and `restricted_writes`. The NIP-11 document
 itself stays public, so the relay's existence, name and description are not secret.
@@ -70,13 +70,15 @@ are independent.
 | `/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
 | another spelling of a registered region (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11: 301 to the one URL; websocket: 400 naming it |
 | any other path | the root relay | websocket, NIP-11, NIP-86: 404 "not a relay" |
+| a browser (GET or HEAD, `Accept` with `text/html`) at any region string | grain's usual handlers | the region dashboard (step 4; other spellings 301 to the canonical path) |
+| `/.well-known/cyberspace-speakeasies?coord=<64 hex>` | an empty list | the speakeasies holding that coordinate (`docs/speakeasies.md`) |
 
 Once the file exists no path but `/` falls back to the root: also when it is
 invalid or says `enabled: false`, so a client that took `/<region>` for a
 speakeasy never posts its private room to the public relay. Paths are matched
 on the path as sent (`URL.EscapedPath()`), never through `http.ServeMux`,
 which cleans and redirects (`//abc`, `/x/../abc`, `/abc/.`); a plain browser
-request for a path goes on to grain's usual handlers.
+request for a path that is not a region string goes on to grain's usual handlers.
 
 **One URL per speakeasy.** `public_url` (default `auth.relay_url`) plus `/`
 and the region string in its canonical spelling, as ONOSENDAI writes it after

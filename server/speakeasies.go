@@ -211,6 +211,12 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 func speakeasyRoutes(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rt := speakeasyState.Load()
+		// The discovery endpoint answers whether or not speakeasies are on
+		// (an empty list when they are not), so ONOSENDAI can always ask.
+		if r.URL.EscapedPath() == DiscoveryPath {
+			serveDiscovery(w, r, rt)
+			return
+		}
 		// Matched on the path as sent, never through http.ServeMux, which
 		// cleans and redirects (//abc, /x/../abc, /abc/. to /abc).
 		if rt == nil || r.URL.EscapedPath() == "/" {
@@ -221,6 +227,11 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 		ws := r.Header.Get("Upgrade") == "websocket"
 		info := r.Header.Get("Accept") == "application/nostr+json"
 		if !nip86 && !ws && !info {
+			// A browser at /<region>: the region dashboard (step 4), while
+			// speakeasies are open. Any other path goes on unchanged.
+			if rt.reg != nil && wantsPage(r) && rt.servePage(w, r) {
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

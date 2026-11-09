@@ -325,3 +325,24 @@ func (r *Registry) save(entries []Entry) error {
 	}
 	return r.write(r.path, append(data, '\n'), 0o644)
 }
+
+// Containing returns every speakeasy whose region holds c, in the planes it
+// spans, the longest id (the smallest region) first and then by id: the
+// answer to "which speakeasies can this position enter".
+func (r *Registry) Containing(c regiongate.Coord) []Entry {
+	r.mu.RLock()
+	var out []Entry
+	for _, s := range r.byID {
+		if s.Regions.Contains(c) {
+			out = append(out, s.Entry)
+		}
+	}
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		if len(out[i].ID) != len(out[j].ID) {
+			return len(out[i].ID) > len(out[j].ID)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
