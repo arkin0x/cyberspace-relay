@@ -112,7 +112,7 @@ While speakeasies are open, a browser at `relay.onosendai.tech/<region>` (a GET 
 | How to join: head in the region, add the address, AUTH (NIP-42), share it | fixed copy |
 | A link to the same region in ONOSENDAI (`www.onosendai.tech/C/<hex>`) | |
 
-Any region string gets the page, registered or not. Another spelling of a region (case, `0x`, trailing `/`, escapes) is a 301 to the canonical path. A path that is not a region goes on to grain's usual handlers. The page uses grain's theme (its saved palette, tokens and fonts), with the grain palette as fallback where those files are not served. It is served ahead of the root region gate's HTTP guard: it shows nothing a speakeasy's NIP-11 does not.
+Any region string gets the page, registered or not. It answers with `Vary: Accept`, since the same URL is also the speakeasy's websocket and NIP-11. Another spelling of a region (case, `0x`, trailing `/`, escapes) is a 301 to the canonical path. A path that is not a region goes on to grain's usual handlers. The page uses grain's theme (its saved palette, tokens and fonts), with the grain palette as fallback where those files are not served. It is served ahead of the root region gate's HTTP guard: it shows nothing a speakeasy's NIP-11 does not.
 
 ### Discovery: `GET /.well-known/cyberspace-speakeasies?coord=<64 hex>`
 
@@ -121,7 +121,7 @@ ONOSENDAI asks this to show a position's speakeasies (step 7). The contract:
 | Case | Answer |
 |---|---|
 | A coordinate (64 hex, either case) | `200` `{"speakeasies":[{"region":"<normalized hex>","name":<string or null>,"url":"wss://relay.onosendai.tech/<region>","created_at":<unix>}]}` |
-| Order | every registered speakeasy whose region holds the coordinate, the longest region string (the smallest region) first, then by region |
+| Order | every registered speakeasy whose region holds the coordinate, the longest region string (the smallest region) first. Found by the coordinate's 64 hex prefixes (64 map lookups, about 3 µs with 100,000 registered), never by scanning the registry |
 | Planes | a prefix speakeasy holds the coordinate in either plane (the `planes` setting, default both); a 64-character speakeasy only in its own |
 | Nothing holds it, none registered, or speakeasies off | `200` `{"speakeasies":[]}` |
 | A bad or missing `coord` | `400` `{"error":"..."}` |
@@ -139,46 +139,51 @@ Off by default. On only with `payments: {enabled: true, nwc_file: <path>}` in `s
 | 1 | The region page (not yet a speakeasy) shows "Create speakeasy for 1,000 sats". |
 | 2 | The button sends `POST /api/speakeasies/orders` `{"region": "<region>"}` (JSON only). |
 | 3 | The relay asks the HOSAKA wallet for an invoice through NWC `make_invoice`: 1,000,000 msat, description `relay.onosendai.tech speakeasy <region>`, 10 minute expiry. |
-| 4 | The page shows the invoice as a QR code (drawn by the relay, no third-party script), the text with Copy, and "Open in wallet" (`lightning:`). |
-| 5 | Every 5 s the relay asks the wallet `lookup_invoice` for each open invoice; the page polls `GET /api/speakeasies/orders/<id>`. |
-| 6 | Once paid: the wallet's description, amount, payment hash and invoice must match the order, then the registry gets the entry (`note`: the sats and payment hash) and the path is a live speakeasy. The page reloads into it. |
+| 4 | The page shows the invoice as a QR code (drawn by the relay, no third-party script), the text with Copy, "Open in wallet" (`lightning:`), and the order id and payment hash (to quote to the relay owner). The browser remembers the order, so a reload picks it up again. |
+| 5 | Every 5 s the relay asks the wallet `lookup_invoice` about each open invoice, on one connection per pass; the page polls `GET /api/speakeasies/orders/<id>`. |
+| 6 | Once paid, and the wallet's answer matches the order (below), the registry gets the entry (with the payment hash) and the path is a live speakeasy. The page reloads into it. |
 
 | Rule | How |
 |---|---|
-| A payment is bound to its region | The order (kept by the relay, keyed by a random id) holds the region; nothing the visitor sends at payment time names one. The invoice description names the region too, and a paid invoice the wallet describes differently is never applied: it is held for the relay owner and logged at error level. |
-| One open invoice per region and requester | Asking again returns the same invoice (also many requests at once: one `make_invoice` at a time). The requester is a hash of the client address (an IPv6 address counts by its /64); no address is stored. An invoice with under a minute left is not handed out again. A region whose paid order is still being applied is not offered again. |
-| Caps | 32 open invoices in all, 3 per requester (each for another region); past them, 429 "try again in a few minutes". |
-| Expiry | 10 minutes; an unpaid invoice is still looked up for 2 minutes after, for a payment that settled at the last moment. An order is closed only on the wallet's answer (unpaid, or unknown to it): while the wallet cannot be asked, the order stays open, and past its grace the owner is told once (error log). |
-| Two payments, one region | The first makes it a speakeasy; the second (two payers, or one who paid two invoices) bought nothing: its outcome is `refund owed: already a speakeasy`, alerted and in the ledger. |
-| Restarts | Open orders live in `<data dir>/speakeasies/orders.json` (closed ones are dropped after a day), so a payment made while the relay is down is applied when it is back. Every paid order is appended to `<data dir>/speakeasies/payments.jsonl`, forever (held and refund-owed ones too; written before the order is marked applied, so a crash can repeat a line but never lose one). A registry write that fails is retried at the next poll. |
+| A payment is bound to its region | The order (kept by the relay, keyed by a random id) holds the region; nothing the visitor sends at payment time names one. The invoice description names the region too. |
+| The invoice is checked when made | `make_invoice` must answer a BOLT 11 invoice whose human-readable part encodes exactly the price, the same amount stated, a payment hash, our description (when given), and an `expires_at` no later than asked (plus a minute of clock slack) and not within a minute. Anything else is refused, alerted, and sold to nobody. |
+| The payment is checked when settled | `lookup_invoice` must give the payment hash and the exact amount, and our description and invoice when it gives them. A settled invoice described otherwise is never applied: `held for the relay owner: ...`, alerted and ledgered. |
+| One open invoice per region and requester | Asking again returns the same invoice (also many requests at once: one `make_invoice` at a time, and a request stops waiting when its context ends). An invoice with under a minute left is not handed out again. A region whose paid order is still being applied is not offered again. |
+| Caps (settings) | Payable open invoices: 256 in all (`max_pending_invoices`), 3 per requester, a client address or IPv6 /64 (`max_pending_per_requester`), 6 per network, an IPv6 /48 or IPv4 /24 (`max_pending_per_network`), 2 per region across requesters (`max_pending_per_region`). An invoice that can no longer be paid holds no slot. Requesters and networks are stored hashed, never as addresses. |
+| Watching | Every poll until the later of the wallet's `expires_at` and the relay's own expiry, plus 2 minutes (a last-moment payment). After that, an order is closed (`expired`) only on the wallet's answer that it is unpaid. |
+| No answer is not "unpaid" | A failed lookup, or `NOT_FOUND` (a rotated connection may not see invoices another one made), never closes an order: it stays open (holding no slot once unpayable), the owner is alerted once, and it is asked again every 5 minutes. Only after 7 days with no answer is it ledgered as `unknown` with an alert, for the owner to check by hand. A shutdown in the middle of a lookup counts as nothing. |
+| A late settle is never lost | Before an expired order is dropped (a day after its watch), it is looked up one last time: if it was paid after all, it is applied (or owed back) with an alert; if the wallet cannot answer, it is kept and asked again, until 7 days, then ledgered as `unknown`. |
+| Two payments, one region | The first makes it a speakeasy; the second (two payers, or one who paid two invoices) bought nothing: `refund owed: already a speakeasy`, alerted and ledgered. The page says so with the order id and payment hash, never as a success. |
+| Crashes | Open orders live in `<data dir>/speakeasies/orders.json`, and the registry in `registry.json`, each written to a temp file, fsynced, renamed, and the directory fsynced. A paid order whose entry is already there with its own payment hash was applied before a crash: `registered`, not a refund. The ledger `payments.jsonl` gets every paid, held, refund-owed and unknown order, forever, written before the order is marked applied (a crash can repeat a line, never lose one). A registry write that fails is retried every poll. |
+| The owner's list | NIP-86 `grain_speakeasy_payments` (no params): every ledger line that bought nothing (refund owed, held) or is unknown, and every open order the wallet cannot be asked about. |
 
 | Endpoint | Answers |
 |---|---|
-| `POST /api/speakeasies/orders` | `200` `{"id","kind","region","amount_sats","invoice","qr_svg","expires_at","status":"pending","applied":false}`; `400` not a region; `409` already a speakeasy; `415` not JSON; `429` caps; `502` the wallet made no invoice; `404` payments off |
-| `GET /api/speakeasies/orders/<id>` | the same, with `status` `pending`, `paid` or `expired`, `applied`, `outcome`, and `url` once it is a speakeasy; `qr_svg` only while pending |
+| `POST /api/speakeasies/orders` | `200` `{"id","kind","region","amount_sats","payment_hash","invoice","qr_svg","expires_at","status":"pending","applied":false}`; `400` not a region; `409` already a speakeasy; `415` not JSON; `429` caps; `502` the wallet made no usable invoice; `404` payments off |
+| `GET /api/speakeasies/orders/<id>` | the same, with `status` (`pending`, `paid`, `expired`, `unknown`), `applied`, `outcome`, `needs_owner` (a refund owed or held), and `url` only when the payment made the speakeasy; `qr_svg` only while pending |
 
-**NWC (ruling D2).** `server/nwc` is a NIP-47 client with two methods only, `make_invoice` and `lookup_invoice`: it can never pay. It reads the wallet's info event (kind 13194) and uses `nip44_v2` when listed, otherwise `nip04`, as NIP-47 says (kept only once the info event was seen; a relay that answers without it is asked again next time). Requests carry an `expiration` tag; answers must be signed by the wallet key and name the request. The connection string never reaches a log or an error (logs name the wallet by an 8-character pubkey prefix and its relay). The file is read again when it changes, so rotating is replacing it. The relay warns if the file is readable by others than its owner.
+**NWC (ruling D2).** `server/nwc` is a NIP-47 client with two methods only, `make_invoice` and `lookup_invoice`: it can never pay. It reads the wallet's info event (kind 13194) and uses `nip44_v2` when listed, otherwise `nip04`, as NIP-47 says (kept only once the info event was seen; a relay that answers without it is asked again next time). Requests carry an `expiration` tag; answers must be signed by the wallet key and name the request. A poll pass looks up every open invoice on one connection. The connection string never reaches a log or an error (logs name the wallet by an 8-character pubkey prefix and its relay). The file is read again when it changes, so rotating is replacing it, and the relay warns, at open and at each change, if it is readable by others than its owner. The NIP-04 code is tested against a vector made with OpenSSL alone (`server/nwc/testdata/make-nip04-vector.sh`).
 
 ### Before a real-sats test (the owner)
 
 1. In Alby Hub, make an app connection for the relay with **make_invoice and lookup_invoice only** (no pay, no balance), receiving to the HOSAKA wallet.
-2. Put its `nostr+walletconnect://...` string in a file on the droplet outside the repository and outside the data volume's served files, `chmod 600`, owned by the relay's user, and mount it read-only into the container (for example `/run/secrets/speakeasy-nwc`).
-3. Add `payments: {enabled: true, nwc_file: /run/secrets/speakeasy-nwc}` to `speakeasies.yml`, restart, and look for `Speakeasy payments on` in the log.
-4. Pay one speakeasy for real, then check the registry entry, `payments.jsonl`, and that the path answers as a speakeasy.
+2. Put its `nostr+walletconnect://...` string in a file on the droplet outside the repository and outside the data volume's served files, `chmod 600`, owned by the relay's user. Mount **the directory** that holds it read-only into the container (for example `/srv/speakeasy-secrets:/run/secrets/speakeasy:ro`, file `/run/secrets/speakeasy/nwc`), not the file itself: a single-file bind mount keeps the old file when the file is replaced, so a rotation would never reach the relay.
+3. Add `payments: {enabled: true, nwc_file: /run/secrets/speakeasy/nwc}` to `speakeasies.yml`, restart, and look for `Speakeasy payments on` in the log.
+4. Pay one speakeasy for real, then check the registry entry (its `payment_hash`), `payments.jsonl`, `grain_speakeasy_payments` (empty), and that the path answers as a speakeasy.
 
 ## Named speakeasies (step 6, 2026-11-09)
 
-**Reading of the design:** "if you pay 7000 sats, you can reserve a name for your speakeasy" and section 3's "one name per speakeasy" mean a name is bought for a region that is **already a speakeasy**, separately from creating it (1,000 sats, then 7,000 sats for a name; 8,000 in all for a named one). Buying both in one invoice was not built.
+**Ruling B2 (2026-11-09, applied by the coordinator under the owner's "apply my recommendations"; the owner can override): a name can only be bought together with creating the speakeasy, as ONE invoice of 1,000 + 7,000 = 8,000 sats. An existing speakeasy is never named.** Why: when any visitor could buy a name for any existing speakeasy, anyone could name someone else's speakeasy, permanently (a name is bound for life), and could block a name on an existing speakeasy for free by holding an invoice open. Buying it with creation leaves the name to whoever creates the room, and a hold blocks only that one name.
 
 | Rule | How |
 |---|---|
-| Offer | The page of a speakeasy without a name shows a name field and "Reserve for 7,000 sats" (same invoice, QR and polling as step 5). |
-| Request | `POST /api/speakeasies/orders` `{"region": "<region>", "name": "<name>"}`; description `relay.onosendai.tech name <name> for speakeasy <region>`. 400 for a bad name or a region that is not a speakeasy; 409 for a taken name, a speakeasy that has one, or a held name. |
-| Names (D3) | 3 to 40 of `a-z0-9-`; not reserved; never a string that reads as a region (`cafe`, `0xabc`); one per speakeasy; first paid wins; bound to its region for life (kept in the registry's `bound_names`, also if the speakeasy is removed, so the name can never lead to another region). |
-| Holds | While one invoice for a name is open, nobody gets another for that name, nor for another name for that speakeasy (409, "try again in a few minutes"), so two payers never pay for one name. A hold lasts while the invoice is open (10 minutes, plus up to 2 minutes of lookups), and while a paid name is still being applied. |
-| Applying | Once paid, the name leads to the speakeasy. If it was taken first another way (the relay owner through NIP-86), the outcome is `refund owed: ...`, logged at error level and in `payments.jsonl`: the owner refunds by hand. |
+| Offer | The Create section of a region page (not yet a speakeasy) has an optional name field; the button reads "Create speakeasy for 1,000 sats", and 8,000 once a name is typed. A speakeasy's page offers no name. |
+| Request | `POST /api/speakeasies/orders` `{"region": "<region>", "name": "<name>"}` (`name` optional); one invoice of `speakeasy_sats + name_sats`, description `relay.onosendai.tech speakeasy <region> named <name>`. 400 for a bad name; 409 for a taken name, a held name, or a region that is already a speakeasy. |
+| Names (D3) | 3 to 40 of `a-z0-9-`; not reserved (every top-level path the relay serves is reserved, and a test checks the routing code against the list); never a string that reads as a region (`cafe`, `0xabc`; `dead-beef` is a name, as the dash keeps it from parsing); one per speakeasy; first paid wins; bound to its region for life (the registry's `bound_names`, kept if the speakeasy is removed, so the name can never lead to another region). |
+| Holds | While one requester's invoice for a name can be paid, or a paid one is being applied, nobody else gets an invoice for that name (409, "try again in a few minutes"). It holds only that name: others can still ask for the same region, unnamed or with another name (within the per-region cap of 2). A hold lasts up to the invoice's life (10 minutes). |
+| Applying | Once paid, the speakeasy is made with the name. If the name was taken first another way (the relay owner through NIP-86), the speakeasy is made without it and the outcome is `refund owed: the name was taken first; the speakeasy was made without it`: alerted, ledgered, listed by `grain_speakeasy_payments`, and shown on the page; the owner refunds the name's part by hand. A paid order whose entry was written before a crash reads by its payment hash (`registered`, or that same refund if it was written without the name). |
 | Routing | `/<name>` routes as the hex path does, to the same speakeasy. NIP-11 there is named by the name; AUTH on a connection to the name names the name's URL (#19's rule, per path). Discovery gives the name in `name`; `url` stays the hex address. |
-| Price | `payments.name_sats`, default 7,000 (owner ruling 2026-11-09). |
+| Price | `payments.name_sats`, default 7,000, added to `speakeasy_sats` (owner ruling 2026-11-09). |
 
 ## Later: a region picker (owner, 2026-11-04)
 
@@ -199,4 +204,4 @@ The #11 review found a CPU attack: once proofs are checked, re-sending one expen
 - **The per-network queue limit (32 units per /24 or /48) is accepted** as is, though it also slows campus and carrier NAT networks.
 - **Short paths are huge regions** (membership there is nearly free). Noted only; the price is the same; revisit if abused.
 - **D2 detail:** NWC limited to make_invoice and lookup_invoice; the relay makes the invoice itself; the connection string is a secret file outside the repo, never logged, rotatable.
-- **Prices:** 1,000 sats for a speakeasy, 7,000 sats for a name.
+- **Prices:** 1,000 sats for a speakeasy, 7,000 sats for a name (bought only with creation, one invoice of 8,000: ruling B2 under step 6).

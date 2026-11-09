@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/0ceanslim/grain/server/speakeasy"
 )
 
 // TestNamedSpeakeasy (step 6): a name routes exactly as the hex path does,
@@ -24,9 +26,8 @@ func TestNamedSpeakeasy(t *testing.T) {
 		kOut = newKey(t)
 	}
 	r := startRelay(t, speakeasyRegionPath, webYML)
-	r.register(t, id)
-	if err := r.rt.reg.SetName(id, "cafe-du-monde"); err != nil {
-		t.Fatal(err)
+	if _, msg := r.rt.Add([]any{map[string]any{"id": id, "names": []any{"cafe-du-monde"}}}); msg != "" {
+		t.Fatal(msg)
 	}
 	r.storeRoot(t, kIn.spawn(t), kOut.spawn(t))
 	urlHex, urlName := r.wsRoot+"/"+id, r.wsRoot+"/cafe-du-monde"
@@ -101,19 +102,19 @@ func TestNamedSpeakeasy(t *testing.T) {
 	}
 }
 
-// TestReserveAName: the page of a speakeasy without a name offers one for
-// 7,000 sats; once paid, the name is live.
-func TestReserveAName(t *testing.T) {
+// TestCreateNamedSpeakeasy (step 6, ruling 2026-11-09): a name is bought
+// only with creation, in one invoice of 1,000 + 7,000 sats; an existing
+// speakeasy is never named.
+func TestCreateNamedSpeakeasy(t *testing.T) {
 	r := startRelay(t, speakeasyRegionPath, webYML)
 	orders := r.root + OrdersPath
 	w, co := withCheckout(t, r)
 
-	if code, out := post(t, orders, "application/json", `{"region":"abc","name":"cafe-du-monde"}`); code != 400 {
-		t.Fatalf("a name for a region that is not a speakeasy: %d %v", code, out)
-	}
-	r.register(t, "abc")
-	if _, body, _ := get(t, http.MethodGet, r.root+"/abc", "Accept", browser); !strings.Contains(body, "Reserve for 7,000 sats") || strings.Contains(body, "Create speakeasy") {
-		t.Fatal("the speakeasy's page does not offer a name for 7,000 sats")
+	_, body, _ := get(t, http.MethodGet, r.root+"/abc", "Accept", browser)
+	for _, want := range []string{`id="create-name"`, `data-named-price="8,000"`, "7,000 sats more", "Create speakeasy for 1,000 sats"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the Create section lacks %q", want)
+		}
 	}
 	for name, want := range map[string]int{"cafe": 400, "admin": 400, "Cafe-Du-Monde": 400, "ab": 400} {
 		if code, out := post(t, orders, "application/json", `{"region":"abc","name":"`+name+`"}`); code != want {
@@ -121,23 +122,29 @@ func TestReserveAName(t *testing.T) {
 		}
 	}
 	code, o := post(t, orders, "application/json", `{"region":"abc","name":"cafe-du-monde"}`)
-	if code != 200 || o["kind"] != "name" || o["name"] != "cafe-du-monde" || o["amount_sats"] != float64(7000) {
-		t.Fatalf("name order: %d %v", code, o)
+	if code != 200 || o["name"] != "cafe-du-monde" || o["amount_sats"] != float64(8000) {
+		t.Fatalf("named order: %d %v", code, o)
 	}
 	id := o["id"].(string)
 	got, _ := co.Get(id)
 	w.pay(got.PaymentHash)
 	co.Poll(context.Background())
-	if _, st := getJSON(t, orders+"/"+id); st["applied"] != true || st["url"] != r.wsRoot+"/cafe-du-monde" || st["outcome"] != "name reserved" {
+	if _, st := getJSON(t, orders+"/"+id); st["applied"] != true || st["url"] != r.wsRoot+"/cafe-du-monde" || st["outcome"] != speakeasy.OutcomeRegistered {
 		t.Fatalf("after paying: %v", st)
 	}
 	if code, doc, _ := nip11(t, r.root+"/cafe-du-monde"); code != 200 || doc["name"] != "cafe-du-monde" {
 		t.Fatalf("NIP-11 at the paid name: %d %v", code, doc)
 	}
-	if _, body, _ := get(t, http.MethodGet, r.root+"/abc", "Accept", browser); strings.Contains(body, "Reserve for") {
-		t.Fatal("a named speakeasy is offered another name")
+	_, body, _ = get(t, http.MethodGet, r.root+"/abc", "Accept", browser)
+	if strings.Contains(body, "create-name") || !strings.Contains(body, r.wsRoot+"/cafe-du-monde") {
+		t.Fatal("the named speakeasy's page offers Create, or lacks its name address")
 	}
-	if code, _ := post(t, orders, "application/json", `{"region":"abc","name":"second-name"}`); code != 409 {
-		t.Fatalf("a second name: %d, want 409", code)
+	// No naming of an existing speakeasy, named or not.
+	r.register(t, "abd")
+	if code, _ := post(t, orders, "application/json", `{"region":"abd","name":"late-name"}`); code != 409 {
+		t.Fatalf("a name for an existing speakeasy: %d, want 409", code)
+	}
+	if code, _ := post(t, orders, "application/json", `{"region":"abe","name":"cafe-du-monde"}`); code != 409 {
+		t.Fatalf("a taken name: %d, want 409", code)
 	}
 }

@@ -42,7 +42,14 @@ import (
 // reorganization more than a dozen blocks deep, which has not happened
 // since 2013, so it is far more likely a leaked publisher key rewriting
 // history: the line keeps its chain, reports it through Alert once per
-// rival tip, and needs the operator.
+// rival tip, drops the rival's blocks, and needs the operator.
+//
+// The cap protects only history below the tip. A leaked key can still
+// extend the tip with fake blocks (they link to the real tip, so they are
+// no reorganization), and once more than MaxReorgDepth of them are on the
+// line, the cap keeps the real chain from displacing them. An update that
+// appends more than MaxReorgDepth blocks at once is therefore reported
+// through Alert too: the operator should check them against a Bitcoin node.
 //
 // A height no anchor covers, between two that do, can be filled from block
 // headers fetched from a public source (Fallback): each header is fetched by
@@ -66,6 +73,9 @@ type AnchorLine struct {
 	// refused holds the deep rivals already reported (fork height and
 	// rival tip), so each is reported once, not at every poll.
 	refused map[[2]uint64]bool
+	// stuckAt is the tip the stuck path last re-read below, so a rival
+	// that stays in pending at the tip is not re-read at every poll.
+	stuckAt uint64
 }
 
 // AnchorLineConfig configures an AnchorLine.
@@ -455,9 +465,12 @@ func (l *AnchorLine) Update(ctx context.Context) error {
 	}
 	l.add(l.resolveAnchors(evs))
 	l.mu.RLock()
-	stuck := len(l.pending[uint64(len(l.hashes))]) > 0
+	stuck := len(l.pending[uint64(len(l.hashes))]) > 0 && l.stuckAt != uint64(len(l.hashes))
 	l.mu.RUnlock()
 	if stuck && next > 0 {
+		l.mu.Lock()
+		l.stuckAt = uint64(len(l.hashes))
+		l.mu.Unlock()
 		// A block above the tip names something else as previous: read
 		// the recent blocks again, competing anchors included.
 		from := uint64(0)
@@ -473,7 +486,14 @@ func (l *AnchorLine) Update(ctx context.Context) error {
 	l.fill(ctx)
 	l.mu.Lock()
 	l.reindex(false)
+	grown := uint64(len(l.hashes)) - next
 	l.mu.Unlock()
+	if len(l.snapshotHashes()) > 0 && next > 0 && grown > uint64(l.cfg.MaxReorgDepth) && l.cfg.Alert != nil {
+		// Normal after downtime or a republished gap; also what a leaked
+		// key extending the tip with fake blocks looks like.
+		l.cfg.Alert("line: one update appended more blocks than the reorganization cap; check them against a Bitcoin node (the cap would keep fake ones)",
+			"from_height", next, "blocks", grown, "max_depth", l.cfg.MaxReorgDepth)
+	}
 	return nil
 }
 
@@ -671,6 +691,9 @@ func (l *AnchorLine) reorganize() bool {
 						"rival_hash", hex.EncodeToString(chain[len(chain)-1].hash[:]))
 				}
 			}
+			// Refused for good: drop its blocks, so they neither block
+			// the fallback at the tip nor keep the stuck path re-reading.
+			l.dropPending(chain)
 			continue
 		}
 		if h+uint64(len(chain)) > tip && (best == nil || h+uint64(len(chain)) > bestFork+uint64(len(best))) {
@@ -696,7 +719,30 @@ func (l *AnchorLine) reorganize() bool {
 	l.epoch++
 	l.index = nil
 	l.log("line: reorganized", "from_height", bestFork, "old_tip", tip-1, "new_tip", len(l.hashes)-1, "epoch", l.epoch)
+	if depth := tip - bestFork; !l.loaded && depth > uint64(l.cfg.MaxReorgDepth) && l.cfg.Alert != nil {
+		// The cap does not apply while loading, but the operator should
+		// know the store holds a fork that deep.
+		l.cfg.Alert("line: the load took a reorganization deeper than the cap; check the anchors (a leaked publisher key?)",
+			"from_height", bestFork, "depth", depth, "max_depth", l.cfg.MaxReorgDepth, "new_tip", len(l.hashes)-1)
+	}
 	return true
+}
+
+// dropPending removes blocks from pending. Called with mu held.
+func (l *AnchorLine) dropPending(blocks []anchorBlock) {
+	for _, b := range blocks {
+		rest := l.pending[b.height][:0]
+		for _, p := range l.pending[b.height] {
+			if p.hash != b.hash {
+				rest = append(rest, p)
+			}
+		}
+		if len(rest) == 0 {
+			delete(l.pending, b.height)
+		} else {
+			l.pending[b.height] = rest
+		}
+	}
 }
 
 // ── the fallback ─────────────────────────────────────────────────────────
@@ -719,11 +765,13 @@ func (l *AnchorLine) fill(ctx context.Context) {
 				above, ok = h, true
 			}
 		}
-		var top anchorBlock
+		var tops []anchorBlock
 		if ok {
-			top = l.pending[above][0]
+			tops = slices.Clone(l.pending[above])
 		}
-		atTip := len(l.pending[tip]) > 0
+		// Only a block at the tip that links to it closes the gap; a rival
+		// sitting there (named another previous) must not stop the fill.
+		atTip := slices.ContainsFunc(l.pending[tip], func(b anchorBlock) bool { return b.prev == tipHash })
 		l.mu.RUnlock()
 		if !ok || atTip {
 			return
@@ -735,7 +783,15 @@ func (l *AnchorLine) fill(ctx context.Context) {
 			}
 			return
 		}
-		blocks, err := l.headersDown(ctx, top.prev, above-1, tip, tipHash)
+		// Each block anchored just above the gap, in turn: one may be a
+		// rival's, whose headers do not lead down to the tip.
+		var blocks []anchorBlock
+		var err error
+		for _, top := range tops {
+			if blocks, err = l.headersDown(ctx, top.prev, above-1, tip, tipHash); err == nil {
+				break
+			}
+		}
 		if err != nil {
 			l.log("line: fallback did not fill the gap", "missing_from", tip, "next_anchored", above, "error", err.Error())
 			return

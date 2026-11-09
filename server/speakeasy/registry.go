@@ -32,6 +32,10 @@ type Entry struct {
 	// relay owner wants to remember about it (how it was paid, for now).
 	CreatedAt int64  `json:"created_at"`
 	Note      string `json:"note,omitempty"`
+	// PaymentHash is the payment that created it, when it was paid for
+	// (step 5): a paid order whose entry already carries its hash was
+	// applied before a crash, not beaten to the region by another.
+	PaymentHash string `json:"payment_hash,omitempty"`
 }
 
 // RegionJSON is regiongate.RegionSpec with JSON names: base with height or
@@ -274,12 +278,48 @@ func (r *Registry) List() []Entry {
 func (r *Registry) ContainsAny(c regiongate.Coord) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, s := range r.byID {
-		if s.Regions.Contains(c) {
-			return true
+	found := false
+	r.holding(c, func(*Speakeasy) bool { found = true; return false })
+	return found
+}
+
+// holding calls f for every speakeasy whose region holds c, the longest id
+// first, until f returns false. With the region parser, a speakeasy's id
+// is its region string, the region every coordinate whose hex starts with
+// it, so the candidates are the 64 prefixes of c's hex: 64 map lookups,
+// each confirmed by the region (which also applies the planes setting),
+// whatever the registry's size. Without the parser (tests that register
+// regions by hand) ids say nothing, so every entry is checked. Called with
+// mu held.
+func (r *Registry) holding(c regiongate.Coord, f func(*Speakeasy) bool) {
+	if r.parse == nil {
+		var all []*Speakeasy
+		for _, s := range r.byID {
+			if s.Regions.Contains(c) {
+				all = append(all, s)
+			}
+		}
+		sort.Slice(all, func(i, j int) bool {
+			if len(all[i].ID) != len(all[j].ID) {
+				return len(all[i].ID) > len(all[j].ID)
+			}
+			return all[i].ID < all[j].ID
+		})
+		for _, s := range all {
+			if !f(s) {
+				return
+			}
+		}
+		return
+	}
+	h := c.Hex()
+	for k := len(h); k >= 1; k-- {
+		if s := r.byID[h[:k]]; s != nil && s.Regions.Contains(c) {
+			if !f(s) {
+				return
+			}
 		}
 	}
-	return false
 }
 
 // Len is how many speakeasies are registered.
@@ -308,66 +348,26 @@ func (r *Registry) Add(e Entry) (*Speakeasy, error) {
 	return s, nil
 }
 
-// Name errors (SetName, CanName).
-var (
-	ErrHasName   = errors.New("this speakeasy already has a name")
-	ErrNameTaken = errors.New("that name is taken")
-)
+// ErrNameTaken: the name leads to a speakeasy already, or is bound to
+// another region for life.
+var ErrNameTaken = errors.New("that name is taken")
 
-// CanName says why speakeasy id cannot take name, or nil: it must exist
-// and have no name, and the name must pass CheckName, lead nowhere yet,
-// and not be bound to another region.
-func (r *Registry) CanName(id, name string) error {
+// NameFree says why name cannot be given to region with a new speakeasy,
+// or nil: it must pass CheckName, lead nowhere yet, and not be bound to
+// another region. (Names come only with creation, ruling 2026-11-09: an
+// existing speakeasy is never named.)
+func (r *Registry) NameFree(name, region string) error {
 	if err := CheckName(name, r.parse); err != nil {
 		return err
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.canNameLocked(id, name)
-}
-
-func (r *Registry) canNameLocked(id, name string) error {
-	s := r.byID[id]
-	switch {
-	case s == nil:
-		return ErrNotFound
-	case len(s.Names) > 0:
-		return ErrHasName
-	case r.byPath[name] != nil:
+	if r.byPath[name] != nil {
 		return ErrNameTaken
 	}
-	if b, ok := r.bound[name]; ok && b != id {
+	if b, ok := r.bound[name]; ok && b != region {
 		return ErrNameTaken
 	}
-	return nil
-}
-
-// SetName gives speakeasy id its name (a paid reservation) and writes the
-// registry. The name is bound to the region for life.
-func (r *Registry) SetName(id, name string) error {
-	if err := CheckName(name, r.parse); err != nil {
-		return err
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := r.canNameLocked(id, name); err != nil {
-		return err
-	}
-	old := r.byID[id]
-	e := old.Entry
-	e.Names = []string{name}
-	s := &Speakeasy{Entry: e, Regions: old.Regions}
-	var entries []Entry
-	for _, x := range r.entriesLocked() {
-		if x.ID == id {
-			x = e
-		}
-		entries = append(entries, x)
-	}
-	if err := r.save(entries, r.boundWith(s)); err != nil {
-		return err
-	}
-	r.insert(s)
 	return nil
 }
 
@@ -434,18 +434,8 @@ func (r *Registry) save(entries []Entry, bound map[string]string) error {
 // answer to "which speakeasies can this position enter".
 func (r *Registry) Containing(c regiongate.Coord) []Entry {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	var out []Entry
-	for _, s := range r.byID {
-		if s.Regions.Contains(c) {
-			out = append(out, s.Entry)
-		}
-	}
-	r.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		if len(out[i].ID) != len(out[j].ID) {
-			return len(out[i].ID) > len(out[j].ID)
-		}
-		return out[i].ID < out[j].ID
-	})
+	r.holding(c, func(s *Speakeasy) bool { out = append(out, s.Entry); return true })
 	return out
 }

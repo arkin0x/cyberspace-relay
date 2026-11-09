@@ -2,6 +2,7 @@ package speakeasy
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -77,12 +78,16 @@ type PaymentsConfig struct {
 	InvoiceExpirySeconds int `yaml:"invoice_expiry_seconds"`
 	// PollSeconds is how often open invoices are looked up. Default 5.
 	PollSeconds int `yaml:"poll_seconds"`
-	// MaxPendingInvoices caps open invoices in all (default 32), and
-	// MaxPendingPerRequester one client address's (default 3, each for
-	// another region; asking again for the same region returns the same
-	// invoice).
+	// Caps on payable open invoices: in all (default 256); per requester,
+	// a client address or IPv6 /64 (default 3, each for another region;
+	// asking again for the same region returns the same invoice); per
+	// network, an IPv6 /48 or IPv4 /24 (default 6); per region, across
+	// requesters (default 2). An invoice that can no longer be paid holds
+	// no slot.
 	MaxPendingInvoices     int `yaml:"max_pending_invoices"`
 	MaxPendingPerRequester int `yaml:"max_pending_per_requester"`
+	MaxPendingPerNetwork   int `yaml:"max_pending_per_network"`
+	MaxPendingPerRegion    int `yaml:"max_pending_per_region"`
 }
 
 // Default prices (owner ruling 2026-11-09).
@@ -90,6 +95,24 @@ const (
 	DefaultSpeakeasySats = 1000
 	DefaultNameSats      = 7000
 )
+
+// CheckPublicURL says why u cannot be the relay's public websocket URL, or
+// nil: wss:// (ws:// for local tests), a host, and no path, query or
+// fragment, since a speakeasy's URL is u/<path> and its AUTH must name it.
+func CheckPublicURL(u string) error {
+	p, err := url.Parse(u)
+	switch {
+	case err != nil:
+		return fmt.Errorf("not a URL")
+	case p.Scheme != "wss" && p.Scheme != "ws":
+		return fmt.Errorf("must start with wss:// (ws:// only for local tests), got %q", p.Scheme)
+	case p.Host == "" || p.User != nil:
+		return fmt.Errorf("must name a host")
+	case p.Path != "" || p.RawQuery != "" || p.Fragment != "":
+		return fmt.Errorf("must have no path, query or fragment")
+	}
+	return nil
+}
 
 // IngestThreads is how many ingest threads each speakeasy database runs
 // (ruling D1).
@@ -126,7 +149,7 @@ func ParseConfig(data []byte) (*Config, error) {
 		c.MaxConnectionsPerPath = 200
 	}
 	p := &c.Payments
-	if p.NameSats < 0 || p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 {
+	if p.NameSats < 0 || p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 || p.MaxPendingPerNetwork < 0 || p.MaxPendingPerRegion < 0 {
 		return nil, fmt.Errorf("%s: payments values must not be negative", ConfigFile)
 	}
 	if p.SpeakeasySats == 0 {
@@ -142,10 +165,16 @@ func ParseConfig(data []byte) (*Config, error) {
 		p.PollSeconds = 5
 	}
 	if p.MaxPendingInvoices == 0 {
-		p.MaxPendingInvoices = 32
+		p.MaxPendingInvoices = 256
 	}
 	if p.MaxPendingPerRequester == 0 {
 		p.MaxPendingPerRequester = 3
+	}
+	if p.MaxPendingPerNetwork == 0 {
+		p.MaxPendingPerNetwork = 6
+	}
+	if p.MaxPendingPerRegion == 0 {
+		p.MaxPendingPerRegion = 2
 	}
 	p.NWCFile = strings.TrimSpace(p.NWCFile)
 	if c.Planes == nil {
@@ -160,6 +189,11 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 	}
 	c.PublicURL = strings.TrimRight(strings.TrimSpace(c.PublicURL), "/")
+	if c.PublicURL != "" {
+		if err := CheckPublicURL(c.PublicURL); err != nil {
+			return nil, fmt.Errorf("%s: public_url: %w", ConfigFile, err)
+		}
+	}
 	if !c.Enabled {
 		return &c, nil
 	}
