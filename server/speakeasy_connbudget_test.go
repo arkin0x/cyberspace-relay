@@ -221,11 +221,11 @@ func TestSpeakeasySocketsHaveTheirOwnBudget(t *testing.T) {
 		t.Fatal("the root's third socket in a minute was accepted")
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := dial(t, r.wsRoot+"/ab"); err != nil {
+		if _, err := dial(t, r.wsRoot+"/C/ab"); err != nil {
 			t.Fatalf("speakeasy socket %d after the root's budget was spent: %v", i, err)
 		}
 	}
-	if _, err := dial(t, r.wsRoot+"/ab"); err == nil {
+	if _, err := dial(t, r.wsRoot+"/C/ab"); err == nil {
 		t.Fatal("the speakeasy's third socket in a minute was accepted")
 	}
 }
@@ -241,17 +241,17 @@ func TestOpenSocketCapOverWebsockets(t *testing.T) {
 	cfg.Server.MaxOpenSocketsPerIP = 2
 	t.Cleanup(func() { cfg.Server.MaxOpenSocketsPerIP = old })
 	root := mustDial(t, r.wsRoot)
-	mustDial(t, r.wsRoot+"/ab")
+	mustDial(t, r.wsRoot+"/C/ab")
 	if _, err := dial(t, r.wsRoot); err == nil {
 		t.Fatal("a third socket at the root was accepted")
 	}
-	if _, err := dial(t, r.wsRoot+"/ab"); err == nil {
+	if _, err := dial(t, r.wsRoot+"/C/ab"); err == nil {
 		t.Fatal("a third socket at the speakeasy was accepted")
 	}
 	root.ws.Close()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		if _, err := dial(t, r.wsRoot+"/ab"); err == nil {
+		if _, err := dial(t, r.wsRoot+"/C/ab"); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -275,7 +275,7 @@ func TestOpenSocketCapComesFirst(t *testing.T) {
 		cfg.Server.MaxOpenSocketsPerIP, cfg.Server.ConnectionRateLimitPerIP = oldCap, oldRate
 		resetRateLimitState()
 	})
-	for _, path := range []string{"", "/ab"} {
+	for _, path := range []string{"", "/C/ab"} {
 		resetRateLimitState()
 		held := mustDial(t, r.wsRoot+path) // one rate token
 		for i := 0; i < 6; i++ {
