@@ -11,7 +11,7 @@ region.)
 
 | Kinds | What | Who |
 |---|---|---|
-| 3333, 33330, 33331, 11333 | movement chain, hidden bags, objects, avatars | anyone |
+| 3333, 33330, 33331, 33335, 11333 | movement chain, hidden bags, objects, sealed entries, avatars | anyone |
 | 321 | block anchors, the hyperspace stops (DECK-0001), from the NTH publisher | anyone |
 | 23330 | ephemeral chat envelope (relayed, never stored); its 23333 line rides inside it, never bare | anyone |
 | 23334 | TV watching ping (ephemeral, never stored); without it every TV set reads 1 WATCHING | anyone |
@@ -38,6 +38,15 @@ here, and the relay refused them.
 1738 and 35129 were added on 2026-11-08 for glyphbyte (arkinox: "make sure
 the onosendai relay accepts glyphbyte event kinds"). glyphbyte's notes
 without a link are kind 1 and stay refused under the kind 1 ruling.
+
+33335 was added on 2026-11-09 for sealed entries (spec §7.6 "Sealed entries",
+cyberspace #89; ONOSENDAI #645). A bag that would pass the size cap moves its
+largest entries out as kind 33335 events and names them by address, and the
+writer must not publish the bag until a relay has taken each one. Without it,
+every write to a full bag fails here. A sealed entry is at most one event, so
+`max_event_size` (512 KB) already covers it; a lock change of a room with N
+sealed entries sends about 3N addressable events (seal, emptied, deletion),
+which ONOSENDAI paces under the addressable rate limit.
 
 ## Rate limits
 
