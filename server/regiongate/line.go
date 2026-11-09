@@ -84,7 +84,10 @@ type AnchorLine struct {
 	// fillFailed holds when each block above a gap last failed to lead
 	// down to the tip through the fallback, for the tip in fillTip: it is
 	// asked again only after fillRetry, not at every poll (a rival's block
-	// never will; a fallback that was down may next time).
+	// never will; a fallback that was down may next time). Like stuckSig,
+	// touched only by fill, which runs under update (Load, Update): so it
+	// needs no lock of mu's, though fill reads it while holding mu's read
+	// lock for the line itself.
 	fillFailed map[[32]byte]time.Time
 	fillTip    uint64
 }
@@ -324,6 +327,10 @@ func isCanonicalHeight(s string) bool {
 // when the anchor carries M, §2.3). Events that fail are reported and left
 // out.
 func (l *AnchorLine) resolveAnchors(evs []nostr.Event) []anchorBlock {
+	// An anchor whose block is already on the line at its height is not
+	// checked again (signature, landfall): add would drop it anyway, and a
+	// re-read below the tip returns about 1,000 of them.
+	onLine := l.snapshotHashes()
 	out := make([]anchorBlock, len(evs))
 	okAt := make([]bool, len(evs))
 	var wg sync.WaitGroup
@@ -334,7 +341,7 @@ func (l *AnchorLine) resolveAnchors(evs []nostr.Event) []anchorBlock {
 			defer wg.Done()
 			for i := range next {
 				ev := evs[i]
-				if ev.Kind != KindBlockAnchor || ev.PubKey != l.cfg.Publisher {
+				if ev.Kind != KindBlockAnchor || ev.PubKey != l.cfg.Publisher || alreadyOnLine(ev, onLine) {
 					continue
 				}
 				if l.cfg.Signature != nil && !l.cfg.Signature(ev) {
@@ -589,6 +596,21 @@ func (l *AnchorLine) pendingCount() int {
 	return n
 }
 
+// alreadyOnLine reports whether an anchor names (by B and H) a block that
+// is on the line at that height.
+func alreadyOnLine(ev nostr.Event, onLine [][32]byte) bool {
+	bs, hs := tagValues(ev, "B"), tagValues(ev, "H")
+	if len(bs) != 1 || len(hs) != 1 {
+		return false
+	}
+	h, err := strconv.ParseUint(bs[0], 10, 64)
+	if err != nil || h >= uint64(len(onLine)) || strconv.FormatUint(h, 10) != bs[0] {
+		return false
+	}
+	raw, err := hex.DecodeString(hs[0])
+	return err == nil && len(raw) == 32 && [32]byte(raw) == onLine[h]
+}
+
 // ── linking ──────────────────────────────────────────────────────────────
 
 // add puts blocks into pending and extends the line from them.
@@ -811,6 +833,7 @@ func (l *AnchorLine) fill(ctx context.Context) {
 				above, ok = h, true
 			}
 		}
+		// fillTip and fillFailed are fill's own, under update (see the type).
 		if l.fillTip != tip || l.fillFailed == nil {
 			l.fillTip, l.fillFailed = tip, map[[32]byte]time.Time{}
 		}
