@@ -1,10 +1,4 @@
-{{define "invoice"}}<p class="err" id="pay-error" role="alert"></p>
-      <div id="invoice" hidden>
-        <div class="qr" id="qr"></div>
-        <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
-        <p><a class="button" id="open-wallet" href="#">Open in wallet</a></p>
-        <p id="pay-status" role="status">Waiting for payment</p>
-      </div>{{end}}<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en" data-theme="">
 <head>
 <meta charset="UTF-8">
@@ -95,30 +89,27 @@
       {{else}}<dt>Relay</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>{{end}}
       <dt>Since</dt><dd>{{.Since}}</dd>
     </dl>
-    {{with .Reserve}}
-    <div class="create" id="pay-box" data-endpoint="{{.Endpoint}}" data-region="{{$.Region}}">
-      <ul class="facts">
-        <li>A name gives this speakeasy a short address: relay.onosendai.tech/your-name.</li>
-        <li>3 to 40 lowercase letters, digits and dashes. First paid wins.</li>
-        <li>One name per speakeasy, bound to this region for life.</li>
-      </ul>
-      <div class="addr"><input id="pay-name" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="40" pattern="[a-z0-9-]{3,40}" placeholder="your-name" aria-label="Name"><button type="button" id="pay">Reserve for {{.Price}} sats</button></div>
-      {{template "invoice"}}
-    </div>
-    {{end}}
     {{else}}
     <dl>
       <dt>Status</dt><dd class="no">Not a speakeasy</dd>
     </dl>
     {{with .Create}}
-    <div class="create" id="pay-box" data-endpoint="{{.Endpoint}}" data-region="{{$.Region}}">
+    <div class="create" id="create-box" data-endpoint="{{.Endpoint}}" data-region="{{$.Region}}">
       <ul class="facts">
         <li>A speakeasy is a private relay for this region.</li>
         <li>Only chains whose head is inside can read or write.</li>
         <li>One payment, kept forever.</li>
+        <li>Optional: a name for a short address (relay.onosendai.tech/your-name), {{.NamePrice}} sats more. 3 to 40 lowercase letters, digits and dashes; first paid wins; bound to this region for life. A name can only be bought now, with the speakeasy.</li>
       </ul>
-      <button type="button" id="pay">Create speakeasy for {{.Price}} sats</button>
-      {{template "invoice"}}
+      <div class="addr"><input id="create-name" type="text" autocomplete="off" spellcheck="false" maxlength="40" placeholder="name (optional)" aria-label="Name (optional)" data-price="{{.Price}}" data-named-price="{{.NamedPrice}}"><button type="button" id="create">Create speakeasy for {{.Price}} sats</button></div>
+      <p class="err" id="create-error" role="alert"></p>
+      <div id="invoice" hidden>
+        <div class="qr" id="qr"></div>
+        <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
+        <p><a class="button" id="open-wallet" href="#">Open in wallet</a></p>
+        <p id="pay-status" role="status">Waiting for payment</p>
+        <p class="muted mono">Order <span id="order-id"></span> · payment hash <span id="payment-hash"></span></p>
+      </div>
     </div>
     {{end}}
     {{end}}
@@ -148,69 +139,93 @@
     });
   });
 </script>
-{{if or .Create .Reserve}}
+{{if .Create}}
 <script>
   (function () {
-    var box = document.getElementById("pay-box");
-    var btn = document.getElementById("pay");
-    var nameIn = document.getElementById("pay-name");
+    var box = document.getElementById("create-box");
+    var btn = document.getElementById("create");
     var endpoint = box.getAttribute("data-endpoint");
     var region = box.getAttribute("data-region");
-    var errEl = document.getElementById("pay-error");
+    var errEl = document.getElementById("create-error");
     var inv = document.getElementById("invoice");
     var status = document.getElementById("pay-status");
+    var key = "speakeasy-order:" + region;
+    var nameIn = document.getElementById("create-name");
+    nameIn.addEventListener("input", function () {
+      btn.textContent = "Create speakeasy for " + (nameIn.value.trim() ? nameIn.getAttribute("data-named-price") : nameIn.getAttribute("data-price")) + " sats";
+    });
+    function remember(id) { try { if (id) localStorage.setItem(key, id); else localStorage.removeItem(key); } catch (e) {} }
+    function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
     function show(o) {
-      document.getElementById("qr").innerHTML = o.qr_svg; // drawn by this relay
+      if (o.qr_svg) document.getElementById("qr").innerHTML = o.qr_svg; // drawn by this relay
       document.getElementById("bolt11").textContent = o.invoice;
       document.getElementById("open-wallet").href = "lightning:" + o.invoice;
+      document.getElementById("order-id").textContent = o.id;
+      document.getElementById("payment-hash").textContent = o.payment_hash;
       inv.hidden = false;
-      btn.disabled = true;
-      if (nameIn) nameIn.disabled = true;
-    }
-    function reset(msg) {
-      status.textContent = "";
-      errEl.textContent = msg;
-      inv.hidden = true;
-      btn.disabled = false;
-      if (nameIn) nameIn.disabled = false;
+      btn.hidden = true;
+      nameIn.hidden = true;
     }
     function poll(id) {
       fetch(endpoint + "/" + encodeURIComponent(id), { cache: "no-store" })
-        .then(function (r) { return r.json(); })
+        .then(function (r) { if (r.status === 404) { remember(null); throw "gone"; } return r.json(); })
         .then(function (o) {
+          show(o);
+          if (o.applied && o.url && !o.needs_owner) {
+            remember(null);
+            status.textContent = o.name ? "Paid. This region is now a speakeasy named " + o.name + "." : "Paid. This region is now a speakeasy.";
+            setTimeout(function () { location.href = o.name ? "/" + o.name : location.pathname; }, 1500);
+            return;
+          }
           if (o.applied && o.url) {
-            status.textContent = o.kind === "name" ? "Paid. The name is yours." : "Paid. This region is now a speakeasy.";
-            setTimeout(function () { location.href = o.kind === "name" ? "/" + o.name : location.pathname; }, 1500);
+            // Made, but its name was taken first: the name's part is owed.
+            remember(null);
+            status.textContent = "Paid. This region is now a speakeasy, but its name was taken first (" + o.outcome +
+              "): give the relay owner the order and payment hash below for the name's part.";
             return;
           }
           if (o.applied) {
-            status.textContent = "Paid, but not applied: " + o.outcome + ". Contact the relay owner.";
+            // A refund owed, or held: never a success.
+            status.textContent = "Paid, but it bought nothing (" + o.outcome + "). " + o.amount_sats +
+              " sats are owed back: give the relay owner the order and payment hash below.";
             return;
           }
-          if (o.status === "paid") status.textContent = "Paid. Applying it.";
-          if (o.status === "expired") { reset("That invoice expired."); return; }
+          if (o.status === "paid") status.textContent = "Paid. Opening the speakeasy.";
+          if (o.status === "expired" || o.status === "unknown") {
+            remember(null);
+            status.textContent = "";
+            errEl.textContent = o.status === "expired" ? "That invoice expired." : "The wallet never answered about that invoice; give the relay owner the order and payment hash below.";
+            if (o.status === "expired") { inv.hidden = true; btn.hidden = false; nameIn.hidden = false; }
+            return;
+          }
           setTimeout(function () { poll(id); }, 3000);
         })
-        .catch(function () { setTimeout(function () { poll(id); }, 6000); });
+        .catch(function (e) { if (e !== "gone") setTimeout(function () { poll(id); }, 6000); });
     }
     btn.addEventListener("click", function () {
       var body = { region: region };
-      if (nameIn) {
-        body.name = nameIn.value.trim().toLowerCase();
-        if (!/^[a-z0-9-]{3,40}$/.test(body.name)) { errEl.textContent = "3 to 40 lowercase letters, digits and dashes."; return; }
+      var name = nameIn.value.trim().toLowerCase();
+      if (name) {
+        if (!/^[a-z0-9-]{3,40}$/.test(name)) { errEl.textContent = "A name is 3 to 40 lowercase letters, digits and dashes."; return; }
+        body.name = name;
       }
       btn.disabled = true;
       errEl.textContent = "";
       fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
         .then(function (r) { return r.json().then(function (o) { return { ok: r.ok, o: o }; }); })
         .then(function (x) {
-          if (!x.ok) { reset(x.o.error || "Something went wrong. Try again."); return; }
+          btn.disabled = false;
+          if (!x.ok) { errEl.textContent = x.o.error || "Something went wrong. Try again."; return; }
+          remember(x.o.id);
           show(x.o);
           status.textContent = "Waiting for payment";
           poll(x.o.id);
         })
-        .catch(function () { reset("Something went wrong. Try again."); });
+        .catch(function () { btn.disabled = false; errEl.textContent = "Something went wrong. Try again."; });
     });
+    // After a reload: pick up the order this browser was paying.
+    var last = remembered();
+    if (last) poll(last);
   })();
 </script>
 {{end}}

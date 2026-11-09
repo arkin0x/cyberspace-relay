@@ -36,18 +36,25 @@ type Wallet interface {
 	LookupInvoice(ctx context.Context, paymentHash string) (nwc.Invoice, error)
 }
 
+// sessionWallet is a Wallet that can look up many invoices on one
+// connection: a poll pass uses one when it can.
+type sessionWallet interface {
+	LookupSession(ctx context.Context) (nwc.Lookuper, error)
+}
+
 // Order kinds.
 const (
 	OrderSpeakeasy = "speakeasy"
-	// OrderName reserves a name for an existing speakeasy (step 6).
-	OrderName = "name"
 )
 
 // Order statuses.
 const (
-	StatusPending = "pending" // the invoice can be paid
+	StatusPending = "pending" // the invoice can be paid, or its answer is awaited
 	StatusPaid    = "paid"    // the wallet says it is paid
-	StatusExpired = "expired" // never paid, and past its expiry
+	StatusExpired = "expired" // the wallet said unpaid after the watch ended
+	// StatusUnknown: the wallet never answered about it for GiveUp after
+	// its watch ended. Ledgered and alerted; the owner settles it by hand.
+	StatusUnknown = "unknown"
 )
 
 // Order is one invoice for one region, as the relay keeps it.
@@ -55,42 +62,65 @@ type Order struct {
 	ID     string `json:"id"`
 	Kind   string `json:"kind"`
 	Region string `json:"region"`
-	// Name is the name a name order reserves.
+	// Name is the name bought with the speakeasy, if any (step 6: a name
+	// comes only with creation, in the same invoice).
 	Name string `json:"name,omitempty"`
-	// Requester is a hash of the client's address: one pending order per
-	// region and requester.
+	// Requester is a hash of the client's address (an IPv6 address by its
+	// /64), Network a hash of its network (/48, or /24 for IPv4): the caps
+	// on open invoices count by them.
 	Requester   string `json:"requester"`
+	Network     string `json:"network,omitempty"`
 	AmountSats  int64  `json:"amount_sats"`
 	Invoice     string `json:"invoice"`
 	PaymentHash string `json:"payment_hash"`
 	Description string `json:"description"`
 	CreatedAt   int64  `json:"created_at"`
-	ExpiresAt   int64  `json:"expires_at"`
-	Status      string `json:"status"`
-	SettledAt   int64  `json:"settled_at,omitempty"`
+	// ExpiresAt is when the invoice stops being payable, as the wallet
+	// says. WatchUntil is when the relay stops asking about it at every
+	// poll: the later of that and the relay's own expiry, plus a grace.
+	ExpiresAt  int64  `json:"expires_at"`
+	WatchUntil int64  `json:"watch_until"`
+	Status     string `json:"status"`
+	SettledAt  int64  `json:"settled_at,omitempty"`
 	// Applied is set once the paid order has done what it was for (or
 	// could not, and says why in Outcome); until then each poll retries.
 	Applied bool   `json:"applied,omitempty"`
 	Outcome string `json:"outcome,omitempty"`
 	// LookupFailing is set once the owner was told the wallet cannot be
-	// asked about this order past its expiry.
+	// asked about this order after it stopped being payable.
 	LookupFailing bool `json:"lookup_failing,omitempty"`
+	// ClosedAt is when the relay saw it paid, or gave up on it
+	// (StatusUnknown): what keepClosed counts from.
+	ClosedAt int64 `json:"closed_at,omitempty"`
 }
 
-// Outcomes of a paid order.
+// Outcomes of a paid order. Every outcome that bought nothing starts with
+// OutcomeRefund or OutcomeHeld; the owner settles those by hand (NIP-86
+// grain_speakeasy_payments lists them).
 const (
 	OutcomeRegistered = "registered"
+	OutcomeRefund     = "refund owed: "
+	OutcomeHeld       = "held for the relay owner: "
 	// OutcomeAlready: another payment made the region a speakeasy first
-	// (two payers, or one who paid two invoices). The region is one, but
-	// this payment bought nothing: the relay owner owes a refund.
-	OutcomeAlready = "refund owed: already a speakeasy"
-	// OutcomeNamed: the name now leads to the speakeasy.
-	OutcomeNamed = "name reserved"
-	// OutcomeRefund prefixes every paid order that bought nothing (the
-	// region was a speakeasy already, the name was taken first): the
-	// relay owner owes a refund.
-	OutcomeRefund = "refund owed: "
+	// (two payers, or one who paid two invoices).
+	OutcomeAlready = OutcomeRefund + "already a speakeasy"
+	// OutcomeNameTaken: the speakeasy was made, but its name was taken
+	// first another way (the relay owner through NIP-86): the name's part
+	// of the price is owed back.
+	OutcomeNameTaken = OutcomeRefund + "the name was taken first; the speakeasy was made without it"
 )
+
+// MadeSpeakeasy reports whether a paid order's outcome made its speakeasy
+// (wholly, or without its name).
+func MadeSpeakeasy(outcome string) bool {
+	return outcome == OutcomeRegistered || outcome == OutcomeNameTaken
+}
+
+// NeedsOwner reports whether an outcome is one the relay owner must settle
+// by hand (a refund owed, or a payment held).
+func NeedsOwner(outcome string) bool {
+	return strings.HasPrefix(outcome, OutcomeRefund) || strings.HasPrefix(outcome, OutcomeHeld)
+}
 
 // CheckoutConfig configures a Checkout.
 type CheckoutConfig struct {
@@ -99,50 +129,63 @@ type CheckoutConfig struct {
 	// OrdersPath keeps the open orders (so a restart does not lose a
 	// payment); LedgerPath gets one JSON line per paid order, forever.
 	OrdersPath, LedgerPath string
-	// Write replaces OrdersPath atomically (config.AtomicWriteFile).
+	// Write replaces OrdersPath atomically and durably (WriteDurable).
 	Write func(string, []byte, os.FileMode) error
 	// Host names the relay in invoice descriptions (relay.onosendai.tech).
 	Host          string
 	SpeakeasySats int64
-	NameSats      int64
-	Expiry        time.Duration // an invoice's life
-	Poll          time.Duration // how often pending invoices are looked up
-	// MaxPending caps open invoices in all; MaxPerRequester caps one
-	// requester's (each for another region).
-	MaxPending, MaxPerRequester int
-	Now                         func() time.Time
-	Log                         func(msg string, args ...any)
-	Alert                       func(msg string, args ...any)
+	// NameSats is added to SpeakeasySats when a name is bought with it.
+	NameSats int64
+	Expiry   time.Duration // an invoice's life, as asked of the wallet
+	Poll     time.Duration // how often open invoices are looked up
+	// Caps on payable open invoices: in all, per requester (/64), per
+	// network (/48 or /24), per region (across requesters).
+	MaxPending, MaxPerRequester, MaxPerNetwork, MaxPerRegion int
+	Now                                                      func() time.Time
+	Log                                                      func(msg string, args ...any)
+	Alert                                                    func(msg string, args ...any)
 }
 
 // Checkout makes and watches invoices.
 type Checkout struct {
 	cfg CheckoutConfig
 
-	create sync.Mutex // one make_invoice at a time
+	create chan struct{} // one make_invoice at a time (a one-slot lock)
 	mu     sync.Mutex
 	orders map[string]*Order
+	// lastLookup paces lookups of orders whose watch has ended.
+	lastLookup map[string]time.Time
 }
 
 // Checkout errors a caller shows to the visitor.
 var (
 	ErrAlreadySpeakeasy = errors.New("this region is already a speakeasy")
 	ErrTooManyInvoices  = errors.New("too many open invoices; try again in a few minutes")
+	ErrRegionBusy       = errors.New("this region has open invoices from others; try again in a few minutes")
 	ErrNotRegion        = errors.New("not a region string")
-	ErrNotSpeakeasy     = errors.New("this region is not a speakeasy yet; create it first")
-	// ErrNameHeld: someone has an open invoice for this name, or for a
-	// name for this speakeasy. Holding them keeps two payers from paying
-	// for one name.
-	ErrNameHeld = errors.New("someone has an open invoice for this name or this speakeasy; try again in a few minutes")
+	// ErrNameHeld: someone else has an open invoice for this name.
+	ErrNameHeld = errors.New("someone has an open invoice for this name; try again in a few minutes")
 )
 
-// lookupGrace is how long after its expiry an unpaid invoice is still
-// looked up, for a payment that settled at the last moment.
-const lookupGrace = 2 * time.Minute
-
-// keepClosed is how long a closed order stays in OrdersPath, so a page
-// polling it still sees how it ended.
-const keepClosed = 24 * time.Hour
+const (
+	// lookupGrace is how long past the watch's start an unpaid invoice is
+	// still looked up at every poll, for a payment that settled at the
+	// last moment.
+	lookupGrace = 2 * time.Minute
+	// lateEvery paces lookups of an order whose watch has ended but whose
+	// answer is not known (the wallet failed or said NOT_FOUND).
+	lateEvery = 5 * time.Minute
+	// keepClosed is how long a closed order stays in OrdersPath, so a page
+	// polling it still sees how it ended. An expired order is looked up
+	// one last time before it is dropped.
+	keepClosed = 24 * time.Hour
+	// GiveUp is how long after its watch ended an order the wallet never
+	// answered about is kept open before it is ledgered as unknown.
+	GiveUp = 7 * 24 * time.Hour
+	// expirySlack is how much later than asked the wallet's expires_at may
+	// be (clock skew); later than that, the invoice is refused.
+	expirySlack = time.Minute
+)
 
 // NewCheckout loads the open orders and makes a checkout.
 func NewCheckout(cfg CheckoutConfig) (*Checkout, error) {
@@ -155,7 +198,7 @@ func NewCheckout(cfg CheckoutConfig) (*Checkout, error) {
 	if cfg.Alert == nil {
 		cfg.Alert = cfg.Log
 	}
-	c := &Checkout{cfg: cfg, orders: map[string]*Order{}}
+	c := &Checkout{cfg: cfg, create: make(chan struct{}, 1), orders: map[string]*Order{}, lastLookup: map[string]time.Time{}}
 	data, err := os.ReadFile(cfg.OrdersPath)
 	switch {
 	case os.IsNotExist(err):
@@ -169,6 +212,9 @@ func NewCheckout(cfg CheckoutConfig) (*Checkout, error) {
 			return nil, fmt.Errorf("parse %s: %w", cfg.OrdersPath, err)
 		}
 		for _, o := range f.Orders {
+			if o.WatchUntil == 0 { // written before watch_until existed
+				o.WatchUntil = o.ExpiresAt + int64(lookupGrace/time.Second)
+			}
 			c.orders[o.ID] = o
 		}
 	}
@@ -176,77 +222,96 @@ func NewCheckout(cfg CheckoutConfig) (*Checkout, error) {
 }
 
 // Requester turns a client address into the key orders are kept by, so the
-// orders file holds no addresses.
-// An IPv6 address counts by its /64, which one host usually holds whole,
-// so rotating addresses inside it does not dodge the caps.
+// orders file holds no addresses. An IPv6 address counts by its /64, which
+// one host usually holds whole, so rotating addresses inside it does not
+// dodge the caps.
 func Requester(addr string) string {
 	if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
 		addr = ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 	}
-	sum := sha256.Sum256([]byte("speakeasy-requester:" + addr))
+	return hashKey("speakeasy-requester:" + addr)
+}
+
+// Network is the hashed network of a client address: its /48 for IPv6,
+// its /24 for IPv4 (as the gate's work queue counts networks).
+func Network(addr string) string {
+	ip := net.ParseIP(addr)
+	switch {
+	case ip == nil:
+		return hashKey("speakeasy-network:" + addr)
+	case ip.To4() != nil:
+		return hashKey("speakeasy-network:" + ip.Mask(net.CIDRMask(24, 32)).String() + "/24")
+	}
+	return hashKey("speakeasy-network:" + ip.Mask(net.CIDRMask(48, 128)).String() + "/48")
+}
+
+func hashKey(s string) string {
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:12])
 }
 
-// OrderRequest is what a visitor asks for. Name is for a name order.
+// OrderRequest is what a visitor asks for: a speakeasy at Region, named
+// Name when it is not empty (one invoice for both). Requester and Network
+// come from the client address (Requester, Network).
 type OrderRequest struct {
-	Kind, Region, Name, Requester string
+	Kind, Region, Name, Requester, Network string
 }
 
 // Create returns the requester's open order for this region, or makes one
 // with a new invoice. region must be a region string in its canonical
 // spelling.
 func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) {
+	if req.Kind != OrderSpeakeasy {
+		return Order{}, fmt.Errorf("unknown order kind %q", req.Kind)
+	}
 	if !c.canonicalRegion(req.Region) {
 		return Order{}, ErrNotRegion
 	}
-	var sats int64
-	var desc string
-	switch req.Kind {
-	case OrderSpeakeasy:
-		if c.cfg.Registry.Get(req.Region) != nil || c.paidFor(req.Region) {
-			return Order{}, ErrAlreadySpeakeasy
-		}
-		req.Name = ""
-		sats, desc = c.cfg.SpeakeasySats, fmt.Sprintf("%s speakeasy %s", c.cfg.Host, req.Region)
-	case OrderName:
-		switch err := c.cfg.Registry.CanName(req.Region, req.Name); {
-		case errors.Is(err, ErrNotFound):
-			return Order{}, ErrNotSpeakeasy
-		case err != nil:
+	if c.cfg.Registry.Get(req.Region) != nil || c.paidFor(req.Region) {
+		return Order{}, ErrAlreadySpeakeasy
+	}
+	if req.Name != "" {
+		if err := c.cfg.Registry.NameFree(req.Name, req.Region); err != nil {
 			return Order{}, err
 		}
-		sats, desc = c.cfg.NameSats, fmt.Sprintf("%s name %s for speakeasy %s", c.cfg.Host, req.Name, req.Region)
-	default:
-		return Order{}, fmt.Errorf("unknown order kind %q", req.Kind)
 	}
 	if o, ok := c.open(req); ok {
 		return o, nil
 	}
-	// One make_invoice at a time: the check above is repeated inside, so
-	// two requests at once get one invoice.
-	c.create.Lock()
-	defer c.create.Unlock()
-	if o, ok := c.open(req); ok {
+	// One make_invoice at a time, but never longer than the caller waits.
+	select {
+	case c.create <- struct{}{}:
+	case <-ctx.Done():
+		return Order{}, ctx.Err()
+	}
+	defer func() { <-c.create }()
+	if o, ok := c.open(req); ok { // made while this one waited
 		return o, nil
 	}
 	if err := c.room(req); err != nil {
 		return Order{}, err
 	}
+	sats := c.cfg.SpeakeasySats
+	desc := fmt.Sprintf("%s speakeasy %s", c.cfg.Host, req.Region)
+	if req.Name != "" {
+		sats += c.cfg.NameSats
+		desc += " named " + req.Name
+	}
+	now := c.cfg.Now()
 	inv, err := c.cfg.Wallet.MakeInvoice(ctx, sats*1000, desc, c.cfg.Expiry)
 	if err != nil {
 		return Order{}, fmt.Errorf("the wallet made no invoice: %w", err)
 	}
-	if !validBolt11(inv.Invoice) || !isLowerHex(strings.ToLower(inv.PaymentHash), 64) || (inv.Amount != 0 && inv.Amount != sats*1000) {
-		return Order{}, errors.New("the wallet's invoice is malformed")
+	if why := badInvoice(inv, sats*1000, desc, now, c.cfg.Expiry); why != "" {
+		c.cfg.Alert("speakeasy: the wallet's new invoice was refused", "why", why, "payment_hash", inv.PaymentHash)
+		return Order{}, fmt.Errorf("the wallet's invoice is unusable: %s", why)
 	}
-	now := c.cfg.Now()
+	relayExpiry := now.Add(c.cfg.Expiry).Unix()
 	o := &Order{
-		ID: newID(), Kind: req.Kind, Region: req.Region, Name: req.Name, Requester: req.Requester,
+		ID: newID(), Kind: req.Kind, Region: req.Region, Name: req.Name, Requester: req.Requester, Network: req.Network,
 		AmountSats: sats, Invoice: strings.ToLower(inv.Invoice), PaymentHash: strings.ToLower(inv.PaymentHash),
-		Description: desc, CreatedAt: now.Unix(), ExpiresAt: now.Add(c.cfg.Expiry).Unix(), Status: StatusPending,
-	}
-	if inv.ExpiresAt > 0 && inv.ExpiresAt < o.ExpiresAt {
-		o.ExpiresAt = inv.ExpiresAt
+		Description: desc, CreatedAt: now.Unix(), ExpiresAt: inv.ExpiresAt,
+		WatchUntil: max(relayExpiry, inv.ExpiresAt) + int64(lookupGrace/time.Second), Status: StatusPending,
 	}
 	c.mu.Lock()
 	c.orders[o.ID] = o
@@ -261,6 +326,33 @@ func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) 
 	}
 	c.cfg.Log("speakeasy: invoice made", "order", o.ID, "kind", o.Kind, "region", o.Region, "name", o.Name, "sats", sats, "payment_hash", o.PaymentHash)
 	return out, nil
+}
+
+// badInvoice says why a new invoice from make_invoice cannot be sold, or
+// "": it must be a BOLT 11 string encoding exactly wantMsat, the wallet
+// must say the same amount and a payment hash, the description (when
+// given) must be ours, and it must expire, no later than asked and not
+// within a minute.
+func badInvoice(inv nwc.Invoice, wantMsat int64, desc string, now time.Time, expiry time.Duration) string {
+	switch {
+	case !validBolt11(inv.Invoice):
+		return "not a BOLT 11 invoice"
+	case bolt11Msat(inv.Invoice) != wantMsat:
+		return "the invoice encodes another amount"
+	case inv.Amount != wantMsat:
+		return "the wallet states another amount, or none"
+	case !isLowerHex(strings.ToLower(inv.PaymentHash), 64):
+		return "no payment hash"
+	case inv.Description != "" && inv.Description != desc:
+		return "another description"
+	case inv.ExpiresAt == 0:
+		return "no expiry"
+	case inv.ExpiresAt > now.Add(expiry+expirySlack).Unix():
+		return "expires later than asked"
+	case inv.ExpiresAt < now.Add(time.Minute).Unix():
+		return "expires within a minute"
+	}
+	return ""
 }
 
 // open is the requester's pending order for this region, if it still has a
@@ -290,27 +382,39 @@ func (c *Checkout) paidFor(region string) bool {
 	return false
 }
 
-// room says whether one more pending order fits, and for a name order
-// that no other open or paid-but-unapplied name order holds the name or
-// the speakeasy.
+// room says whether one more payable invoice fits the caps. Only invoices
+// that can still be paid count: one whose answer is awaited after it
+// expired holds no slot.
 func (c *Checkout) room(req OrderRequest) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	all, mine := 0, 0
+	now := c.cfg.Now().Unix()
+	all, mine, network, region := 0, 0, 0, 0
 	for _, o := range c.orders {
-		applying := o.Status == StatusPaid && !o.Applied
-		if req.Kind == OrderName && o.Kind == OrderName && (o.Status == StatusPending || applying) && (o.Name == req.Name || o.Region == req.Region) {
+		// A name is held, against others, while an invoice for it can be
+		// paid or a paid one is being applied. It holds only that name.
+		holds := o.Status == StatusPending && o.ExpiresAt > now || o.Status == StatusPaid && !o.Applied
+		if req.Name != "" && o.Name == req.Name && o.Requester != req.Requester && holds {
 			return ErrNameHeld
 		}
-		if o.Status != StatusPending {
+		if o.Status != StatusPending || o.ExpiresAt <= now {
 			continue
 		}
 		all++
 		if o.Requester == req.Requester {
 			mine++
 		}
+		if req.Network != "" && o.Network == req.Network {
+			network++
+		}
+		if o.Region == req.Region {
+			region++
+		}
 	}
-	if all >= c.cfg.MaxPending || mine >= c.cfg.MaxPerRequester {
+	switch {
+	case region >= c.cfg.MaxPerRegion:
+		return ErrRegionBusy
+	case all >= c.cfg.MaxPending || mine >= c.cfg.MaxPerRequester || network >= c.cfg.MaxPerNetwork:
 		return ErrTooManyInvoices
 	}
 	return nil
@@ -336,6 +440,20 @@ func (c *Checkout) Get(id string) (Order, bool) {
 	return *o, true
 }
 
+// Orders returns every order the checkout holds, oldest first.
+func (c *Checkout) Orders() []Order {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Order, 0, len(c.orders))
+	for _, o := range c.orders {
+		out = append(out, *o)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt < out[j].CreatedAt || out[i].CreatedAt == out[j].CreatedAt && out[i].ID < out[j].ID
+	})
+	return out
+}
+
 // Run looks up the open invoices every Poll until ctx ends, starting at
 // once, so orders left open by a restart are picked up.
 func (c *Checkout) Run(ctx context.Context) {
@@ -351,78 +469,190 @@ func (c *Checkout) Run(ctx context.Context) {
 	}
 }
 
-// Poll looks up every open invoice once, applies the paid ones and closes
-// the expired ones.
+// lookups is one poll pass's way to the wallet: one connection for the
+// whole pass when the wallet offers it, reopened once after a broken one.
+type lookups struct {
+	c    *Checkout
+	sess nwc.Lookuper
+	lost bool // a session broke; plain calls from now on
+}
+
+func (l *lookups) lookup(ctx context.Context, hash string) (nwc.Invoice, error) {
+	sw, ok := l.c.cfg.Wallet.(sessionWallet)
+	if !ok || l.lost {
+		return l.c.cfg.Wallet.LookupInvoice(ctx, hash)
+	}
+	if l.sess == nil {
+		s, err := sw.LookupSession(ctx)
+		if err != nil {
+			l.lost = true
+			return l.c.cfg.Wallet.LookupInvoice(ctx, hash)
+		}
+		l.sess = s
+	}
+	inv, err := l.sess.LookupInvoice(ctx, hash)
+	var we *nwc.Error
+	if err != nil && !errors.As(err, &we) && ctx.Err() == nil {
+		// The connection broke: drop it, and try this one plainly.
+		l.sess.Close()
+		l.sess, l.lost = nil, true
+		return l.c.cfg.Wallet.LookupInvoice(ctx, hash)
+	}
+	return inv, err
+}
+
+func (l *lookups) close() {
+	if l.sess != nil {
+		l.sess.Close()
+	}
+}
+
+// Poll looks up every open invoice once (an order whose watch has ended at
+// most every lateEvery), applies the paid ones, closes the expired ones,
+// and gives expired orders due to be dropped one last lookup.
 func (c *Checkout) Poll(ctx context.Context) {
+	now := c.cfg.Now()
 	c.mu.Lock()
 	var todo []Order
 	for _, o := range c.orders {
-		if o.Status == StatusPending || o.Status == StatusPaid && !o.Applied {
+		switch {
+		case o.Status == StatusPaid && !o.Applied:
 			todo = append(todo, *o)
+		case o.Status == StatusPending:
+			// Unanswered after its watch: ask every lateEvery, not every poll.
+			if now.Unix() > o.WatchUntil && o.LookupFailing && now.Sub(c.lastLookup[o.ID]) < lateEvery {
+				continue
+			}
+			todo = append(todo, *o)
+		case o.Status == StatusExpired && now.Unix() > o.WatchUntil+int64(keepClosed/time.Second):
+			if now.Sub(c.lastLookup[o.ID]) >= lateEvery {
+				todo = append(todo, *o)
+			}
 		}
 	}
 	c.mu.Unlock()
-	sort.Slice(todo, func(i, j int) bool { return todo[i].CreatedAt < todo[j].CreatedAt })
+	sort.Slice(todo, func(i, j int) bool {
+		return todo[i].CreatedAt < todo[j].CreatedAt || todo[i].CreatedAt == todo[j].CreatedAt && todo[i].ID < todo[j].ID
+	})
+	l := &lookups{c: c}
+	defer l.close()
 	for _, o := range todo {
 		if ctx.Err() != nil {
 			return
 		}
-		if o.Status == StatusPending {
-			c.lookup(ctx, o)
-		} else {
+		switch o.Status {
+		case StatusPaid:
 			c.apply(o.ID)
+		case StatusPending:
+			c.lookup(ctx, l, o)
+		case StatusExpired:
+			c.finalLookup(ctx, l, o)
 		}
 	}
 	c.prune()
 }
 
-func (c *Checkout) lookup(ctx context.Context, o Order) {
-	inv, err := c.cfg.Wallet.LookupInvoice(ctx, o.PaymentHash)
+func (c *Checkout) markLooked(id string) {
+	c.mu.Lock()
+	c.lastLookup[id] = c.cfg.Now()
+	c.mu.Unlock()
+}
+
+// lookup asks the wallet about one pending order.
+func (c *Checkout) lookup(ctx context.Context, l *lookups, o Order) {
+	inv, err := l.lookup(ctx, o.PaymentHash)
+	if ctx.Err() != nil {
+		return // shutting down: nothing learned, nothing counted
+	}
+	c.markLooked(o.ID)
 	now := c.cfg.Now()
 	if err == nil && inv.Settled() {
-		if why := mismatch(o, inv); why != "" {
-			// Never apply a payment the wallet describes differently: it
-			// is not the invoice this order made.
-			c.cfg.Alert("speakeasy: the wallet's paid invoice does not match the order; not applied", "order", o.ID, "payment_hash", o.PaymentHash, "why", why)
-			held := "held for the relay owner: " + why
-			o.Status, o.Applied, o.Outcome = StatusPaid, true, held
-			c.ledger(o)
-			c.update(o.ID, func(x *Order) { x.Status, x.Applied, x.Outcome = StatusPaid, true, held })
-			return
-		}
-		settled := inv.SettledAt
-		if settled == 0 {
-			settled = now.Unix()
-		}
-		c.update(o.ID, func(x *Order) { x.Status, x.SettledAt = StatusPaid, settled })
-		c.cfg.Log("speakeasy: invoice paid", "order", o.ID, "region", o.Region, "sats", o.AmountSats, "payment_hash", o.PaymentHash)
-		c.apply(o.ID)
+		c.settle(o, inv, false)
 		return
 	}
-	past := now.Unix() > o.ExpiresAt+int64(lookupGrace/time.Second)
-	if err != nil && !nwc.IsNotFound(err) {
-		// The wallet did not answer: never close an order on that, since
-		// it may have been paid. Past its grace, tell the owner once and
-		// keep asking.
+	if err != nil {
+		// No answer, or NOT_FOUND (a rotated connection may not see
+		// invoices another one made): never close an order on that, since
+		// it may have been paid. Once it can no longer be paid, tell the
+		// owner once and keep asking; give up only after GiveUp.
 		c.cfg.Log("speakeasy: invoice lookup failed", "order", o.ID, "error", err.Error())
-		if past && !o.LookupFailing {
-			c.cfg.Alert("speakeasy: cannot ask the wallet about an expired invoice; it stays open until the wallet answers", "order", o.ID, "payment_hash", o.PaymentHash)
+		if now.Unix() > o.ExpiresAt && !o.LookupFailing {
+			c.cfg.Alert("speakeasy: the wallet cannot be asked about an invoice that is no longer payable; it stays open until the wallet answers",
+				"order", o.ID, "payment_hash", o.PaymentHash, "error", err.Error())
 			c.update(o.ID, func(x *Order) { x.LookupFailing = true })
 		}
+		if now.Unix() > o.WatchUntil+int64(GiveUp/time.Second) {
+			o.Status, o.Outcome = StatusUnknown, "unknown: the wallet never answered; check the wallet for payment hash "+o.PaymentHash
+			c.ledger(o)
+			c.cfg.Alert("speakeasy: giving up on an order the wallet never answered about; check the wallet by hand", "order", o.ID, "payment_hash", o.PaymentHash)
+			c.update(o.ID, func(x *Order) { x.Status, x.Outcome, x.ClosedAt = o.Status, o.Outcome, now.Unix() })
+		}
 		return
 	}
-	// The wallet answered: unpaid (or unknown to it) and past its grace.
-	if past {
+	// The wallet answered: not paid. Close it once the watch has ended.
+	if now.Unix() > o.WatchUntil {
 		c.update(o.ID, func(x *Order) { x.Status = StatusExpired })
 	}
 }
 
-// mismatch says how a paid invoice differs from the order, or "".
+// finalLookup asks once more about an expired order before it is dropped:
+// a payment that settled after all is applied (or owed back), never lost.
+func (c *Checkout) finalLookup(ctx context.Context, l *lookups, o Order) {
+	inv, err := l.lookup(ctx, o.PaymentHash)
+	if ctx.Err() != nil {
+		return
+	}
+	c.markLooked(o.ID)
+	switch {
+	case err == nil && inv.Settled():
+		c.cfg.Alert("speakeasy: an expired order was paid after all; applying it", "order", o.ID, "region", o.Region, "payment_hash", o.PaymentHash)
+		c.settle(o, inv, true)
+	case err == nil:
+		c.drop(o.ID) // answered: never paid
+	case c.cfg.Now().Unix() > o.WatchUntil+int64(GiveUp/time.Second):
+		o.Outcome = "unknown: no last answer from the wallet; check the wallet for payment hash " + o.PaymentHash
+		c.ledger(o)
+		c.cfg.Alert("speakeasy: dropping an expired order the wallet never answered about one last time", "order", o.ID, "payment_hash", o.PaymentHash)
+		c.drop(o.ID)
+	}
+}
+
+// settle records a paid invoice and applies it, or holds it when the wallet
+// describes it differently from the order.
+func (c *Checkout) settle(o Order, inv nwc.Invoice, late bool) {
+	if why := mismatch(o, inv); why != "" {
+		// Never apply a payment the wallet describes differently: it is not
+		// (provably) the invoice this order made.
+		c.cfg.Alert("speakeasy: the wallet's paid invoice does not match the order; not applied", "order", o.ID, "payment_hash", o.PaymentHash, "why", why)
+		held := OutcomeHeld + why
+		o.Status, o.Applied, o.Outcome = StatusPaid, true, held
+		c.ledger(o)
+		seen := c.cfg.Now().Unix()
+		c.update(o.ID, func(x *Order) { x.Status, x.Applied, x.Outcome, x.ClosedAt = StatusPaid, true, held, seen })
+		return
+	}
+	settled := inv.SettledAt
+	if settled == 0 {
+		settled = c.cfg.Now().Unix()
+	}
+	seen := c.cfg.Now().Unix()
+	c.update(o.ID, func(x *Order) { x.Status, x.SettledAt, x.ClosedAt = StatusPaid, settled, seen })
+	c.cfg.Log("speakeasy: invoice paid", "order", o.ID, "region", o.Region, "sats", o.AmountSats, "payment_hash", o.PaymentHash, "late", late)
+	c.apply(o.ID)
+}
+
+// mismatch says how a paid invoice differs from the order, or "". The
+// payment hash and the exact amount must be there and equal; the
+// description and invoice, when the wallet gives them, must be ours.
 func mismatch(o Order, inv nwc.Invoice) string {
 	switch {
-	case inv.PaymentHash != "" && !strings.EqualFold(inv.PaymentHash, o.PaymentHash):
+	case inv.PaymentHash == "":
+		return "the wallet's answer has no payment hash"
+	case !strings.EqualFold(inv.PaymentHash, o.PaymentHash):
 		return "payment hash"
-	case inv.Amount != 0 && inv.Amount < o.AmountSats*1000:
+	case inv.Amount == 0:
+		return "the wallet's answer has no amount"
+	case inv.Amount != o.AmountSats*1000:
 		return "amount"
 	case inv.Description != "" && inv.Description != o.Description:
 		return "description"
@@ -444,8 +674,8 @@ func (c *Checkout) apply(id string) {
 		c.cfg.Alert("speakeasy: paid but the registry write failed; retrying", "order", o.ID, "region", o.Region, "error", retry.Error())
 		return
 	}
-	if strings.HasPrefix(outcome, OutcomeRefund) {
-		c.cfg.Alert("speakeasy: paid but bought nothing; a refund is owed", "order", o.ID, "region", o.Region, "name", o.Name,
+	if NeedsOwner(outcome) {
+		c.cfg.Alert("speakeasy: paid but bought nothing; a refund is owed", "order", o.ID, "region", o.Region,
 			"sats", o.AmountSats, "payment_hash", o.PaymentHash, "outcome", outcome)
 	}
 	// The ledger first: after a crash in between, a line twice is better
@@ -457,42 +687,44 @@ func (c *Checkout) apply(id string) {
 }
 
 // applyTo writes a paid order into the registry and says how it ended, or
-// returns an error worth retrying (the registry could not be written).
+// returns an error worth retrying (the registry could not be written). An
+// entry that already carries this order's payment hash is this order's
+// own write, made before a crash kept the order from being marked applied.
 func (c *Checkout) applyTo(o Order) (string, error) {
 	reg := c.cfg.Registry
-	switch o.Kind {
-	case OrderName:
-		// Already done (a stop between the write and marking the order
-		// applied): the speakeasy has exactly this name.
-		if sp := reg.Get(o.Region); sp != nil && len(sp.Names) == 1 && sp.Names[0] == o.Name {
-			return OutcomeNamed, nil
-		}
-		err := reg.SetName(o.Region, o.Name)
-		switch {
-		case err == nil:
-			return OutcomeNamed, nil
-		case errors.Is(err, ErrNotFound), errors.Is(err, ErrHasName), errors.Is(err, ErrNameTaken):
-			return OutcomeRefund + err.Error(), nil
-		case reg.CanName(o.Region, o.Name) != nil:
-			return OutcomeRefund + err.Error(), nil
-		}
-		return "", err
-	default:
-		_, err := reg.Add(Entry{
-			ID: o.Region, CreatedAt: o.SettledAt,
-			Note: fmt.Sprintf("paid %d sats, payment hash %s", o.AmountSats, o.PaymentHash),
-		})
-		switch {
-		case err == nil:
+	if sp := reg.Get(o.Region); sp != nil {
+		if sp.PaymentHash == o.PaymentHash {
+			if o.Name != "" && (len(sp.Names) == 0 || sp.Names[0] != o.Name) {
+				return OutcomeNameTaken, nil // made without its name before a crash
+			}
 			return OutcomeRegistered, nil
-		case reg.Get(o.Region) != nil:
-			return OutcomeAlready, nil
 		}
-		return "", err
+		return OutcomeAlready, nil
 	}
+	e := Entry{
+		ID: o.Region, CreatedAt: o.SettledAt, PaymentHash: o.PaymentHash,
+		Note: fmt.Sprintf("paid %d sats, payment hash %s", o.AmountSats, o.PaymentHash),
+	}
+	outcome := OutcomeRegistered
+	if o.Name != "" {
+		if reg.NameFree(o.Name, o.Region) == nil {
+			e.Names = []string{o.Name}
+		} else {
+			// Taken first another way: make the speakeasy, owe the name back.
+			outcome = OutcomeNameTaken
+		}
+	}
+	_, err := reg.Add(e)
+	switch {
+	case err == nil:
+		return outcome, nil
+	case reg.Get(o.Region) != nil: // added in between
+		return c.applyTo(o)
+	}
+	return "", err
 }
 
-// ledger appends a paid order to the ledger, the record that outlives the
+// ledger appends an order to the ledger, the record that outlives the
 // orders file.
 func (c *Checkout) ledger(o Order) {
 	if c.cfg.LedgerPath == "" {
@@ -512,6 +744,27 @@ func (c *Checkout) ledger(o Order) {
 	}
 }
 
+// Ledger reads the ledger: every paid, held, refund-owed and unknown order
+// ever recorded, oldest first (a line written twice after a crash appears
+// twice).
+func (c *Checkout) Ledger() ([]Order, error) {
+	data, err := os.ReadFile(c.cfg.LedgerPath)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []Order
+	for _, line := range strings.Split(string(data), "\n") {
+		var o Order
+		if strings.TrimSpace(line) != "" && json.Unmarshal([]byte(line), &o) == nil {
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
 func (c *Checkout) update(id string, f func(*Order)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -523,20 +776,35 @@ func (c *Checkout) update(id string, f func(*Order)) {
 	}
 }
 
-// prune drops closed orders older than keepClosed.
+func (c *Checkout) drop(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.orders, id)
+	delete(c.lastLookup, id)
+	if err := c.saveLocked(); err != nil {
+		c.cfg.Alert("speakeasy: could not save the orders", "error", err.Error())
+	}
+}
+
+// prune drops applied and unknown orders kept past keepClosed since they
+// closed (their watch ended, they settled, or they were given up on).
+// Expired ones are dropped only by their last lookup (finalLookup).
 func (c *Checkout) prune() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cut := c.cfg.Now().Add(-keepClosed).Unix()
 	n := len(c.orders)
 	for id, o := range c.orders {
-		closed := o.Status == StatusExpired || o.Status == StatusPaid && o.Applied
-		if closed && o.ExpiresAt < cut {
+		done := o.Status == StatusPaid && o.Applied || o.Status == StatusUnknown
+		if done && max(o.WatchUntil, o.SettledAt, o.ClosedAt) < cut {
 			delete(c.orders, id)
+			delete(c.lastLookup, id)
 		}
 	}
 	if len(c.orders) != n {
-		c.saveLocked()
+		if err := c.saveLocked(); err != nil {
+			c.cfg.Alert("speakeasy: could not save the orders", "error", err.Error())
+		}
 	}
 }
 
@@ -564,21 +832,33 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// validBolt11 accepts a BOLT 11 invoice's shape: "ln", then bech32
-// characters only, so it is safe in a lightning: link.
+// validBolt11 accepts a BOLT 11 invoice's shape: "ln", a human-readable
+// part of letters and digits, the separator "1", and data in bech32's
+// characters only (which has no "1", so the last "1" is the separator).
+// It is then safe in a lightning: link.
 func validBolt11(s string) bool {
 	s = strings.ToLower(s)
 	if len(s) < 20 || len(s) > 2048 || !strings.HasPrefix(s, "ln") {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+	sep := strings.LastIndexByte(s, '1')
+	if sep < 3 || len(s)-sep < 8 {
+		return false
+	}
+	for i := 0; i < sep; i++ {
+		if c := s[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	for i := sep + 1; i < len(s); i++ {
+		if !strings.ContainsRune(bech32Chars, rune(s[i])) {
 			return false
 		}
 	}
 	return true
 }
+
+const bech32Chars = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
 func isLowerHex(s string, n int) bool {
 	if len(s) != n {
@@ -591,4 +871,62 @@ func isLowerHex(s string, n int) bool {
 		}
 	}
 	return true
+}
+
+// bolt11Msat is the amount a BOLT 11 invoice's human-readable part
+// encodes, in millisatoshis, or 0 when it has none or cannot be read:
+// "ln" + currency letters + amount digits + an optional multiplier (m, u,
+// n, p), up to the last "1".
+func bolt11Msat(inv string) int64 {
+	inv = strings.ToLower(inv)
+	sep := strings.LastIndexByte(inv, '1')
+	if !strings.HasPrefix(inv, "ln") || sep < 3 {
+		return 0
+	}
+	hrp := inv[2:sep]
+	i := 0
+	for i < len(hrp) && hrp[i] >= 'a' && hrp[i] <= 'z' {
+		i++
+	}
+	num := hrp[i:]
+	if num == "" {
+		return 0
+	}
+	mult := byte(0)
+	if last := num[len(num)-1]; last < '0' || last > '9' {
+		mult, num = last, num[:len(num)-1]
+	}
+	if num == "" || len(num) > 15 || num[0] == '0' {
+		return 0
+	}
+	var n int64
+	for j := 0; j < len(num); j++ {
+		if num[j] < '0' || num[j] > '9' {
+			return 0
+		}
+		n = n*10 + int64(num[j]-'0')
+	}
+	// 1 BTC = 100,000,000,000 msat.
+	var factor int64
+	switch mult {
+	case 0:
+		factor = 100_000_000_000
+	case 'm':
+		factor = 100_000_000
+	case 'u':
+		factor = 100_000
+	case 'n':
+		factor = 100
+	case 'p':
+		if n%10 != 0 {
+			return 0 // BOLT 11: a pico amount must be whole millisatoshis
+		}
+		return n / 10
+	default:
+		return 0
+	}
+	if n > (1<<62)/factor {
+		return 0
+	}
+	return n * factor
 }

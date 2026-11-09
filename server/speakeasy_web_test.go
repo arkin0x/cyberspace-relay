@@ -39,8 +39,8 @@ func TestRegionDashboard(t *testing.T) {
 	id := "0fe6b3deeb67e952f852e8c1df15"
 
 	code, body, h := get(t, http.MethodGet, r.root+"/"+id, "Accept", browser)
-	if code != 200 || !strings.HasPrefix(h.Get("Content-Type"), "text/html") {
-		t.Fatalf("region page: %d %s", code, h.Get("Content-Type"))
+	if code != 200 || !strings.HasPrefix(h.Get("Content-Type"), "text/html") || !strings.Contains(h.Get("Vary"), "Accept") {
+		t.Fatalf("region page: %d %s, Vary %q", code, h.Get("Content-Type"), h.Get("Vary"))
 	}
 	for _, want := range []string{id, "Not a speakeasy", "a box, 2^47 by 2^48 by 2^48 gibsons (x, y, z)", "both: dataspace (0) and ideaspace (1)",
 		"https://www.onosendai.tech/C/" + id, "0fe6b3deeb67e952f852e8c1df15000000000000000000000000000000000000"} {

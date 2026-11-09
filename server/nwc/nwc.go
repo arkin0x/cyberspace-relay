@@ -185,7 +185,11 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	defer cancel()
 	var last error
 	for _, relay := range c.uri.Relays {
-		err := c.callOn(ctx, relay, method, params, result)
+		s, err := c.sessionOn(ctx, relay)
+		if err == nil {
+			err = s.call(ctx, method, params, result)
+			s.Close()
+		}
 		var we *Error
 		if err == nil || errors.As(err, &we) || ctx.Err() != nil {
 			return err
@@ -195,17 +199,64 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	return last
 }
 
-func (c *Client) callOn(ctx context.Context, relay, method string, params map[string]any, result any) error {
+// Session is one connection to the wallet's relay, reused for several
+// requests one after another (a poll pass looks up every open invoice on
+// one connection). It is not safe for concurrent use.
+type Session struct {
+	c     *Client
+	relay string
+	conn  *wsConn
+	enc   string
+}
+
+// Lookuper looks up invoices on one connection until closed.
+type Lookuper interface {
+	LookupInvoice(ctx context.Context, paymentHash string) (Invoice, error)
+	Close()
+}
+
+// LookupSession opens a Session on the first relay that answers.
+func (c *Client) LookupSession(ctx context.Context) (Lookuper, error) {
+	dctx, cancel := context.WithTimeout(ctx, c.Timeout)
+	defer cancel()
+	var last error
+	for _, relay := range c.uri.Relays {
+		s, err := c.sessionOn(dctx, relay)
+		if err == nil {
+			return s, nil
+		}
+		last = err
+	}
+	return nil, last
+}
+
+func (c *Client) sessionOn(ctx context.Context, relay string) (*Session, error) {
 	conn, err := dial(ctx, relay, c.Origin)
 	if err != nil {
-		return fmt.Errorf("nwc: %s: %w", relay, err)
+		return nil, fmt.Errorf("nwc: %s: %w", relay, err)
 	}
-	defer conn.close()
-
 	enc, err := c.encryption(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("nwc: %s: %w", relay, err)
+		conn.close()
+		return nil, fmt.Errorf("nwc: %s: %w", relay, err)
 	}
+	return &Session{c: c, relay: relay, conn: conn, enc: enc}, nil
+}
+
+// Close closes the connection.
+func (s *Session) Close() { s.conn.close() }
+
+// LookupInvoice is Client.LookupInvoice on this connection.
+func (s *Session) LookupInvoice(ctx context.Context, paymentHash string) (Invoice, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.c.Timeout)
+	defer cancel()
+	var inv Invoice
+	err := s.call(ctx, "lookup_invoice", map[string]any{"payment_hash": paymentHash}, &inv)
+	return inv, err
+}
+
+func (s *Session) call(ctx context.Context, method string, params map[string]any, result any) error {
+	c, conn, relay, enc := s.c, s.conn, s.relay, s.enc
 	body, _ := json.Marshal(map[string]any{"method": method, "params": params})
 	content, err := c.encrypt(enc, string(body))
 	if err != nil {
@@ -232,6 +283,7 @@ func (c *Client) callOn(ctx context.Context, relay, method string, params map[st
 	if err := conn.send("EVENT", req); err != nil {
 		return fmt.Errorf("nwc: %s: %w", relay, err)
 	}
+	defer conn.send("CLOSE", sub)
 	for {
 		label, msg, err := conn.next(ctx)
 		if err != nil {
@@ -429,9 +481,10 @@ func nip04Decrypt(priv *btcec.PrivateKey, pub *btcec.PublicKey, payload string) 
 // ── a websocket ──────────────────────────────────────────────────────────
 
 type wsConn struct {
-	ws   *websocket.Conn
-	msgs chan []json.RawMessage
-	errc chan error
+	ws        *websocket.Conn
+	msgs      chan []json.RawMessage
+	errc      chan error
+	closeOnce sync.Once
 }
 
 func dial(ctx context.Context, relay, origin string) (*wsConn, error) {
@@ -508,9 +561,11 @@ func (c *wsConn) send(v ...any) error {
 }
 
 func (c *wsConn) close() {
-	c.ws.Close()
-	for range c.msgs { // let the reader finish
-	}
+	c.closeOnce.Do(func() {
+		c.ws.Close()
+		for range c.msgs { // let the reader finish
+		}
+	})
 }
 
 func isHex(s string, n int) bool {

@@ -14,6 +14,9 @@ import (
 // so rotating the secret is replacing the file: no restart.
 type FileWallet struct {
 	path string
+	// Warn is told when the file, as read (at open and at each change),
+	// can be read by others than its owner. Nil is silent.
+	Warn func(msg string, args ...any)
 
 	mu     sync.Mutex
 	client *Client
@@ -22,9 +25,10 @@ type FileWallet struct {
 }
 
 // OpenFile reads the connection string at path. The error never quotes
-// the file's content.
-func OpenFile(path string) (*FileWallet, error) {
-	f := &FileWallet{path: path}
+// the file's content. warn, if not nil, is told whenever the file as read
+// is readable by others than its owner.
+func OpenFile(path string, warn func(msg string, args ...any)) (*FileWallet, error) {
+	f := &FileWallet{path: path, Warn: warn}
 	if _, err := f.current(); err != nil {
 		return nil, err
 	}
@@ -55,7 +59,19 @@ func (f *FileWallet) current() (*Client, error) {
 		return nil, err
 	}
 	f.client, f.mod, f.size = c, st.ModTime(), st.Size()
+	if st.Mode().Perm()&0o077 != 0 && f.Warn != nil {
+		f.Warn("the NWC connection file can be read by others than its owner; chmod 600 it", "path", f.path)
+	}
 	return c, nil
+}
+
+// LookupSession is Client.LookupSession for the file as it is now.
+func (f *FileWallet) LookupSession(ctx context.Context) (Lookuper, error) {
+	c, err := f.current()
+	if err != nil {
+		return nil, err
+	}
+	return c.LookupSession(ctx)
 }
 
 // Describe names the connection without its secret, for logs.
