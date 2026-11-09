@@ -615,10 +615,10 @@ func TestAnchorLineAlertsOnADeepLoadReorganization(t *testing.T) {
 	}
 }
 
-// TestAnchorLineStuckPathReadsOncePerTip (#25 item 4): a block at the tip
-// that does not link does not make every poll read about 1,000 heights
-// below again.
-func TestAnchorLineStuckPathReadsOncePerTip(t *testing.T) {
+// TestAnchorLineStuckPathIsThrottled (#25 item 4): a block at the tip that
+// does not link does not make every poll read about 1,000 heights below
+// again, but the re-read still comes at least every stuckEvery polls.
+func TestAnchorLineStuckPathIsThrottled(t *testing.T) {
 	pub := newSigner(t)
 	main := testChain(0, [32]byte{}, 30, 39)
 	stray := testChain(30, [32]byte{7}, 1, 40)[0] // at the tip's height, parent unknown
@@ -626,21 +626,96 @@ func TestAnchorLineStuckPathReadsOncePerTip(t *testing.T) {
 	for _, b := range main {
 		s.add(b.anchor(t, pub, true, 1))
 	}
-	s.add(stray.anchor(t, pub, true, 2))
+	s.add(stray.anchor(t, pub, true, 1))
 	l, _ := newTestLine(s, pub.pubkey, nil)
 	l.Load(context.Background())
 	l.Update(context.Background())
-	s.mu.Lock()
-	before := s.queries
-	s.mu.Unlock()
+	queries := func() int { s.mu.Lock(); defer s.mu.Unlock(); return s.queries }
+	before := queries()
 	for i := 0; i < 5; i++ {
 		l.Update(context.Background())
 	}
-	s.mu.Lock()
-	after := s.queries
-	s.mu.Unlock()
-	if after-before > 5 {
-		t.Fatalf("%d queries for five polls; the stuck path re-reads every poll", after-before)
+	// Each poll: the read above the tip and the one-event check for new
+	// anchors. A re-read below would add one more.
+	if n := queries() - before; n > 10 {
+		t.Fatalf("%d queries for five polls; the stuck path re-reads every poll", n)
+	}
+	before = queries()
+	for i := 0; i < stuckEvery; i++ {
+		l.Update(context.Background())
+	}
+	if n := queries() - before; n <= 2*stuckEvery {
+		t.Fatalf("%d queries for %d polls: no re-read below the tip at the floor", n, stuckEvery)
+	}
+}
+
+// TestAnchorLineLateAnchorsBelowTheTip (second re-check, #25): a 4-block
+// rival forking at 47 whose block 50 lands one poll before 47 to 49. The
+// stuck path must still read them and reorganize: at once when they were
+// signed after the newest anchor read, within stuckEvery polls when they
+// were signed before it (as a publisher signs in height order).
+func TestAnchorLineLateAnchorsBelowTheTip(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		at50     int64
+		at4749   int64
+		maxPolls int
+	}{
+		{"signed after", 2, 3, 1},
+		{"signed before", 3, 2, stuckEvery},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pub := newSigner(t)
+			main := testChain(0, [32]byte{}, 50, 43)
+			s := &memStore{}
+			for _, b := range main {
+				s.add(b.anchor(t, pub, true, 1))
+			}
+			l, _ := newTestLine(s, pub.pubkey, nil)
+			l.Load(context.Background())
+			rival := testChain(47, main[46].hash, 4, 44) // 47..50
+			s.add(rival[3].anchor(t, pub, true, c.at50))
+			l.Update(context.Background()) // 50 alone: it does not link
+			checkLine(t, l, main)
+			for _, b := range rival[:3] {
+				s.add(b.anchor(t, pub, true, c.at4749))
+			}
+			polls := 0
+			for l.Epoch() == 0 && polls < stuckEvery+2 {
+				l.Update(context.Background())
+				polls++
+			}
+			if l.Epoch() != 1 || polls > c.maxPolls {
+				t.Fatalf("epoch %d after %d polls, want 1 within %d", l.Epoch(), polls, c.maxPolls)
+			}
+			checkLine(t, l, append(append([]testBlock(nil), main[:47]...), rival...))
+		})
+	}
+}
+
+// TestAnchorLineFillRemembersFailures (second re-check, #25 low): a
+// pending block above a gap whose headers do not lead to the tip is not
+// asked about again at every poll, nor logged again.
+func TestAnchorLineFillRemembersFailures(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 20, 45)
+	stray := testChain(22, [32]byte{3}, 3, 46) // 22..24, its parent unknown anywhere
+	s := &memStore{}
+	for _, b := range main {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	for _, b := range stray {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	src := headersOf(main)
+	l, logs := newTestLine(s, pub.pubkey, src)
+	l.Load(context.Background())
+	asked := src.asked
+	for i := 0; i < 5; i++ {
+		l.Update(context.Background())
+	}
+	if src.asked != asked || countLogs(logs, "fallback did not fill") != 1 {
+		t.Fatalf("asked %d more times, logged %d times", src.asked-asked, countLogs(logs, "fallback did not fill"))
 	}
 }
 
