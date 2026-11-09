@@ -253,3 +253,33 @@ func TestRegionPathsAreUnderC(t *testing.T) {
 		t.Error("the built-in client may dial a /C/ address")
 	}
 }
+
+// TestBareCIsNothing: /C and /C/ alone are 404 for every request type (a
+// websocket, NIP-11, a browser), even with the region "c" registered.
+func TestBareCIsNothing(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	r.register(t, "c")
+	passed := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) })
+	for _, p := range []string{"/C", "/C/"} {
+		if code, _, _ := nip11(t, r.root+p); code != 404 {
+			t.Errorf("NIP-11 at %s: %d", p, code)
+		}
+		if _, err := dial(t, r.wsRoot+p); err == nil {
+			t.Errorf("a websocket at %s was served", p)
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		req.Header.Set("Accept", browser)
+		speakeasyRoutes(passed).ServeHTTP(w, req)
+		if w.Code != 299 { // grain's own handlers, which answer 404
+			t.Errorf("a browser at %s: %d, want it passed on", p, w.Code)
+		}
+		if speakeasyDialGuard(r.wsRoot+p) != nil {
+			t.Errorf("the dial guard refuses %s, which is no speakeasy", p)
+		}
+	}
+	// The region "c" itself is at /C/c.
+	if code, _, _ := nip11(t, r.root+"/C/c"); code != 200 {
+		t.Errorf("/C/c: %d", code)
+	}
+}

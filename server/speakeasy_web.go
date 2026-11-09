@@ -90,6 +90,9 @@ func wantsPage(r *http.Request) bool {
 // spelling of a region is sent to its canonical one.
 func (rt *speakeasyRuntime) servePage(w http.ResponseWriter, r *http.Request) bool {
 	path := r.URL.EscapedPath()
+	if speakeasy.IsBareRegionPrefix(path) {
+		return false // /C and /C/ name nothing
+	}
 	sp, canonical := rt.reg.Lookup(path)
 	var region regiongate.PathRegion
 	switch {

@@ -224,7 +224,7 @@ func PathFor(seg string) string {
 //   - /<name>: the named speakeasy, matched exactly as spelled; canonical
 //     is the path itself.
 func (r *Registry) Lookup(escapedPath string) (sp *Speakeasy, canonical string) {
-	if len(escapedPath) < 2 || escapedPath[0] != '/' || len(escapedPath) > 4*maxSegment {
+	if len(escapedPath) < 2 || escapedPath[0] != '/' || len(escapedPath) > 4*maxSegment || IsBareRegionPrefix(escapedPath) {
 		return nil, ""
 	}
 	key := escapedPath[1:]
@@ -250,6 +250,11 @@ func (r *Registry) Lookup(escapedPath string) (sp *Speakeasy, canonical string) 
 	return sp, PathFor(key)
 }
 
+// IsBareRegionPrefix reports whether a path is /C or /C/ alone: the prefix
+// with no region after it. It names nothing (404 for every request), not
+// the one-character region "c" its letters would otherwise read as.
+func IsBareRegionPrefix(p string) bool { return p == "/C" || p == "/C/" }
+
 // cutRegionPrefix returns what follows /C/ (or /c/, a spelling sent to
 // /C/), and whether the path starts with it.
 func cutRegionPrefix(p string) (string, bool) {
@@ -263,7 +268,7 @@ func cutRegionPrefix(p string) (string, bool) {
 // relay serves or redirects: /C/<string>, /c/<string> or a bare /<string>,
 // where the string is one the RegionPath reads as a region.
 func IsRegionPath(escapedPath string, parse RegionPath) bool {
-	if parse == nil {
+	if parse == nil || IsBareRegionPrefix(escapedPath) {
 		return false
 	}
 	if rest, ok := cutRegionPrefix(escapedPath); ok {
