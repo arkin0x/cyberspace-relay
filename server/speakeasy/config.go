@@ -85,6 +85,10 @@ type PaymentsConfig struct {
 	MaxPendingPerRequester int `yaml:"max_pending_per_requester"`
 	MaxPendingPerNetwork   int `yaml:"max_pending_per_network"`
 	MaxPendingPerRegion    int `yaml:"max_pending_per_region"`
+	// MaxLingeringOrders caps orders that can no longer be paid but whose
+	// answer from the wallet is still awaited; at the cap, sales pause.
+	// Default 64.
+	MaxLingeringOrders int `yaml:"max_lingering_orders"`
 }
 
 // Default prices (owner ruling 2026-11-09).
@@ -143,7 +147,7 @@ func ParseConfig(data []byte) (*Config, error) {
 		c.MaxConnectionsPerPath = 200
 	}
 	p := &c.Payments
-	if p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 || p.MaxPendingPerNetwork < 0 || p.MaxPendingPerRegion < 0 {
+	if p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 || p.MaxPendingPerNetwork < 0 || p.MaxPendingPerRegion < 0 || p.MaxLingeringOrders < 0 {
 		return nil, fmt.Errorf("%s: payments values must not be negative", ConfigFile)
 	}
 	if p.SpeakeasySats == 0 {
@@ -166,6 +170,9 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if p.MaxPendingPerRegion == 0 {
 		p.MaxPendingPerRegion = 2
+	}
+	if p.MaxLingeringOrders == 0 {
+		p.MaxLingeringOrders = 64
 	}
 	p.NWCFile = strings.TrimSpace(p.NWCFile)
 	if c.Planes == nil {

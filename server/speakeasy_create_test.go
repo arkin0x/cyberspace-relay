@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,8 +24,9 @@ import (
 
 // memWallet stands in for the HOSAKA wallet: no network, invoices in memory.
 type memWallet struct {
-	mu       sync.Mutex
-	invoices map[string]*nwc.Invoice
+	mu          sync.Mutex
+	invoices    map[string]*nwc.Invoice
+	failLookups bool
 }
 
 func (w *memWallet) MakeInvoice(_ context.Context, msat int64, desc string, expiry time.Duration) (nwc.Invoice, error) {
@@ -45,6 +47,9 @@ func (w *memWallet) MakeInvoice(_ context.Context, msat int64, desc string, expi
 func (w *memWallet) LookupInvoice(_ context.Context, h string) (nwc.Invoice, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.failLookups {
+		return nwc.Invoice{}, errors.New("wallet relay down")
+	}
 	if inv, ok := w.invoices[h]; ok {
 		return *inv, nil
 	}
@@ -259,5 +264,71 @@ func TestRefundOwedIsVisible(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("the page lacks %q", want)
 		}
+	}
+}
+
+// TestPausedSalesAndResolve: while sales are paused the page offers no
+// Create and the endpoint answers 503; an expired invoice's QR is not
+// shown; NIP-86 grain_speakeasy_payment_resolve takes a refund off the
+// owner's list.
+func TestPausedSalesAndResolve(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	orders := r.root + OrdersPath
+	w, co := withCheckout(t, r)
+	_, a := post(t, orders, "application/json", `{"region":"abc"}`)
+	b, err := co.Create(context.Background(), speakeasy.OrderRequest{Kind: speakeasy.OrderSpeakeasy, Region: "abc", Requester: "other", Network: "other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ga, _ := co.Get(a["id"].(string))
+	w.pay(ga.PaymentHash)
+	w.pay(b.PaymentHash)
+	co.Poll(context.Background())
+	res, _ := r.rt.Payments(nil)
+	owe := res.(map[string]any)["needs_owner"].([]speakeasy.Order)
+	if len(owe) != 1 || res.(map[string]any)["sales"] != "" {
+		t.Fatalf("payments: %v", res)
+	}
+	if _, msg := r.rt.PaymentResolve([]any{owe[0].PaymentHash, "refunded by hand"}); msg != "" {
+		t.Fatal(msg)
+	}
+	if res, _ := r.rt.Payments(nil); len(res.(map[string]any)["needs_owner"].([]speakeasy.Order)) != 0 {
+		t.Fatalf("still listed after resolve: %v", res)
+	}
+	if _, msg := r.rt.PaymentResolve([]any{owe[0].PaymentHash, "again"}); msg == "" {
+		t.Fatal("resolved twice")
+	}
+
+	// An open invoice past its expiry: no QR.
+	_, c := post(t, orders, "application/json", `{"region":"abd"}`)
+	co.Orders() // the order exists
+	got, _ := co.Get(c["id"].(string))
+	if _, st := getJSON(t, orders+"/"+got.ID); st["qr_svg"] == nil {
+		t.Fatal("no QR while payable")
+	}
+
+	// Paused: no offer, 503.
+	w.mu.Lock()
+	w.failLookups = true
+	w.mu.Unlock()
+	co.Poll(context.Background())
+	if _, body, _ := get(t, http.MethodGet, r.root+"/abe", "Accept", browser); strings.Contains(body, "Create speakeasy for") {
+		t.Fatal("Create offered while paused")
+	}
+	if code, out := post(t, orders, "application/json", `{"region":"abe"}`); code != 503 {
+		t.Fatalf("paused: %d %v", code, out)
+	}
+}
+
+// TestQROnlyWhilePayable: an order still open past its expiry (its answer
+// awaited) shows no QR; one that can be paid does.
+func TestQROnlyWhilePayable(t *testing.T) {
+	rt := &speakeasyRuntime{publicURL: "wss://relay.example"}
+	inv := "lnbc10u1p" + strings.Repeat("q", 50)
+	if v := rt.view(speakeasy.Order{Status: speakeasy.StatusPending, Invoice: inv, ExpiresAt: time.Now().Add(time.Minute).Unix()}); v.QR == "" {
+		t.Fatal("no QR while payable")
+	}
+	if v := rt.view(speakeasy.Order{Status: speakeasy.StatusPending, Invoice: inv, ExpiresAt: time.Now().Add(-time.Second).Unix()}); v.QR != "" {
+		t.Fatal("a QR for an invoice that can no longer be paid")
 	}
 }

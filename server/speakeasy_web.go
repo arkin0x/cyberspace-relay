@@ -123,7 +123,7 @@ func (rt *speakeasyRuntime) servePage(w http.ResponseWriter, r *http.Request) bo
 		url = rt.url(sp.ID)
 	}
 	page := speakeasy.NewPage(region, rt.cfg.Planes, sp, url)
-	if sp == nil && rt.checkout != nil {
+	if sp == nil && rt.checkout != nil && rt.checkout.Selling() {
 		page.Create = &speakeasy.PageCreate{Sats: rt.cfg.Payments.SpeakeasySats, Endpoint: OrdersPath}
 	}
 	var buf bytes.Buffer
@@ -177,7 +177,7 @@ type orderView struct {
 func (rt *speakeasyRuntime) view(o speakeasy.Order) orderView {
 	v := orderView{ID: o.ID, Kind: o.Kind, Region: o.Region, AmountSats: o.AmountSats, PaymentHash: o.PaymentHash, Invoice: o.Invoice,
 		ExpiresAt: o.ExpiresAt, Status: o.Status, Applied: o.Applied, Outcome: o.Outcome, NeedsOwner: speakeasy.NeedsOwner(o.Outcome)}
-	if o.Status == speakeasy.StatusPending { // only an open invoice is shown
+	if o.Status == speakeasy.StatusPending && o.ExpiresAt > time.Now().Unix() { // only an invoice that can be paid
 		if qr, err := speakeasy.InvoiceQR(o.Invoice); err == nil {
 			v.QR = qr
 		}
@@ -253,7 +253,9 @@ func (rt *speakeasyRuntime) createOrder(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, rt.view(o))
 	case errors.Is(err, speakeasy.ErrAlreadySpeakeasy):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-	case errors.Is(err, speakeasy.ErrTooManyInvoices), errors.Is(err, speakeasy.ErrRegionBusy):
+	case errors.Is(err, speakeasy.ErrPaused), errors.Is(err, speakeasy.ErrPaymentsOff):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+	case errors.Is(err, speakeasy.ErrTooManyInvoices), errors.Is(err, speakeasy.ErrRegionBusy), errors.Is(err, speakeasy.ErrNetworkHasOrder):
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
 	case errors.Is(err, speakeasy.ErrNotRegion):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

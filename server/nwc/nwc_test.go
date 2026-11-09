@@ -37,6 +37,8 @@ type fakeWallet struct {
 	forge   bool // answer with another key's signature
 	wrongE  bool // answer naming another request
 	errCode string
+	// closeOther sends a CLOSED for another subscription before answering.
+	closeOther bool
 
 	mu       sync.Mutex
 	invoices map[string]*Invoice
@@ -113,6 +115,9 @@ func (w *fakeWallet) serve() *httptest.Server {
 					continue
 				}
 				send("OK", ev.ID, true, "")
+				if w.closeOther {
+					send("CLOSED", "nwc-someone-else", "error: not yours")
+				}
 				if resp, ok := w.answer(ev); ok {
 					send("EVENT", subs[ev.ID], resp)
 				}
@@ -444,6 +449,17 @@ func TestLookupSessionUsesOneConnection(t *testing.T) {
 	defer w.mu.Unlock()
 	if w.conns != 1 {
 		t.Fatalf("%d connections for six lookups, want 1", w.conns)
+	}
+}
+
+// TestClosedIsMatchedToItsSubscription: a CLOSED for another subscription
+// on the connection does not end the request.
+func TestClosedIsMatchedToItsSubscription(t *testing.T) {
+	w := newFakeWallet(t)
+	w.closeOther = true
+	cl := newClient(t, w, wsURL(w.serve()))
+	if _, err := cl.MakeInvoice(context.Background(), 1000, "x", time.Minute); err != nil {
+		t.Fatalf("a CLOSED for another subscription ended the request: %v", err)
 	}
 }
 

@@ -48,7 +48,8 @@ payments:
   max_pending_invoices: 256       # payable open invoices in all
   max_pending_per_requester: 3    # per client address (IPv6: per /64)
   max_pending_per_network: 6      # per IPv6 /48 or IPv4 /24
-  max_pending_per_region: 2       # per region, across requesters
+  max_pending_per_region: 2       # per region: distinct networks, one invoice each
+  max_lingering_orders: 64        # unpayable orders still awaiting an answer; at the cap, sales pause
 
 # The chain settings every speakeasy is judged with: the keys of region.yml
 # except enabled, regions and gate_reads. One chain cache and one work queue
