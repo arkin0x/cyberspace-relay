@@ -196,29 +196,87 @@ func (r *Registry) insert(s *Speakeasy) {
 	}
 }
 
+// RegionPrefix starts a speakeasy's canonical path: /C/<region string>,
+// exactly as www.onosendai.tech/C/<region string> (owner ruling
+// 2026-11-09). Names stay at /<name>.
+const RegionPrefix = "/C/"
+
+// PathFor is the canonical path of a speakeasy path segment: /C/<id> for a
+// region id (lowercase hex), /<name> for a name. A name never reads as
+// hex (CheckName), so the two cannot be confused.
+func PathFor(seg string) string {
+	if validID(seg) {
+		return RegionPrefix + seg
+	}
+	return "/" + seg
+}
+
 // Lookup returns the speakeasy a request path leads to and its canonical
 // path, or nil. escapedPath is the path as sent
-// (http.Request.URL.EscapedPath()). With a RegionPath, every spelling
-// ONOSENDAI reads as a region (case, 0x, trailing slashes, escapes) leads to
-// that region's speakeasy, and canonical is "/" + its id; the caller sends
-// other spellings there. A path that is not a region is looked up as it is
-// spelled (names, later).
+// (http.Request.URL.EscapedPath()).
+//
+//   - /C/<region string>: the region's speakeasy. The string after /C/ is
+//     read by the RegionPath (ONOSENDAI's rules: case, 0x, trailing
+//     slashes, escapes); canonical is /C/ + its id.
+//   - A bare /<region string>, or /c/ in lower case: the same speakeasy,
+//     with canonical /C/<id>, which differs from the path: the caller sends
+//     browsers there and refuses websockets (an AUTH signs the exact URL).
+//   - /<name>: the named speakeasy, matched exactly as spelled; canonical
+//     is the path itself.
 func (r *Registry) Lookup(escapedPath string) (sp *Speakeasy, canonical string) {
-	if len(escapedPath) < 2 || escapedPath[0] != '/' || len(escapedPath) > 4*maxSegment {
+	if len(escapedPath) < 2 || escapedPath[0] != '/' || len(escapedPath) > 4*maxSegment || IsBareRegionPrefix(escapedPath) {
 		return nil, ""
 	}
 	key := escapedPath[1:]
-	if r.parse != nil {
+	region := false
+	if rest, ok := cutRegionPrefix(escapedPath); ok {
+		if r.parse == nil {
+			key, region = rest, true
+		} else if c, _, ok := r.parse("/" + rest); ok {
+			key, region = c, true
+		} else {
+			return nil, ""
+		}
+	} else if r.parse != nil {
 		if c, _, ok := r.parse(escapedPath); ok {
-			key = c
+			key, region = c, true
 		}
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if sp = r.byPath[key]; sp == nil {
+	if sp = r.byPath[key]; sp == nil || region && sp.ID != key {
 		return nil, ""
 	}
-	return sp, "/" + key
+	return sp, PathFor(key)
+}
+
+// IsBareRegionPrefix reports whether a path is /C or /C/ alone: the prefix
+// with no region after it. It names nothing (404 for every request), not
+// the one-character region "c" its letters would otherwise read as.
+func IsBareRegionPrefix(p string) bool { return p == "/C" || p == "/C/" }
+
+// cutRegionPrefix returns what follows /C/ (or /c/, a spelling sent to
+// /C/), and whether the path starts with it.
+func cutRegionPrefix(p string) (string, bool) {
+	if len(p) > 3 && p[0] == '/' && (p[1] == 'C' || p[1] == 'c') && p[2] == '/' {
+		return p[3:], true
+	}
+	return "", false
+}
+
+// IsRegionPath reports whether a path names a region in any spelling the
+// relay serves or redirects: /C/<string>, /c/<string> or a bare /<string>,
+// where the string is one the RegionPath reads as a region.
+func IsRegionPath(escapedPath string, parse RegionPath) bool {
+	if parse == nil || IsBareRegionPrefix(escapedPath) {
+		return false
+	}
+	if rest, ok := cutRegionPrefix(escapedPath); ok {
+		_, _, ok := parse("/" + rest)
+		return ok
+	}
+	_, _, ok := parse(escapedPath)
+	return ok
 }
 
 // Get returns the speakeasy with this id, or nil.
@@ -246,12 +304,48 @@ func (r *Registry) List() []Entry {
 func (r *Registry) ContainsAny(c regiongate.Coord) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, s := range r.byID {
-		if s.Regions.Contains(c) {
-			return true
+	found := false
+	r.holding(c, func(*Speakeasy) bool { found = true; return false })
+	return found
+}
+
+// holding calls f for every speakeasy whose region holds c, the longest id
+// first, until f returns false. With the region parser, a speakeasy's id
+// is its region string, the region every coordinate whose hex starts with
+// it, so the candidates are the 64 prefixes of c's hex: 64 map lookups,
+// each confirmed by the region (which also applies the planes setting),
+// whatever the registry's size. Without the parser (tests that register
+// regions by hand) ids say nothing, so every entry is checked. Called with
+// mu held.
+func (r *Registry) holding(c regiongate.Coord, f func(*Speakeasy) bool) {
+	if r.parse == nil {
+		var all []*Speakeasy
+		for _, s := range r.byID {
+			if s.Regions.Contains(c) {
+				all = append(all, s)
+			}
+		}
+		sort.Slice(all, func(i, j int) bool {
+			if len(all[i].ID) != len(all[j].ID) {
+				return len(all[i].ID) > len(all[j].ID)
+			}
+			return all[i].ID < all[j].ID
+		})
+		for _, s := range all {
+			if !f(s) {
+				return
+			}
+		}
+		return
+	}
+	h := c.Hex()
+	for k := len(h); k >= 1; k-- {
+		if s := r.byID[h[:k]]; s != nil && s.Regions.Contains(c) {
+			if !f(s) {
+				return
+			}
 		}
 	}
-	return false
 }
 
 // Len is how many speakeasies are registered.
@@ -324,4 +418,15 @@ func (r *Registry) save(entries []Entry) error {
 		return err
 	}
 	return r.write(r.path, append(data, '\n'), 0o644)
+}
+
+// Containing returns every speakeasy whose region holds c, in the planes it
+// spans, the longest id (the smallest region) first and then by id: the
+// answer to "which speakeasies can this position enter".
+func (r *Registry) Containing(c regiongate.Coord) []Entry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Entry
+	r.holding(c, func(s *Speakeasy) bool { out = append(out, s.Entry); return true })
+	return out
 }

@@ -12,7 +12,7 @@ This fork of grain runs **relay.onosendai.tech**, the canonical relay for ONOSEN
 
 ## Next: speakeasies (owner's vision, 2026-11-04)
 
-Any region gets a page at `relay.onosendai.tech/<region>`. Paying 1,000 sats (an invoice from hosaka@getalby.com) makes it a **speakeasy**: that path becomes a relay that reads and writes only for authenticated pubkeys whose valid chain has its head inside the region. 7,000 sats reserves a name (`relay.onosendai.tech/<name>`). Chain checks are queued and incrementally cached, and speakeasy events are kept apart from the main pool.
+Any region gets a page at `relay.onosendai.tech/C/<region>` (as ONOSENDAI's `/C/`, owner ruling 2026-11-09). Paying 1,000 sats (an invoice from hosaka@getalby.com) makes it a **speakeasy**: that path becomes a relay that reads and writes only for authenticated pubkeys whose valid chain has its head inside the region. 7,000 sats reserves a name (`relay.onosendai.tech/<name>`). Chain checks are queued and incrementally cached, and speakeasy events are kept apart from the main pool.
 
 Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/speakeasies.md). Built on the existing region gate: [docs/region-gate.md](docs/region-gate.md).
 
@@ -23,7 +23,7 @@ Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/sp
 | Bitcoin block data + ride checks (landfall math in Go) | DONE (#20); reorganization cap of 6 blocks 2026-11-09 |
 | Incremental chain cache plus bounded queue | DONE (#15) |
 | Path routing, per-path NIP-11 and AUTH, separate storage | DONE (#19, #21) |
-| Region dashboard | not started |
+| Region dashboard and discovery endpoint | in review 2026-11-09 |
 | Create Speakeasy (Lightning) | not started |
 | Named speakeasies | not started |
 | ONOSENDAI: show a region's speakeasy and offer to add it | not started |

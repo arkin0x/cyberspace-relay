@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>{{if .Name}}{{.Name}}{{else}}Region {{.Region}}{{end}}</title>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<!-- grain's theme: the saved palette (theme.js) and its tokens and fonts
+     (the compiled stylesheet, in release builds). Every token below has a
+     fallback, the grain palette, so the page reads the same where those
+     files are not served (a gated root answers them 404). -->
+<script src="/static/js/theme.js"></script>
+<link rel="stylesheet" href="/style/tailwind.min.css">
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh;
+    background: var(--color-surface-base, #0d0f0c);
+    color: var(--color-text, #e8f0e4);
+    font-family: var(--font-sans, "Space Grotesk", system-ui, sans-serif);
+  }
+  main { max-width: 44rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+  h1 { font-family: var(--font-display, "Space Grotesk", system-ui, sans-serif); font-size: 1.5rem; margin: 0 0 0.25rem; word-break: break-all; }
+  .sub { color: var(--color-text-secondary, #8ea882); margin: 0 0 1.5rem; }
+  .card {
+    background: var(--color-surface, #141710);
+    border: 1px solid var(--color-border, #2c3226);
+    border-radius: 0.75rem; padding: 1rem 1.25rem; margin: 0 0 1rem;
+  }
+  h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--color-text-muted, #506048); margin: 0 0 0.75rem; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1rem; margin: 0; }
+  dt { color: var(--color-text-secondary, #8ea882); }
+  dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  code, .mono { font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace); font-size: 0.85rem; }
+  .yes { color: var(--color-success, #9ad04a); font-weight: 700; }
+  .no { color: var(--color-text-muted, #506048); font-weight: 700; }
+  .addr { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .addr code { background: var(--color-surface-inset-strong, rgb(0 0 0 / 0.35)); padding: 0.4rem 0.6rem; border-radius: 0.4rem; overflow-wrap: anywhere; }
+  button, .button {
+    background: var(--color-accent, #9ad04a); color: var(--color-accent-fg, #0d0f0c);
+    border: 0; border-radius: 0.4rem; padding: 0.45rem 0.9rem; font: inherit; font-weight: 700;
+    cursor: pointer; text-decoration: none; display: inline-block;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.quiet { background: transparent; color: var(--color-text-secondary, #8ea882); border: 1px solid var(--color-border, #2c3226); }
+  ol, ul { margin: 0; padding-left: 1.25rem; }
+  li { margin: 0.25rem 0; }
+  a { color: var(--color-link, var(--color-accent, #9ad04a)); }
+  .muted { color: var(--color-text-muted, #506048); }
+  .err { color: var(--color-danger, #e0606a); }
+</style>
+</head>
+<body>
+<main>
+  <h1>{{if .Name}}{{.Name}}{{else}}Region <span class="mono">{{.Region}}</span>{{end}}</h1>
+  <p class="sub">{{if .Speakeasy}}A Cyberspace speakeasy{{else}}A Cyberspace region{{end}} on this relay</p>
+
+  <section class="card">
+    <h2>Region</h2>
+    <dl>
+      <dt>Hex</dt><dd><code>{{.Region}}</code></dd>
+      <dt>Size</dt><dd>{{.Size}}</dd>
+      <dt>Planes</dt><dd>{{.Planes}}</dd>
+      {{range .Axes}}<dt>{{.Name}}</dt><dd><code>{{.From}}</code> to <code>{{.To}}</code></dd>
+      {{end}}<dt>Low corner</dt><dd><code>{{.LowCorner}}</code></dd>
+      <dt>Map</dt><dd><a href="{{.ONOSENDAI}}" rel="noopener">Open in ONOSENDAI</a></dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2>Speakeasy</h2>
+    {{if .Speakeasy}}
+    <dl>
+      <dt>Status</dt><dd class="yes">Open</dd>
+      {{if .Name}}<dt>Name</dt><dd><code>{{.Name}}</code></dd>{{end}}
+      <dt>Relay</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>
+      <dt>Since</dt><dd>{{.Since}}</dd>
+    </dl>
+    {{else}}
+    <dl>
+      <dt>Status</dt><dd class="no">Not a speakeasy</dd>
+    </dl>
+    {{end}}
+  </section>
+
+  {{if .Speakeasy}}
+  <section class="card">
+    <h2>How to join</h2>
+    <ol>
+      <li>Move your chain's head into this region (spawn or travel in ONOSENDAI).</li>
+      <li>Add the relay address to your nostr client.</li>
+      <li>Sign in when the relay asks (AUTH, NIP-42).</li>
+      <li>Share the address with people in the region.</li>
+    </ol>
+    <p class="muted">Only chains whose head is inside can read or write.</p>
+  </section>
+  {{end}}
+</main>
+<script>
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var t = document.getElementById(b.getAttribute("data-copy")).textContent;
+      navigator.clipboard.writeText(t).then(function () {
+        b.textContent = "Copied";
+        setTimeout(function () { b.textContent = "Copy"; }, 1500);
+      });
+    });
+  });
+</script>
+</body>
+</html>

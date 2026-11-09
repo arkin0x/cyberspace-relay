@@ -1,4 +1,4 @@
-> **Cyberspace region relay.** This repository is a fork of grain; see [FORK.md](FORK.md) for what it adds and how it stays up to date with upstream.
+> **Cyberspace region relay.** This repository is a fork of grain; see [FORK.md](FORK.md) for what it adds and how it stays up to date with upstream. Speakeasies (private relays for one region of Cyberspace) live at `relay.onosendai.tech/C/<region>`, as ONOSENDAI's `www.onosendai.tech/C/<region>`: see [docs/speakeasies.md](docs/speakeasies.md).
 
 # GRAIN 🌾
 

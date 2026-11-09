@@ -94,6 +94,21 @@ type conn struct {
 
 func dial(t *testing.T, url string) (*conn, error) {
 	t.Helper()
+	// A socket closed by an earlier subtest is released by the server a
+	// moment later: a "max connections" notice right after is that lag,
+	// so wait it out (the cap itself is tested with raw websockets).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := dialOnce(t, url)
+		if err == nil || !strings.Contains(err.Error(), "max connections") || time.Now().After(deadline) {
+			return c, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func dialOnce(t *testing.T, url string) (*conn, error) {
+	t.Helper()
 	ws, err := websocket.Dial(url, "", "http://localhost/")
 	if err != nil {
 		return nil, err
@@ -116,6 +131,7 @@ func dial(t *testing.T, url string) (*conn, error) {
 	if len(first) == 2 && first[0] == "AUTH" {
 		c.challenge, _ = first[1].(string)
 	} else {
+		ws.Close()
 		return nil, fmt.Errorf("first message is not an AUTH challenge: %v", first)
 	}
 	t.Cleanup(func() { ws.Close() })
@@ -479,32 +495,45 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 		}
 	}
 	r.storeRoot(t, kAB.spawn(t), kA.spawn(t), kOut.spawn(t))
-	urlA, urlB := r.wsRoot+"/"+idA, r.wsRoot+"/"+idB
+	// A region's one address is /C/<id>, as ONOSENDAI's (owner ruling
+	// 2026-11-09).
+	urlA, urlB := r.wsRoot+"/C/"+idA, r.wsRoot+"/C/"+idB
 
 	t.Run("routing and NIP-11", func(t *testing.T) {
-		code, doc, _ := nip11(t, r.root+"/"+idA)
+		code, doc, _ := nip11(t, r.root+"/C/"+idA)
 		lim, _ := doc["limitation"].(map[string]any)
 		if code != 200 || doc["name"] != "Speakeasy "+idA || lim["auth_required"] != true || lim["restricted_writes"] != true {
 			t.Fatalf("speakeasy NIP-11: %d %v", code, doc)
 		}
-		if code, _, _ := nip11(t, r.root+"/abcdef"); code != 404 {
-			t.Fatalf("unregistered path NIP-11: want 404, got %d", code)
+		for _, p := range []string{"/abcdef", "/C/abcdef"} {
+			if code, _, _ := nip11(t, r.root+p); code != 404 {
+				t.Fatalf("unregistered path %s NIP-11: want 404, got %d", p, code)
+			}
 		}
-		if code, _, _ := nip11(t, r.root+"/"+idA+"/x"); code != 404 {
-			t.Fatalf("a deeper path NIP-11: want 404, got %d", code)
+		// /C and /C/ alone name nothing: 404, not the region "c".
+		for _, p := range []string{"/C/" + idA + "/x", "/C/zz", "/C//" + idA, "/C", "/C/"} {
+			if code, _, _ := nip11(t, r.root+p); code != 404 {
+				t.Fatalf("%s NIP-11: want 404, got %d", p, code)
+			}
 		}
 		if _, err := dial(t, r.wsRoot+"/abcdef"); err == nil {
 			t.Fatal("a websocket to an unregistered path was served")
 		}
-		// Other spellings of a region (ParseRegionPath: case, 0x, trailing
-		// slashes, one percent-decoding): NIP-11 redirects to the one URL,
-		// a websocket is refused naming it (its AUTH would name the wrong URL).
+		// Other spellings of a region (ParseRegionPath after /C/: case, 0x,
+		// trailing slashes, one percent-decoding), the bare /<string>, and
+		// /c/ in lower case: NIP-11 redirects to the one URL, /C/<id>; a
+		// websocket is refused naming it (its AUTH would name the wrong URL).
 		up := strings.ToUpper(idB)
 		mixed := strings.ToUpper(idB[:1]) + idB[1:]
+		var spellings []string
 		for _, sp := range []string{up, mixed, "0x" + idB, "0X" + up, idB + "/", idB + "//", pct(idB, false), "0x" + pct(mixed, false) + "/"} {
+			spellings = append(spellings, "C/"+sp, sp)
+		}
+		spellings = append(spellings, idB, "c/"+idB, "c/"+up)
+		for _, sp := range spellings {
 			code, _, h := nip11(t, r.root+"/"+sp)
-			if code != http.StatusMovedPermanently || h.Get("Location") != "/"+idB {
-				t.Fatalf("/%s NIP-11: want 301 to /%s, got %d %q", sp, idB, code, h.Get("Location"))
+			if code != http.StatusMovedPermanently || h.Get("Location") != "/C/"+idB || !strings.Contains(h.Get("Vary"), "Accept") {
+				t.Fatalf("/%s NIP-11: want 301 to /C/%s with Vary, got %d %q", sp, idB, code, h.Get("Location"))
 			}
 			resp, err := http.DefaultClient.Do(func() *http.Request {
 				q, _ := http.NewRequest(http.MethodGet, r.root+"/"+sp, nil)
@@ -527,7 +556,7 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 		// Decoded once, as ONOSENDAI decodes once: a double encoding is not
 		// the region. And matched on the path as sent: what http.ServeMux
 		// would clean and redirect to /<id> is not a relay either.
-		for _, p := range []string{"/" + pct(idB, true), "//" + idA, "/x/../" + idA, "/" + idA + "/."} {
+		for _, p := range []string{"/" + pct(idB, true), "//" + idA, "/x/../" + idA, "/" + idA + "/.", "/C/" + pct(idB, true), "//C/" + idA, "/x/../C/" + idA} {
 			req, _ := http.NewRequest(http.MethodGet, r.root+"/", nil)
 			req.URL.RawPath, req.URL.Path = p, p
 			req.Header.Set("Accept", "application/nostr+json")
@@ -561,7 +590,7 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 
 	t.Run("AUTH names the speakeasy's own URL", func(t *testing.T) {
 		a := mustDial(t, urlA)
-		for _, wrong := range []string{urlB, r.wsRoot, r.wsRoot + "/", urlA + "/x"} {
+		for _, wrong := range []string{urlB, r.wsRoot, r.wsRoot + "/", urlA + "/x", r.wsRoot + "/" + idA, r.wsRoot + "/c/" + idA} {
 			if ok, msg := a.auth(kAB, wrong, a.challenge); ok || !strings.Contains(msg, "relay URL") {
 				t.Fatalf("AUTH naming %s accepted on %s (%q)", wrong, urlA, msg)
 			}
@@ -913,7 +942,7 @@ func TestSpeakeasiesOnOneRelay(t *testing.T) {
 		if _, closed := a.req("gone", map[string]any{}); !strings.Contains(closed, "closed") {
 			t.Fatalf("REQ on a removed speakeasy's open connection: %q", closed)
 		}
-		if code, _, _ := nip11(t, r.root+"/"+idA); code != 404 {
+		if code, _, _ := nip11(t, r.root+"/C/"+idA); code != 404 {
 			t.Fatalf("removed speakeasy NIP-11: %d", code)
 		}
 		if _, err := os.Stat(r.rt.pool.Dir(idA)); err != nil {

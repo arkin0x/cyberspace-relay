@@ -44,7 +44,7 @@ can succeed, so nothing can be read or written.
 |---|---|
 | `REQ`, `COUNT` | After the per-client rate limits: refused `auth-required:` without AUTH, `restricted:` unless the authenticated pubkey is inside the region (same lookup, cache and exemptions as writers). |
 | Live events (after EOSE) | Pushed only to connections whose pubkey is admitted, decided from the chain cache without blocking. An expired entry keeps answering while a background check refreshes it, so someone who leaves the region (moving elsewhere) stops receiving within `cache_ttl_seconds` plus one check; an unknown pubkey gets nothing until its check completes. |
-| HTTP | Everything except the websocket, NIP-11 and NIP-86 at `/` answers 404: grain's web client and API (`/api/v1/events/*`, `/api/v1/client/*`, stats, the dashboard) read through the server's own relay pool, and a browser can sign AUTH for that shared pool, so they would be a way around the gate. Manage the relay through its config files and NIP-86. |
+| HTTP | Everything except the websocket, NIP-11 and NIP-86 at `/` answers 404: grain's web client and API (`/api/v1/events/*`, `/api/v1/client/*`, stats, the dashboard) read through the server's own relay pool, and a browser can sign AUTH for that shared pool, so they would be a way around the gate. Manage the relay through its config files and NIP-86. The speakeasy region dashboard and the discovery endpoint still answer (they read no events, only the registry). |
 
 NIP-11 advertises `auth_required` and `restricted_writes`. The NIP-11 document
 itself stays public, so the relay's existence, name and description are not secret.
@@ -59,7 +59,7 @@ Verified over the wire: outsider REQ without AUTH `auth-required`, with AUTH
 
 `speakeasies.yml` in the data directory (start from
 [`examples/speakeasies.example.yml`](examples/speakeasies.example.yml)) makes
-`relay.onosendai.tech/<region>` its own speakeasy relay, for every region in
+`relay.onosendai.tech/C/<region>` its own speakeasy relay, for every region in
 the speakeasy registry, while the bare relay at `/` stays the relay it was
 (`docs/speakeasies.md`, step 3). `region.yml` still gates the root; the two
 are independent.
@@ -67,20 +67,28 @@ are independent.
 | Path | Without `speakeasies.yml` | With it |
 |---|---|---|
 | `/` | the root relay | the root relay, unchanged |
-| `/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
+| `/C/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
+| the bare `/<region>`, `/c/<region>`, or another spelling after `/C/` (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11 and the page: 301 to `/C/<region>` (`Vary: Accept`); websocket: 400 naming the `/C/` address |
+| `/C` or `/C/` alone | the root relay | 404 for every request type (it names no region) |
 | another spelling of a registered region (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11: 301 to the one URL; websocket: 400 naming it |
 | any other path | the root relay | websocket, NIP-11, NIP-86: 404 "not a relay" |
+| a browser (GET or HEAD, `Accept` with `text/html`) at `/C/<region>` for any region string | grain's usual handlers | the region dashboard (step 4; the bare `/<region>`, `/c/` and other spellings 301 to `/C/<region>`) |
+| `/.well-known/cyberspace-speakeasies?coord=<64 hex>` | an empty list | the speakeasies holding that coordinate (`docs/speakeasies.md`) |
 
 Once the file exists no path but `/` falls back to the root: also when it is
-invalid or says `enabled: false`, so a client that took `/<region>` for a
+invalid or says `enabled: false`, so a client that took `/C/<region>` for a
 speakeasy never posts its private room to the public relay. Paths are matched
 on the path as sent (`URL.EscapedPath()`), never through `http.ServeMux`,
 which cleans and redirects (`//abc`, `/x/../abc`, `/abc/.`); a plain browser
-request for a path goes on to grain's usual handlers.
+request for a path that is not a region string goes on to grain's usual handlers.
 
-**One URL per speakeasy.** `public_url` (default `auth.relay_url`) plus `/`
-and the region string in its canonical spelling, as ONOSENDAI writes it after
-`/C/` (ruling D7): lowercase hex, no `0x`, no trailing slash. Its NIP-11 names
+**One URL per speakeasy.** `public_url` (default `auth.relay_url`) plus `/C/`
+and the region string in its canonical spelling: lowercase hex, no `0x`, no
+trailing slash, exactly ONOSENDAI's `www.onosendai.tech/C/<hex>` (ruling D7;
+owner ruling 2026-11-09: "/C/ for speakeasies on the relay"). A name's URL is
+`public_url/<name>`. The lowercase `/c/` is never served: like any other
+spelling, browsers are sent to `/C/` and a websocket is refused, so no AUTH is
+ever signed for a second URL. Its NIP-11 names
 it, and its NIP-42 AUTH must name exactly it, compared strictly (the path is
 significant) whatever `auth.relay_url_match` says. An AUTH for one speakeasy
 therefore never passes at another or at the root; the root must run
@@ -695,8 +703,8 @@ stop equals the reference's.
 may be listed; any match admits.
 
 A speakeasy path names its region by a region string, `ParseRegionPath` in
-`regionpath.go` (not routed yet): `/<hex>` is exactly ONOSENDAI's
-`/C/<hex>`. The hex is the top 4n bits of a coordinate (§2.2), so the region
+`regionpath.go`: a speakeasy's `/C/<hex>` is exactly ONOSENDAI's
+`/C/<hex>` (the string after `/C/` is read by the same rules). The hex is the top 4n bits of a coordinate (§2.2), so the region
 is every coordinate whose 64-hex form starts with it: a hint box whose
 heights are equal only when n is a multiple of 3. A prefix of 1 to 63
 characters leaves the plane bit open, so the box is the same in both planes;
