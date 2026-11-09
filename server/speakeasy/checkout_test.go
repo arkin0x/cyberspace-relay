@@ -470,7 +470,6 @@ func TestCheckoutBindsThePaymentToItsRegion(t *testing.T) {
 	for name, answer := range map[string]func(nwc.Invoice) nwc.Invoice{
 		"description":  func(i nwc.Invoice) nwc.Invoice { i.Description = "relay.example speakeasy fff"; return i },
 		"amount lower": func(i nwc.Invoice) nwc.Invoice { i.Amount = 1000; return i },
-		"amount more":  func(i nwc.Invoice) nwc.Invoice { i.Amount = 2_000_000; return i },
 		"no amount":    func(i nwc.Invoice) nwc.Invoice { i.Amount = 0; return i },
 		"hash":         func(i nwc.Invoice) nwc.Invoice { i.PaymentHash = strings.Repeat("0", 64); return i },
 		"no hash":      func(i nwc.Invoice) nwc.Invoice { i.PaymentHash = ""; return i },
@@ -604,19 +603,23 @@ func TestCheckoutLateSettleAfterExpiry(t *testing.T) {
 
 // TestCheckoutNotFoundAfterRotation: after the connection is rotated, the
 // wallet says NOT_FOUND for the old invoices. That is not "unpaid": the
-// order stays open, the owner is told once, it holds no slot, and when the
-// wallet answers again a payment is applied. The same for a wallet that
-// cannot be reached.
+// order stays open, one alert says so, it holds no slot, and sales go on
+// (the wallet answers, so lookups work). A wallet that cannot be reached
+// is different: sales pause, with one alert for the outage. Either way,
+// when the wallet answers again, the payment is applied.
 func TestCheckoutNotFoundAfterRotation(t *testing.T) {
-	for name, fail := range map[string]func(*fakeWallet){
-		"NOT_FOUND":   func(w *fakeWallet) { w.rotated = true },
-		"unreachable": func(w *fakeWallet) { w.lookupErr = errors.New("relay down") },
+	for name, c := range map[string]struct {
+		fail   func(*fakeWallet)
+		paused bool
+	}{
+		"NOT_FOUND":   {func(w *fakeWallet) { w.rotated = true }, false},
+		"unreachable": {func(w *fakeWallet) { w.lookupErr = errors.New("relay down") }, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newCheckoutRig(t)
 			o := r.mustCreate("abc", "1.1.1.1")
 			r.wallet.pay(o.PaymentHash)
-			fail(r.wallet)
+			c.fail(r.wallet)
 			r.advance(time.Hour)
 			r.poll()
 			r.advance(10 * time.Minute)
@@ -624,20 +627,24 @@ func TestCheckoutNotFoundAfterRotation(t *testing.T) {
 			if got := r.get(o.ID); got.Status != StatusPending || !got.LookupFailing || len(r.alerts) != 1 {
 				t.Fatalf("after failed lookups: %+v, alerts %v", got, r.alerts)
 			}
-			r.open() // across a restart too
+			before := len(r.alerts)
+			r.open() // across a restart too (a new process may alert once more)
 			r.poll()
-			if got := r.get(o.ID); got.Status != StatusPending || len(r.alerts) != 1 {
+			if got := r.get(o.ID); got.Status != StatusPending || len(r.alerts) > before+1 {
 				t.Fatalf("after a restart: %+v, alerts %v", got, r.alerts)
 			}
-			// It can no longer be paid, so it holds no slot.
-			r.mustCreate("abd", "1.1.1.1")
-			r.mustCreate("abe", "1.1.1.1")
-			r.mustCreate("abf", "1.1.1.1")
+			_, err := r.create("abd", "1.1.1.1")
+			if c.paused != errors.Is(err, ErrPaused) || !c.paused && err != nil {
+				t.Fatalf("selling while %s: %v", name, err)
+			}
 			r.wallet.rotated, r.wallet.lookupErr = false, nil
 			r.advance(10 * time.Minute)
 			r.poll()
 			if got := r.get(o.ID); !got.Applied || r.reg.Get("abc") == nil {
 				t.Fatalf("the late answer was not applied: %+v", got)
+			}
+			if _, err := r.create("abe", "1.1.1.1"); err != nil {
+				t.Fatalf("sales did not resume: %v", err)
 			}
 		})
 	}
@@ -818,6 +825,8 @@ func TestCheckoutFinalLookupMustBeAnswered(t *testing.T) {
 
 // ── names (step 6: only with creation, one invoice) ──────────────────────
 
+func (r *checkoutRig) mustCreateErr(region, who string) (Order, error) { return r.create(region, who) }
+
 func (r *checkoutRig) named(region, name, who string) (Order, error) {
 	return r.co.Create(context.Background(), OrderRequest{Kind: OrderSpeakeasy, Region: region, Name: name, Requester: Requester(who), Network: Network(who)})
 }
@@ -843,8 +852,10 @@ func TestCheckoutNamedSpeakeasy(t *testing.T) {
 	if again, _ := r.named("abc", "cafe-du-monde", "1.1.1.1"); again.ID != o.ID {
 		t.Fatal("asking again made another invoice")
 	}
-	if plain := r.mustCreate("abc", "1.1.1.1"); plain.ID == o.ID || plain.AmountSats != 1000 {
-		t.Fatalf("the unnamed order for the same region: %+v", plain)
+	// Unnamed for the same region from the same network: one open invoice
+	// per network per region (ruling), so not while the named one is open.
+	if _, err := r.mustCreateErr("abc", "1.1.1.1"); !errors.Is(err, ErrNetworkHasOrder) {
+		t.Fatalf("a second invoice for the region from the same network: %v", err)
 	}
 	r.wallet.pay(o.PaymentHash)
 	r.poll()
@@ -931,5 +942,223 @@ func TestCheckoutNameTakenFirst(t *testing.T) {
 	r3.poll()
 	if got := r3.get(o3.ID); got.Outcome != OutcomeNameTaken {
 		t.Fatalf("a nameless write before a crash: %+v", got)
+	}
+}
+
+// ── B3: sales pause while lookups fail ───────────────────────────────────
+
+// TestSalesPauseWhileLookupsAreRefused models the likely misconfiguration,
+// a connection made without lookup_invoice (RESTRICTED), for a day of
+// 5-minute polls: sales pause at the first refused lookup, one alert names
+// the configuration error, no further invoice is sold, and the orders file
+// is written at most once per pass. Fixed, sales resume.
+func TestSalesPauseWhileLookupsAreRefused(t *testing.T) {
+	r := newCheckoutRig(t)
+	writes := 0
+	r.cfg = func(c *CheckoutConfig) {
+		c.Write = func(p string, d []byte, m os.FileMode) error { writes++; return WriteDurable(p, d, m) }
+	}
+	r.open()
+	r.mustCreate("abc", "1.1.1.1")
+	r.wallet.lookupErr = &nwc.Error{Code: "RESTRICTED", Message: "not allowed"}
+	writes = 0
+	makes := r.wallet.makes
+	for i := 0; i < 288; i++ {
+		r.poll()
+		if _, err := r.create(fmt.Sprintf("a%02x", i%250), fmt.Sprintf("10.0.%d.1", i%250)); !errors.Is(err, ErrPaused) {
+			t.Fatalf("poll %d: sold while lookups are refused: %v", i, err)
+		}
+		r.advance(5 * time.Minute)
+	}
+	if r.wallet.makes != makes {
+		t.Fatalf("%d invoices sold while paused", r.wallet.makes-makes)
+	}
+	if len(r.alerts) != 1 || !strings.Contains(r.alerts[0], "configuration error") {
+		t.Fatalf("alerts over a day: %v", r.alerts)
+	}
+	if writes > 288 {
+		t.Fatalf("%d writes of the orders file for 288 passes", writes)
+	}
+	if !strings.HasPrefix(r.co.State(), "paused: RESTRICTED") {
+		t.Fatalf("state %q", r.co.State())
+	}
+	r.wallet.lookupErr = nil
+	r.poll()
+	if _, err := r.create("fff", "9.9.9.9"); err != nil || r.co.State() != "" {
+		t.Fatalf("sales did not resume: %v %q", err, r.co.State())
+	}
+}
+
+// TestPauseEndsOnAProbe: paused with no open order to look up, a pass asks
+// about an invoice nobody made; NOT_FOUND shows lookups work, so sales
+// resume. A probe that fails keeps them paused.
+func TestPauseEndsOnAProbe(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.co.mu.Lock()
+	r.co.paused = "relay down"
+	r.co.mu.Unlock()
+	r.wallet.lookupErr = errors.New("still down")
+	r.poll()
+	if r.co.Selling() {
+		t.Fatal("resumed on a failed probe")
+	}
+	r.wallet.lookupErr = nil
+	lookups := r.wallet.lookups
+	r.poll()
+	if !r.co.Selling() || r.wallet.lookups != lookups+1 {
+		t.Fatalf("selling %v after %d lookups", r.co.Selling(), r.wallet.lookups-lookups)
+	}
+	r.poll()
+	if r.wallet.lookups != lookups+1 {
+		t.Fatal("probed while healthy with nothing to look up")
+	}
+}
+
+// TestLingeringOrdersCapPausesSales: at MaxLingering orders that can no
+// longer be paid but wait for an answer, sales pause, though the wallet
+// answers; and the pass's newly unverifiable orders make one alert.
+func TestLingeringOrdersCapPausesSales(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.cfg = func(c *CheckoutConfig) { c.MaxLingering = 3 }
+	r.open()
+	for i, region := range []string{"abc", "abd", "abe"} {
+		r.mustCreate(region, fmt.Sprintf("10.%d.0.1", i))
+	}
+	r.wallet.rotated = true
+	r.advance(15 * time.Minute)
+	r.poll()
+	if len(r.alerts) != 1 {
+		t.Fatalf("alerts for three unverifiable orders: %v", r.alerts)
+	}
+	if _, err := r.create("fff", "9.9.9.9"); !errors.Is(err, ErrPaused) || !strings.Contains(r.co.State(), "too many old invoices") {
+		t.Fatalf("at the lingering cap: %v %q", err, r.co.State())
+	}
+}
+
+// TestSelfCheck: with RequireSelfCheck, nothing is sold until a 1-sat
+// invoice could be made and looked up; a refused lookup keeps payments off
+// with a clear reason.
+func TestSelfCheck(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.cfg = func(c *CheckoutConfig) { c.RequireSelfCheck = true }
+	r.open()
+	if _, err := r.create("abc", "1.1.1.1"); !errors.Is(err, ErrPaused) {
+		t.Fatalf("sold before the self-check: %v", err)
+	}
+	if err := r.co.SelfCheck(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if inv := r.wallet.invoices; len(inv) != 1 {
+		t.Fatalf("%d invoices made by the self-check", len(inv))
+	}
+	r.mustCreate("abc", "1.1.1.1")
+
+	for code, want := range map[string]string{"RESTRICTED": "refuses lookup_invoice (RESTRICTED)", "NOT_IMPLEMENTED": "refuses lookup_invoice (NOT_IMPLEMENTED)"} {
+		r2 := newCheckoutRig(t)
+		r2.cfg = func(c *CheckoutConfig) { c.RequireSelfCheck = true }
+		r2.open()
+		r2.wallet.lookupErr = &nwc.Error{Code: code}
+		err := r2.co.SelfCheck(context.Background())
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: %v", code, err)
+		}
+		if _, err := r2.create("abc", "1.1.1.1"); !errors.Is(err, ErrPaymentsOff) {
+			t.Fatalf("%s: sold after a failed self-check: %v", code, err)
+		}
+	}
+	r3 := newCheckoutRig(t)
+	r3.cfg = func(c *CheckoutConfig) { c.RequireSelfCheck = true }
+	r3.open()
+	r3.wallet.makeErr = &nwc.Error{Code: "RESTRICTED"}
+	if err := r3.co.SelfCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "refuses make_invoice") {
+		t.Fatalf("make refused: %v", err)
+	}
+}
+
+// TestOneOpenInvoicePerNetworkPerRegion (ruling): per region, at most one
+// open invoice per network, and the cap of 2 counts distinct networks, so
+// one address cannot block a region for free.
+func TestOneOpenInvoicePerNetworkPerRegion(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.mustCreate("abc", "10.1.1.1")
+	if _, err := r.create("abc", "10.1.1.2"); !errors.Is(err, ErrNetworkHasOrder) {
+		t.Fatalf("a second requester in the same /24: %v", err)
+	}
+	if _, err := r.create("abc", "2001:db8:1:1::1"); err != nil {
+		t.Fatalf("another network: %v", err)
+	}
+	if _, err := r.create("abc", "2001:db8:1:2::1"); !errors.Is(err, ErrNetworkHasOrder) {
+		t.Fatalf("a second /64 in the same /48: %v", err)
+	}
+	if _, err := r.create("abc", "10.9.9.9"); !errors.Is(err, ErrRegionBusy) {
+		t.Fatalf("a third network: %v", err)
+	}
+	if _, err := r.create("abd", "10.1.1.2"); err != nil {
+		t.Fatalf("another region from the first network: %v", err)
+	}
+}
+
+// TestOverpaymentIsAccepted: BOLT 11 lets a payer pay more; the lookup
+// accepts at least the price (creation still requires the exact amount).
+func TestOverpaymentIsAccepted(t *testing.T) {
+	r := newCheckoutRig(t)
+	o := r.mustCreate("abc", "1.1.1.1")
+	r.wallet.pay(o.PaymentHash)
+	r.wallet.answer = func(i nwc.Invoice) nwc.Invoice { i.Amount = 1_500_000; return i }
+	r.poll()
+	if got := r.get(o.ID); got.Outcome != OutcomeRegistered {
+		t.Fatalf("an overpayment: %+v", got)
+	}
+}
+
+// TestResolveAPayment: the owner marks a refund paid; the owner's list no
+// longer shows it, the ledger keeps it, and it cannot be resolved twice.
+func TestResolveAPayment(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.cfg = func(c *CheckoutConfig) { c.ResolvedPath = filepath.Join(r.dir, "resolved.jsonl") }
+	r.open()
+	a := r.mustCreate("abc", "1.1.1.1")
+	r.advance(time.Second)
+	b := r.mustCreate("abc", "2.2.2.2")
+	r.wallet.pay(a.PaymentHash)
+	r.wallet.pay(b.PaymentHash)
+	r.poll()
+	open, _ := r.co.NeedsOwnerOpen()
+	if len(open) != 1 || open[0].PaymentHash != b.PaymentHash {
+		t.Fatalf("open %+v", open)
+	}
+	if _, err := r.co.Resolve(strings.ToUpper(b.PaymentHash), "refunded by hand"); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := r.co.NeedsOwnerOpen(); len(open) != 0 {
+		t.Fatalf("still listed: %+v", open)
+	}
+	if len(r.ledger()) != 2 {
+		t.Fatal("the ledger lost history")
+	}
+	for _, h := range []string{b.PaymentHash, a.PaymentHash, strings.Repeat("0", 64)} {
+		if _, err := r.co.Resolve(h, "again"); !errors.Is(err, ErrNothingToResolve) {
+			t.Errorf("resolve %s: %v", h[:8], err)
+		}
+	}
+}
+
+// TestOnePassWritesTheOrdersOnce: however many orders change in one poll
+// pass (here 40 expire), the orders file is written once for it.
+func TestOnePassWritesTheOrdersOnce(t *testing.T) {
+	r := newCheckoutRig(t)
+	writes := 0
+	r.cfg = func(c *CheckoutConfig) {
+		c.Write = func(p string, d []byte, m os.FileMode) error { writes++; return WriteDurable(p, d, m) }
+	}
+	r.open()
+	for i := 0; i < 40; i++ {
+		r.mustCreate(fmt.Sprintf("a%02x", i), fmt.Sprintf("10.%d.0.1", i))
+	}
+	r.advance(13 * time.Minute)
+	writes = 0
+	r.poll()
+	if n := len(r.co.Orders()); writes != 1 || n != 40 || r.get(r.co.Orders()[0].ID).Status != StatusExpired {
+		t.Fatalf("%d writes for a pass that closed %d orders", writes, n)
 	}
 }

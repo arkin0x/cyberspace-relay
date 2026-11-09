@@ -199,8 +199,20 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 	}()
 	checkoutDone := make(chan struct{})
 	if rt.checkout = startCheckout(sc, reg, dir, public); rt.checkout != nil {
+		co := rt.checkout
 		go func() {
-			rt.checkout.Run(poolCtx)
+			// Payments are "on" only once a real make_invoice and
+			// lookup_invoice worked; until then nothing is sold.
+			if err := co.SelfCheck(poolCtx); err != nil {
+				if poolCtx.Err() == nil {
+					log.RegionGate().Error("Speakeasy payments off: the wallet self-check failed", "error", err)
+				}
+			} else {
+				log.RegionGate().Info("Speakeasy payments on", "speakeasy_sats", sc.Payments.SpeakeasySats, "invoice_expiry_seconds", sc.Payments.InvoiceExpirySeconds)
+			}
+		}()
+		go func() {
+			co.Run(poolCtx)
 			close(checkoutDone)
 		}()
 	} else {
@@ -253,6 +265,7 @@ func startCheckout(sc *speakeasy.Config, reg *speakeasy.Registry, dir, public st
 		Poll:       time.Duration(p.PollSeconds) * time.Second,
 		MaxPending: p.MaxPendingInvoices, MaxPerRequester: p.MaxPendingPerRequester,
 		MaxPerNetwork: p.MaxPendingPerNetwork, MaxPerRegion: p.MaxPendingPerRegion,
+		MaxLingering: p.MaxLingeringOrders, ResolvedPath: filepath.Join(dir, "payments-resolved.jsonl"), RequireSelfCheck: true,
 		Log:   func(msg string, args ...any) { log.RegionGate().Info(msg, args...) },
 		Alert: func(msg string, args ...any) { log.RegionGate().Error(msg, args...) },
 	})
@@ -260,8 +273,7 @@ func startCheckout(sc *speakeasy.Config, reg *speakeasy.Registry, dir, public st
 		log.RegionGate().Error("Speakeasy payments off: the orders file is unreadable", "error", err)
 		return nil
 	}
-	log.RegionGate().Info("Speakeasy payments on", "wallet", wallet.Describe(), "speakeasy_sats", p.SpeakeasySats, "name_sats", p.NameSats,
-		"invoice_expiry_seconds", p.InvoiceExpirySeconds)
+	log.RegionGate().Info("Speakeasy payments: checking the wallet (a 1-sat invoice and its lookup) before selling", "wallet", wallet.Describe())
 	return co
 }
 
@@ -599,9 +611,10 @@ func (rt *speakeasyRuntime) DeleteEvent(params []any) (any, string) {
 	return map[string]any{"ok": true}, ""
 }
 
-// Payments lists what the relay owner must settle by hand: every ledger
-// line whose payment bought nothing (refund owed, held) or whose outcome
-// is unknown, and every open order the wallet cannot be asked about.
+// Payments lists what the relay owner must settle by hand and has not
+// marked resolved: ledger lines whose payment bought nothing (refund owed,
+// held) or whose outcome is unknown; open orders the wallet cannot be
+// asked about; and whether sales run.
 func (rt *speakeasyRuntime) Payments(params []any) (any, string) {
 	if len(params) != 0 {
 		return nil, "params: []"
@@ -609,15 +622,9 @@ func (rt *speakeasyRuntime) Payments(params []any) (any, string) {
 	if rt.checkout == nil {
 		return map[string]any{"payments_on": false, "needs_owner": []any{}, "lookup_failing": []any{}}, ""
 	}
-	lines, err := rt.checkout.Ledger()
+	owe, err := rt.checkout.NeedsOwnerOpen()
 	if err != nil {
 		return nil, "could not read the payments ledger: " + err.Error()
-	}
-	owe := []speakeasy.Order{}
-	for _, o := range lines {
-		if speakeasy.NeedsOwner(o.Outcome) || o.Status == speakeasy.StatusUnknown || strings.HasPrefix(o.Outcome, "unknown:") {
-			owe = append(owe, o)
-		}
 	}
 	failing := []speakeasy.Order{}
 	for _, o := range rt.checkout.Orders() {
@@ -625,7 +632,25 @@ func (rt *speakeasyRuntime) Payments(params []any) (any, string) {
 			failing = append(failing, o)
 		}
 	}
-	return map[string]any{"payments_on": true, "needs_owner": owe, "lookup_failing": failing}, ""
+	return map[string]any{"payments_on": true, "sales": rt.checkout.State(), "needs_owner": owe, "lookup_failing": failing}, ""
+}
+
+// PaymentResolve marks one payment the owner settled by hand: [<payment
+// hash>, <note>]. The ledger keeps its history; Payments stops listing it.
+func (rt *speakeasyRuntime) PaymentResolve(params []any) (any, string) {
+	hash, ok := stringParam(params, 0)
+	note, _ := stringParam(params, 1)
+	if !ok || len(params) < 1 || len(params) > 2 {
+		return nil, "params: [<payment hash>, <note>]"
+	}
+	if rt.checkout == nil {
+		return nil, "payments are not on"
+	}
+	r, err := rt.checkout.Resolve(hash, note)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return map[string]any{"ok": true, "resolved": r}, ""
 }
 
 func stringParam(params []any, i int) (string, bool) {
