@@ -339,14 +339,16 @@ func (rt *speakeasyRuntime) serveWS(w http.ResponseWriter, r *http.Request, sp *
 	// Its own per-IP budget, apart from the root's and never escalated
 	// to a ban (see CheckSpeakeasyConnectionRate).
 	if cfg := config.GetConfig(); cfg != nil {
-		if !EnforceSpeakeasyConnectionRateLimit(w, r, sp.ID, cfg.Server.ConnectionRateLimitPerIP) {
-			return
-		}
+		// The open-socket cap first, as at the root: its refusals spend
+		// no rate token and are no violation.
 		release, ok := EnforceOpenSockets(w, r, cfg)
 		if !ok {
 			return
 		}
 		defer release()
+		if !EnforceSpeakeasyConnectionRateLimit(w, r, sp.ID, cfg.Server.ConnectionRateLimitPerIP) {
+			return
+		}
 	}
 	scope := rt.scope(sp, path)
 	srv := websocket.Server{

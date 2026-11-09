@@ -107,7 +107,9 @@ func CheckSpeakeasyConnectionRate(ip, speakeasyID string, limitPerMinute int) bo
 	}
 	key := regiongate.AddressBucket(ip)
 	if !takeAttempt(key+"\x00speakeasies", speakeasyBudgetFactor*limitPerMinute) {
-		RecordIPViolation(ip)
+		// Charged to the address's key (an IPv6 /64), so a host rotating
+		// addresses inside its /64 escalates as one, and is banned as one.
+		RecordIPViolation(key)
 		return false
 	}
 	if !takeAttempt(key+"\x00speakeasy:"+speakeasyID, limitPerMinute) {

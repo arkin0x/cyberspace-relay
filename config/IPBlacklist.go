@@ -302,6 +302,16 @@ func IsIPBlocked(ip string) (bool, string) {
 			return true, "temp"
 		}
 	}
+	// A temp ban may also be keyed by an IPv6 /64 (the speakeasy connection
+	// budget counts a host by its /64, so rotating addresses inside it
+	// escalates): it covers every address in it.
+	if addr.Is6() && !addr.Is4In6() {
+		if p, err := addr.Prefix(64); err == nil {
+			if entry, ok := ipTempBans[p.String()]; ok && time.Now().Before(entry.unbanTime) {
+				return true, "temp"
+			}
+		}
+	}
 	return false, ""
 }
 

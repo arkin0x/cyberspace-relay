@@ -260,3 +260,67 @@ func TestOpenSocketCapOverWebsockets(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestOpenSocketCapComesFirst (second re-check, #29): refusals by the
+// open-socket cap spend no rate tokens and are no rate violations, at the
+// root and at a speakeasy: past the cap, retries are refused 429 by the
+// cap alone, and once a socket closes the next connection is accepted.
+func TestOpenSocketCapComesFirst(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	r.register(t, "ab")
+	cfg := config.GetConfig()
+	oldCap, oldRate := cfg.Server.MaxOpenSocketsPerIP, cfg.Server.ConnectionRateLimitPerIP
+	cfg.Server.MaxOpenSocketsPerIP, cfg.Server.ConnectionRateLimitPerIP = 1, 3
+	t.Cleanup(func() {
+		cfg.Server.MaxOpenSocketsPerIP, cfg.Server.ConnectionRateLimitPerIP = oldCap, oldRate
+		resetRateLimitState()
+	})
+	for _, path := range []string{"", "/ab"} {
+		resetRateLimitState()
+		held := mustDial(t, r.wsRoot+path) // one rate token
+		for i := 0; i < 6; i++ {
+			if _, err := dial(t, r.wsRoot+path); err == nil {
+				t.Fatalf("%q: a socket past the cap was accepted", path)
+			}
+		}
+		rejAgg.mu.Lock()
+		rate, capped := rejAgg.rateLimit, rejAgg.maxConnIP
+		rejAgg.mu.Unlock()
+		if rate != 0 || capped != 6 {
+			t.Fatalf("%q: %d rate refusals, %d cap refusals; want 0 and 6", path, rate, capped)
+		}
+		held.ws.Close()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			c, err := dial(t, r.wsRoot+path) // the second rate token, of 3
+			if err == nil {
+				c.ws.Close()
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%q: no connection after the socket closed: %v", path, err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		time.Sleep(50 * time.Millisecond) // let the last socket's release run
+	}
+}
+
+// TestSlash64EscalatesAsOne (second re-check, #29): a flood rotating
+// addresses inside one /64 is charged to that /64 and banned as one: every
+// address in it is refused, another /64 is not.
+func TestSlash64EscalatesAsOne(t *testing.T) {
+	withEscalation(t)
+	const limit = 2
+	for i := 0; i < speakeasyBudgetFactor*limit+3; i++ {
+		CheckSpeakeasyConnectionRate(fmt.Sprintf("2001:db8:5:5::%x", i+1), fmt.Sprintf("a%d", i), limit)
+	}
+	for _, ip := range []string{"2001:db8:5:5::1", "2001:db8:5:5:ffff::99"} {
+		if blocked, _ := config.IsIPBlocked(ip); !blocked {
+			t.Errorf("%s is not banned with its /64", ip)
+		}
+	}
+	if blocked, _ := config.IsIPBlocked("2001:db8:5:6::1"); blocked {
+		t.Error("another /64 was banned")
+	}
+}
