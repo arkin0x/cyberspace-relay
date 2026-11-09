@@ -26,6 +26,13 @@ type SpeakeasyAdmin interface {
 	// DeleteEvent: [<id>, <event id>]. Removes one event from that
 	// speakeasy's database.
 	DeleteEvent(params []any) (any, string)
+	// Payments: no params. What the owner must settle by hand: ledger
+	// lines whose payment bought nothing (refund owed, held) or whose
+	// outcome is unknown, and open orders the wallet cannot be asked about.
+	Payments(params []any) (any, string)
+	// PaymentResolve: [<line id>, <note>]. Marks one listed ledger line
+	// settled by hand; the ledger keeps its history.
+	PaymentResolve(params []any) (any, string)
 }
 
 var (
@@ -51,6 +58,8 @@ var speakeasyMethodNames = []string{
 	"grain_speakeasy_add",
 	"grain_speakeasy_remove",
 	"grain_speakeasy_deleteevent",
+	"grain_speakeasy_payments",
+	"grain_speakeasy_payment_resolve",
 }
 
 func speakeasyMethods(a SpeakeasyAdmin) map[string]func(params []any, signer string) (any, string) {
@@ -62,9 +71,11 @@ func speakeasyMethods(a SpeakeasyAdmin) map[string]func(params []any, signer str
 		}
 	}
 	return map[string]func([]any, string) (any, string){
-		"grain_speakeasy_list":        logged("grain_speakeasy_list", a.List),
-		"grain_speakeasy_add":         logged("grain_speakeasy_add", a.Add),
-		"grain_speakeasy_remove":      logged("grain_speakeasy_remove", a.Remove),
-		"grain_speakeasy_deleteevent": logged("grain_speakeasy_deleteevent", a.DeleteEvent),
+		"grain_speakeasy_list":            logged("grain_speakeasy_list", a.List),
+		"grain_speakeasy_add":             logged("grain_speakeasy_add", a.Add),
+		"grain_speakeasy_remove":          logged("grain_speakeasy_remove", a.Remove),
+		"grain_speakeasy_deleteevent":     logged("grain_speakeasy_deleteevent", a.DeleteEvent),
+		"grain_speakeasy_payments":        logged("grain_speakeasy_payments", a.Payments),
+		"grain_speakeasy_payment_resolve": logged("grain_speakeasy_payment_resolve", a.PaymentResolve),
 	}
 }

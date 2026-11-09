@@ -22,6 +22,7 @@ import (
 	relay "github.com/0ceanslim/grain/server/api"
 	"github.com/0ceanslim/grain/server/db/nostrdb"
 	"github.com/0ceanslim/grain/server/handlers"
+	"github.com/0ceanslim/grain/server/nwc"
 	"github.com/0ceanslim/grain/server/regiongate"
 	"github.com/0ceanslim/grain/server/speakeasy"
 	nostr "github.com/0ceanslim/grain/server/types"
@@ -115,6 +116,10 @@ type speakeasyRuntime struct {
 	// ownDeletions: always_allow_kinds lists 5, so an author no longer
 	// inside may still delete their own events stored in a speakeasy.
 	ownDeletions bool
+
+	// checkout takes payment for new speakeasies (step 5); nil while
+	// payments are off.
+	checkout *speakeasy.Checkout
 }
 
 // speakeasyState is what the router reads: nil without speakeasies.yml, a
@@ -166,7 +171,7 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 		return closed("GRAIN_REGION_AUTH_KEY invalid", err)
 	}
 	dir := filepath.Join(config.GetDataDir(), "speakeasies")
-	reg, bad, err := speakeasy.LoadRegistry(filepath.Join(dir, "registry.json"), speakeasyRegionPath, sc.Planes, config.AtomicWriteFile)
+	reg, bad, err := speakeasy.LoadRegistry(filepath.Join(dir, "registry.json"), speakeasyRegionPath, sc.Planes, speakeasy.WriteDurable)
 	if err != nil {
 		return closed("registry unreadable", err)
 	}
@@ -190,6 +195,23 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 		rt.pool.Run(poolCtx)
 		close(done)
 	}()
+	checkoutDone := make(chan struct{})
+	if rt.checkout = startCheckout(sc, reg, dir, public); rt.checkout != nil {
+		co := rt.checkout
+		// Payments are "on" only once a real make_invoice and
+		// lookup_invoice worked; until then nothing is sold. A failure
+		// that may pass (a timeout, a relay down) is retried with backoff;
+		// a refused method keeps payments off.
+		go co.RunSelfCheck(poolCtx,
+			func(msg string, args ...any) { log.RegionGate().Info(msg, args...) },
+			func(msg string, args ...any) { log.RegionGate().Error(msg, args...) })
+		go func() {
+			co.Run(poolCtx)
+			close(checkoutDone)
+		}()
+	} else {
+		close(checkoutDone)
+	}
 	speakeasyState.Store(rt)
 	relay.SetSpeakeasyAdmin(rt)
 	log.RegionGate().Info("Speakeasies open",
@@ -197,13 +219,56 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 		"region_path_parser", speakeasyRegionPath != nil, "planes", sc.Planes,
 		"max_open_databases", sc.MaxOpenDatabases, "idle_close_seconds", sc.IdleCloseSeconds,
 		"map_size_mb", sc.MapSizeMB, "ingest_threads", speakeasy.IngestThreads,
-		"max_connections_per_path", sc.MaxConnectionsPerPath,
+		"max_connections_per_path", sc.MaxConnectionsPerPath, "payments", rt.checkout != nil,
 		"chain_rules", regiongate.ChainRulesRevision, "mode", sc.GateConfig.Mode, "chain_relays", len(sc.GateConfig.ChainRelays))
 	return func() {
 		relay.SetSpeakeasyAdmin(nil)
 		cancel()
 		<-done
+		<-checkoutDone
 	}
+}
+
+// startCheckout makes the checkout when speakeasies.yml turns payments on
+// and names a valid NWC connection file, or returns nil (payments off; the
+// speakeasies stay open). The connection string is never logged.
+func startCheckout(sc *speakeasy.Config, reg *speakeasy.Registry, dir, public string) *speakeasy.Checkout {
+	p := sc.Payments
+	if !p.Enabled {
+		return nil
+	}
+	if p.NWCFile == "" {
+		log.RegionGate().Error("Speakeasy payments off: payments.nwc_file is not set")
+		return nil
+	}
+	// Checked at open and again whenever the file changes (rotation).
+	wallet, err := nwc.OpenFile(p.NWCFile, func(msg string, args ...any) { log.RegionGate().Warn(msg, args...) })
+	if err != nil {
+		log.RegionGate().Error("Speakeasy payments off: the NWC connection file is unusable", "error", err)
+		return nil
+	}
+	host := public
+	if u, err := url.Parse(public); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	co, err := speakeasy.NewCheckout(speakeasy.CheckoutConfig{
+		Wallet: wallet, Registry: reg,
+		OrdersPath: filepath.Join(dir, "orders.json"), LedgerPath: filepath.Join(dir, "payments.jsonl"),
+		Write: speakeasy.WriteDurable, Host: host, SpeakeasySats: p.SpeakeasySats,
+		Expiry:     time.Duration(p.InvoiceExpirySeconds) * time.Second,
+		Poll:       time.Duration(p.PollSeconds) * time.Second,
+		MaxPending: p.MaxPendingInvoices, MaxPerRequester: p.MaxPendingPerRequester,
+		MaxPerNetwork: p.MaxPendingPerNetwork, MaxPerRegion: p.MaxPendingPerRegion,
+		MaxLingering: p.MaxLingeringOrders, ResolvedPath: filepath.Join(dir, "payments-resolved.jsonl"), RequireSelfCheck: true,
+		Log:   func(msg string, args ...any) { log.RegionGate().Info(msg, args...) },
+		Alert: func(msg string, args ...any) { log.RegionGate().Error(msg, args...) },
+	})
+	if err != nil {
+		log.RegionGate().Error("Speakeasy payments off: the orders file is unreadable", "error", err)
+		return nil
+	}
+	log.RegionGate().Info("Speakeasy payments: checking the wallet (a 1-sat invoice and its lookup) before selling", "wallet", wallet.Describe())
+	return co
 }
 
 // speakeasyRoutes sends websocket, NIP-11 and NIP-86 requests for any path
@@ -216,6 +281,10 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 		// (an empty list when they are not), so ONOSENDAI can always ask.
 		if r.URL.EscapedPath() == DiscoveryPath {
 			serveDiscovery(w, r, rt)
+			return
+		}
+		if p := r.URL.EscapedPath(); p == OrdersPath || strings.HasPrefix(p, OrdersPath+"/") {
+			serveOrders(w, r, rt)
 			return
 		}
 		// Matched on the path as sent, never through http.ServeMux, which
@@ -529,6 +598,50 @@ func (rt *speakeasyRuntime) DeleteEvent(params []any) (any, string) {
 		return nil, err.Error()
 	}
 	return map[string]any{"ok": true}, ""
+}
+
+// Payments lists what the relay owner must settle by hand and has not
+// marked resolved: ledger lines whose payment bought nothing (refund owed,
+// held) or whose outcome is unknown; open orders the wallet cannot be
+// asked about; and whether sales run.
+func (rt *speakeasyRuntime) Payments(params []any) (any, string) {
+	if len(params) != 0 {
+		return nil, "params: []"
+	}
+	if rt.checkout == nil {
+		return map[string]any{"payments_on": false, "needs_owner": []any{}, "lookup_failing": []any{}}, ""
+	}
+	owe, err := rt.checkout.NeedsOwnerOpen()
+	if err != nil {
+		return nil, "could not read the payments ledger: " + err.Error()
+	}
+	failing := []speakeasy.Order{}
+	for _, o := range rt.checkout.Orders() {
+		if o.LookupFailing && o.Status == speakeasy.StatusPending {
+			failing = append(failing, o)
+		}
+	}
+	return map[string]any{"payments_on": true, "sales": rt.checkout.State(), "needs_owner": owe, "lookup_failing": failing}, ""
+}
+
+// PaymentResolve marks one ledger line the owner settled by hand:
+// [<line id>, <note>] (the line_id Payments lists). The ledger keeps its
+// history; Payments stops listing that line, and a later line for the
+// same payment hash stays listed.
+func (rt *speakeasyRuntime) PaymentResolve(params []any) (any, string) {
+	lineID, ok := stringParam(params, 0)
+	note, _ := stringParam(params, 1)
+	if !ok || len(params) < 1 || len(params) > 2 {
+		return nil, "params: [<line id>, <note>]"
+	}
+	if rt.checkout == nil {
+		return nil, "payments are not on"
+	}
+	r, err := rt.checkout.Resolve(lineID, note)
+	if err != nil {
+		return nil, err.Error()
+	}
+	return map[string]any{"ok": true, "resolved": r}, ""
 }
 
 func stringParam(params []any, i int) (string, bool) {

@@ -32,6 +32,26 @@ max_connections_per_path: 200
 # keeps every speakeasy to one plane (owner decision pending).
 planes: [0, 1]
 
+# Create Speakeasy (docs/speakeasies.md, step 5): the region page's button,
+# paid through NWC to the HOSAKA wallet. Off unless enabled with a usable
+# nwc_file; any problem leaves payments off and the speakeasies open.
+# nwc_file holds the nostr+walletconnect:// string of a connection made with
+# make_invoice and lookup_invoice only. Keep it outside the repository and
+# the data directory, chmod 600; it is never logged. Replace the file to
+# rotate it. In Docker, mount the directory that holds it, not the file:
+# a single-file bind mount keeps the old file when it is replaced.
+payments:
+  enabled: false
+  # nwc_file: /run/secrets/speakeasy-nwc
+  speakeasy_sats: 1000          # owner ruling 2026-11-09
+  invoice_expiry_seconds: 600
+  poll_seconds: 5
+  max_pending_invoices: 256       # payable open invoices in all
+  max_pending_per_requester: 3    # per client address (IPv6: per /64)
+  max_pending_per_network: 6      # per IPv6 /48 or IPv4 /24
+  max_pending_per_region: 2       # per region: distinct networks, one invoice each
+  max_lingering_orders: 64        # unpayable orders still awaiting an answer; at the cap, sales pause
+
 # The chain settings every speakeasy is judged with: the keys of region.yml
 # except enabled, regions and gate_reads. One chain cache and one work queue
 # serve them all.
