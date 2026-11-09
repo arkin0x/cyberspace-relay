@@ -332,6 +332,10 @@ const liveBucket = "live"
 // address's /64, since one host is usually given a whole /64 and
 // could otherwise take a fresh address for every request. Anything else
 // (the live bucket, an unreadable address) counts as itself.
+// AddressBucket is the key one host's address counts by: an IPv4 address,
+// or an IPv6 /64 (which one host usually holds whole).
+func AddressBucket(ip string) string { return addressBucket(ip) }
+
 func addressBucket(ip string) string {
 	a := net.ParseIP(ip)
 	if a == nil {

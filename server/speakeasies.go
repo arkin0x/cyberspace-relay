@@ -342,6 +342,11 @@ func (rt *speakeasyRuntime) serveWS(w http.ResponseWriter, r *http.Request, sp *
 		if !EnforceSpeakeasyConnectionRateLimit(w, r, sp.ID, cfg.Server.ConnectionRateLimitPerIP) {
 			return
 		}
+		release, ok := EnforceOpenSockets(w, r, cfg)
+		if !ok {
+			return
+		}
+		defer release()
 	}
 	scope := rt.scope(sp, path)
 	srv := websocket.Server{

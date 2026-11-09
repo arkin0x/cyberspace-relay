@@ -14,6 +14,8 @@ func resetRateLimitState() {
 	ipBuckets.Range(func(k, _ interface{}) bool { ipBuckets.Delete(k); return true })
 	rejAgg.mu.Lock()
 	rejAgg.maxConn = 0
+	rejAgg.maxConnPath = 0
+	rejAgg.maxConnIP = 0
 	rejAgg.rateLimit = 0
 	rejAgg.blocked = 0
 	rejAgg.topIPs = make(map[string]int)

@@ -36,6 +36,7 @@ type ServerSettings struct {
 	MaxSubscriptionsPerClient int    `yaml:"max_subscriptions_per_client" json:"max_subscriptions_per_client"`
 	ImplicitReqLimit          int    `yaml:"implicit_req_limit" json:"implicit_req_limit"`                     // New field for implicit REQ limit
 	ConnectionRateLimitPerIP  int    `yaml:"connection_rate_limit_per_ip" json:"connection_rate_limit_per_ip"` // Per-IP connection attempts per minute (0 = disabled). See #61.
+	MaxOpenSocketsPerIP       int    `yaml:"max_open_sockets_per_ip" json:"max_open_sockets_per_ip"`           // Open websockets per IPv4 address or IPv6 /64, root and speakeasies together (0 = default 32, negative = off).
 }
 
 // BackupRelayConfig is the upstream-mirror destination. Same

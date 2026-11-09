@@ -517,6 +517,12 @@ func initRoot(w http.ResponseWriter, r *http.Request) {
 			if !EnforceConnectionRateLimit(w, r, cfg.Server.ConnectionRateLimitPerIP) {
 				return
 			}
+			// Open sockets per address, root and speakeasies together.
+			release, ok := EnforceOpenSockets(w, r, cfg)
+			if !ok {
+				return
+			}
+			defer release()
 		}
 		// Handle Nostr WebSocket connections
 		wsServer.ServeHTTP(w, r)

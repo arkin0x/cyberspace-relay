@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/0ceanslim/grain/config"
 	cfgType "github.com/0ceanslim/grain/config/types"
@@ -48,38 +49,113 @@ func TestNestedSpeakeasiesDoNotBanAPlayer(t *testing.T) {
 	}
 }
 
-// TestSpeakeasyRetriesNeverBan: a client hammering one speakeasy is refused
-// past its budget (429), counted, but never banned, and its other paths
-// and the root keep their own budgets.
-func TestSpeakeasyRetriesNeverBan(t *testing.T) {
+// TestSpeakeasyBudgetLimits, at the real limit (30 a minute): a normal
+// client, one resume plus three retries across five nested speakeasies, is
+// never refused or banned; a flood against one speakeasy is refused past
+// its own budget, and once it has spent the shared budget (every attempt
+// counts, passed or refused), escalated to a ban.
+func TestSpeakeasyBudgetLimits(t *testing.T) {
 	withEscalation(t)
-	const ip, limit = "22.22.22.22", 3
-	refused := 0
-	for i := 0; i < 20; i++ {
-		r := httptest.NewRequest("GET", "/a", nil)
-		r.RemoteAddr = ip + ":1"
-		w := httptest.NewRecorder()
-		if !EnforceSpeakeasyConnectionRateLimit(w, r, "a", limit) {
-			refused++
-			if w.Code != 429 || w.Header().Get("Retry-After") != "60" {
-				t.Fatalf("refusal %d: %d %q", refused, w.Code, w.Header().Get("Retry-After"))
+	const limit = 30
+	normal, flood := "25.25.25.25", "26.26.26.26"
+	for try := 0; try < 4; try++ {
+		for _, id := range []string{"a", "ab", "abc", "abcd", "abcde"} {
+			if !CheckSpeakeasyConnectionRate(normal, id, limit) {
+				t.Fatalf("a normal client was refused at %s, try %d", id, try)
 			}
 		}
 	}
-	if refused != 20-limit {
-		t.Fatalf("%d refused, want %d", refused, 20-limit)
+	if blocked, _ := config.IsIPBlocked(normal); blocked {
+		t.Fatal("a normal client was banned")
 	}
-	if blocked, _ := config.IsIPBlocked(ip); blocked {
-		t.Fatal("speakeasy retries escalated to an IP ban")
+	refused := 0
+	for i := 0; i < speakeasyBudgetFactor*limit; i++ {
+		if !CheckSpeakeasyConnectionRate(flood, "a", limit) {
+			refused++
+		}
 	}
+	if refused != speakeasyBudgetFactor*limit-limit {
+		t.Fatalf("%d refused within the shared budget, want %d (past its own)", refused, speakeasyBudgetFactor*limit-limit)
+	}
+	if blocked, _ := config.IsIPBlocked(flood); blocked {
+		t.Fatal("banned while still inside the shared budget")
+	}
+	for i := 0; i < 3; i++ {
+		CheckSpeakeasyConnectionRate(flood, "a", limit)
+	}
+	if blocked, _ := config.IsIPBlocked(flood); !blocked {
+		t.Fatal("a flood past the shared budget was never banned")
+	}
+}
+
+// TestSpeakeasyBucketsCountBySlash64: two IPv6 addresses in one /64 share
+// the speakeasy buckets; another /64 does not.
+func TestSpeakeasyBucketsCountBySlash64(t *testing.T) {
+	withEscalation(t)
+	const limit = 2
+	if !CheckSpeakeasyConnectionRate("2001:db8:1:1::1", "a", limit) || !CheckSpeakeasyConnectionRate("2001:db8:1:1::2", "a", limit) {
+		t.Fatal("refused inside the budget")
+	}
+	if CheckSpeakeasyConnectionRate("2001:db8:1:1:ffff::3", "a", limit) {
+		t.Fatal("a third address in the same /64 got its own budget")
+	}
+	if !CheckSpeakeasyConnectionRate("2001:db8:1:2::1", "a", limit) {
+		t.Fatal("another /64 was refused")
+	}
+}
+
+// TestOpenSocketsPerAddress: at most the cap of open sockets per IPv4
+// address or IPv6 /64; a release frees one; release is safe to call twice;
+// a negative setting is off and unset is the default.
+func TestOpenSocketsPerAddress(t *testing.T) {
+	var rel []func()
+	for i := 0; i < 2; i++ {
+		r, ok := takeSocket(fmt.Sprintf("2001:db8:9:9::%d", i), 2)
+		if !ok {
+			t.Fatalf("socket %d refused", i)
+		}
+		rel = append(rel, r)
+	}
+	if _, ok := takeSocket("2001:db8:9:9::7", 2); ok {
+		t.Fatal("a third socket for one /64")
+	}
+	if r, ok := takeSocket("2001:db8:9:a::7", 2); !ok {
+		t.Fatal("another /64 refused")
+	} else {
+		r()
+	}
+	rel[0]()
+	rel[0]()
+	if r, ok := takeSocket("2001:db8:9:9::7", 2); !ok {
+		t.Fatal("not freed by a release")
+	} else {
+		r()
+	}
+	rel[1]()
+	for v, want := range map[int]int{0: DefaultMaxOpenSocketsPerIP, -1: 0, 5: 5} {
+		cfg := &cfgType.ServerConfig{}
+		cfg.Server.MaxOpenSocketsPerIP = v
+		if got := openSocketLimit(cfg); got != want {
+			t.Errorf("setting %d: limit %d, want %d", v, got, want)
+		}
+	}
+	openSockets.Lock()
+	defer openSockets.Unlock()
+	if len(openSockets.n) != 0 {
+		t.Fatalf("counts left: %v", openSockets.n)
+	}
+}
+
+// TestRejectionCategories: the speakeasy and per-address caps are counted
+// in the summary.
+func TestRejectionCategories(t *testing.T) {
+	resetRateLimitState()
+	RecordRejection("max_conn_path", "1.1.1.1")
+	RecordRejection("max_conn_ip", "1.1.1.1")
 	rejAgg.mu.Lock()
-	counted := rejAgg.rateLimit
-	rejAgg.mu.Unlock()
-	if counted != 20-limit {
-		t.Fatalf("%d rate-limit rejections counted, want %d", counted, 20-limit)
-	}
-	if !CheckSpeakeasyConnectionRate(ip, "ab", limit) || !CheckIPConnectionRate(ip, limit) {
-		t.Fatal("one speakeasy's budget spent another's or the root's")
+	defer rejAgg.mu.Unlock()
+	if rejAgg.maxConnPath != 1 || rejAgg.maxConnIP != 1 || rejAgg.topIPs["1.1.1.1"] != 2 {
+		t.Fatalf("%+v", rejAgg)
 	}
 }
 
@@ -151,5 +227,36 @@ func TestSpeakeasySocketsHaveTheirOwnBudget(t *testing.T) {
 	}
 	if _, err := dial(t, r.wsRoot+"/ab"); err == nil {
 		t.Fatal("the speakeasy's third socket in a minute was accepted")
+	}
+}
+
+// TestOpenSocketCapOverWebsockets: with max_open_sockets_per_ip 2, one root
+// socket and one speakeasy socket from an address fill it; a third, at
+// either, is refused (429); closing one frees a place.
+func TestOpenSocketCapOverWebsockets(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	r.register(t, "ab")
+	cfg := config.GetConfig()
+	old := cfg.Server.MaxOpenSocketsPerIP
+	cfg.Server.MaxOpenSocketsPerIP = 2
+	t.Cleanup(func() { cfg.Server.MaxOpenSocketsPerIP = old })
+	root := mustDial(t, r.wsRoot)
+	mustDial(t, r.wsRoot+"/ab")
+	if _, err := dial(t, r.wsRoot); err == nil {
+		t.Fatal("a third socket at the root was accepted")
+	}
+	if _, err := dial(t, r.wsRoot+"/ab"); err == nil {
+		t.Fatal("a third socket at the speakeasy was accepted")
+	}
+	root.ws.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := dial(t, r.wsRoot+"/ab"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closing a socket freed no place")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
