@@ -30,7 +30,7 @@ type SpeakeasyAdmin interface {
 	// lines whose payment bought nothing (refund owed, held) or whose
 	// outcome is unknown, and open orders the wallet cannot be asked about.
 	Payments(params []any) (any, string)
-	// PaymentResolve: [<payment hash>, <note>]. Marks one listed payment
+	// PaymentResolve: [<line id>, <note>]. Marks one listed ledger line
 	// settled by hand; the ledger keeps its history.
 	PaymentResolve(params []any) (any, string)
 }

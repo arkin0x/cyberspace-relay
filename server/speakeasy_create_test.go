@@ -289,13 +289,13 @@ func TestPausedSalesAndResolve(t *testing.T) {
 	if len(owe) != 1 || res.(map[string]any)["sales"] != "" {
 		t.Fatalf("payments: %v", res)
 	}
-	if _, msg := r.rt.PaymentResolve([]any{owe[0].PaymentHash, "refunded by hand"}); msg != "" {
+	if _, msg := r.rt.PaymentResolve([]any{owe[0].LineID, "refunded by hand"}); msg != "" {
 		t.Fatal(msg)
 	}
 	if res, _ := r.rt.Payments(nil); len(res.(map[string]any)["needs_owner"].([]speakeasy.Order)) != 0 {
 		t.Fatalf("still listed after resolve: %v", res)
 	}
-	if _, msg := r.rt.PaymentResolve([]any{owe[0].PaymentHash, "again"}); msg == "" {
+	if _, msg := r.rt.PaymentResolve([]any{owe[0].LineID, "again"}); msg == "" {
 		t.Fatal("resolved twice")
 	}
 
@@ -311,6 +311,7 @@ func TestPausedSalesAndResolve(t *testing.T) {
 	w.mu.Lock()
 	w.failLookups = true
 	w.mu.Unlock()
+	co.Poll(context.Background()) // two bad passes in a row pause sales
 	co.Poll(context.Background())
 	if _, body, _ := get(t, http.MethodGet, r.root+"/C/abe", "Accept", browser); strings.Contains(body, "Create speakeasy for") {
 		t.Fatal("Create offered while paused")

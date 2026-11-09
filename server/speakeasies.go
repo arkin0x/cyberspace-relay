@@ -198,17 +198,13 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 	checkoutDone := make(chan struct{})
 	if rt.checkout = startCheckout(sc, reg, dir, public); rt.checkout != nil {
 		co := rt.checkout
-		go func() {
-			// Payments are "on" only once a real make_invoice and
-			// lookup_invoice worked; until then nothing is sold.
-			if err := co.SelfCheck(poolCtx); err != nil {
-				if poolCtx.Err() == nil {
-					log.RegionGate().Error("Speakeasy payments off: the wallet self-check failed", "error", err)
-				}
-			} else {
-				log.RegionGate().Info("Speakeasy payments on", "speakeasy_sats", sc.Payments.SpeakeasySats, "invoice_expiry_seconds", sc.Payments.InvoiceExpirySeconds)
-			}
-		}()
+		// Payments are "on" only once a real make_invoice and
+		// lookup_invoice worked; until then nothing is sold. A failure
+		// that may pass (a timeout, a relay down) is retried with backoff;
+		// a refused method keeps payments off.
+		go co.RunSelfCheck(poolCtx,
+			func(msg string, args ...any) { log.RegionGate().Info(msg, args...) },
+			func(msg string, args ...any) { log.RegionGate().Error(msg, args...) })
 		go func() {
 			co.Run(poolCtx)
 			close(checkoutDone)
@@ -628,18 +624,20 @@ func (rt *speakeasyRuntime) Payments(params []any) (any, string) {
 	return map[string]any{"payments_on": true, "sales": rt.checkout.State(), "needs_owner": owe, "lookup_failing": failing}, ""
 }
 
-// PaymentResolve marks one payment the owner settled by hand: [<payment
-// hash>, <note>]. The ledger keeps its history; Payments stops listing it.
+// PaymentResolve marks one ledger line the owner settled by hand:
+// [<line id>, <note>] (the line_id Payments lists). The ledger keeps its
+// history; Payments stops listing that line, and a later line for the
+// same payment hash stays listed.
 func (rt *speakeasyRuntime) PaymentResolve(params []any) (any, string) {
-	hash, ok := stringParam(params, 0)
+	lineID, ok := stringParam(params, 0)
 	note, _ := stringParam(params, 1)
 	if !ok || len(params) < 1 || len(params) > 2 {
-		return nil, "params: [<payment hash>, <note>]"
+		return nil, "params: [<line id>, <note>]"
 	}
 	if rt.checkout == nil {
 		return nil, "payments are not on"
 	}
-	r, err := rt.checkout.Resolve(hash, note)
+	r, err := rt.checkout.Resolve(lineID, note)
 	if err != nil {
 		return nil, err.Error()
 	}
