@@ -134,8 +134,11 @@ func (rt *speakeasyRuntime) servePage(w http.ResponseWriter, r *http.Request) bo
 		url = rt.url(sp.ID)
 	}
 	page := speakeasy.NewPage(region, rt.cfg.Planes, sp, url)
-	if sp == nil && rt.checkout != nil && rt.checkout.Selling() {
-		page.Create = &speakeasy.PageCreate{Sats: rt.cfg.Payments.SpeakeasySats, Endpoint: OrdersPath}
+	switch {
+	case sp != nil && len(sp.Names) > 0:
+		page.NameURL = rt.url(sp.Names[0])
+	case sp == nil && rt.checkout != nil && rt.checkout.Selling():
+		page.Create = &speakeasy.PageCreate{Sats: rt.cfg.Payments.SpeakeasySats, NameSats: rt.cfg.Payments.NameSats, Endpoint: OrdersPath}
 	}
 	var buf bytes.Buffer
 	if err := speakeasy.RenderPage(&buf, page); err != nil {
@@ -169,6 +172,7 @@ type orderView struct {
 	ID         string `json:"id"`
 	Kind       string `json:"kind"`
 	Region     string `json:"region"`
+	Name       string `json:"name,omitempty"`
 	AmountSats int64  `json:"amount_sats"`
 	// PaymentHash and ID are what a payer quotes to the relay owner.
 	PaymentHash string `json:"payment_hash"`
@@ -186,7 +190,7 @@ type orderView struct {
 }
 
 func (rt *speakeasyRuntime) view(o speakeasy.Order) orderView {
-	v := orderView{ID: o.ID, Kind: o.Kind, Region: o.Region, AmountSats: o.AmountSats, PaymentHash: o.PaymentHash, Invoice: o.Invoice,
+	v := orderView{ID: o.ID, Kind: o.Kind, Region: o.Region, Name: o.Name, AmountSats: o.AmountSats, PaymentHash: o.PaymentHash, Invoice: o.Invoice,
 		ExpiresAt: o.ExpiresAt, Status: o.Status, Applied: o.Applied, Outcome: o.Outcome, NeedsOwner: speakeasy.NeedsOwner(o.Outcome)}
 	if o.Status == speakeasy.StatusPending && o.ExpiresAt > time.Now().Unix() { // only an invoice that can be paid
 		if qr, err := speakeasy.InvoiceQR(o.Invoice); err == nil {
@@ -195,8 +199,11 @@ func (rt *speakeasyRuntime) view(o speakeasy.Order) orderView {
 	}
 	// Only a payment that made the speakeasy leads to it: a refund owed
 	// says so instead (the page must never show it as a success).
-	if o.Applied && o.Outcome == speakeasy.OutcomeRegistered {
+	if o.Applied && speakeasy.MadeSpeakeasy(o.Outcome) {
 		v.URL = rt.url(o.Region)
+		if o.Name != "" && o.Outcome == speakeasy.OutcomeRegistered {
+			v.URL = rt.url(o.Name)
+		}
 	}
 	return v
 }
@@ -237,6 +244,8 @@ func (rt *speakeasyRuntime) createOrder(w http.ResponseWriter, r *http.Request) 
 	}
 	var body struct {
 		Region string `json:"region"`
+		// Name, optional, is bought with the speakeasy in one invoice.
+		Name string `json:"name"`
 	}
 	dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
 	dec.DisallowUnknownFields()
@@ -257,12 +266,16 @@ func (rt *speakeasyRuntime) createOrder(w http.ResponseWriter, r *http.Request) 
 	defer cancel()
 	ip := utils.GetClientIP(r)
 	o, err := rt.checkout.Create(ctx, speakeasy.OrderRequest{
-		Kind: speakeasy.OrderSpeakeasy, Region: canonical, Requester: speakeasy.Requester(ip), Network: speakeasy.Network(ip),
+		Kind: speakeasy.OrderSpeakeasy, Region: canonical, Name: body.Name, Requester: speakeasy.Requester(ip), Network: speakeasy.Network(ip),
 	})
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, rt.view(o))
 	case errors.Is(err, speakeasy.ErrAlreadySpeakeasy):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case errors.Is(err, speakeasy.ErrBadName):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	case errors.Is(err, speakeasy.ErrNameTaken), errors.Is(err, speakeasy.ErrNameHeld):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 	case errors.Is(err, speakeasy.ErrPaused), errors.Is(err, speakeasy.ErrPaymentsOff):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})

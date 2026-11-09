@@ -36,20 +36,26 @@ type Page struct {
 	// any) and Since describe it when it is.
 	Speakeasy        bool
 	URL, Name, Since string
+	// NameURL is the speakeasy's address at its name, once it has one.
+	NameURL string
 	// Create, when set, offers Create Speakeasy (step 5): payments are on
-	// and the region is not one yet.
+	// and the region is not one yet, with an optional name (step 6: a name
+	// comes only with creation, in the same invoice).
 	Create *PageCreate
 }
 
-// PageCreate is the Create Speakeasy offer: its price and the endpoint the
-// button asks for an invoice.
+// PageCreate is the Create Speakeasy offer: its price, the price a name
+// adds, and the endpoint the button asks for an invoice.
 type PageCreate struct {
-	Sats     int64
-	Endpoint string
+	Sats, NameSats int64
+	Endpoint       string
 }
 
-// Price is the price with a thousands separator.
-func (c PageCreate) Price() string { return groupThousands(c.Sats) }
+// Price is the price with a thousands separator; NamedPrice the price
+// with a name; NamePrice what a name adds.
+func (c PageCreate) Price() string      { return groupThousands(c.Sats) }
+func (c PageCreate) NamedPrice() string { return groupThousands(c.Sats + c.NameSats) }
+func (c PageCreate) NamePrice() string  { return groupThousands(c.NameSats) }
 
 func groupThousands(n int64) string {
 	s := fmt.Sprint(n)

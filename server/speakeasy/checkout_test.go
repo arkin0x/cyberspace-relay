@@ -188,7 +188,7 @@ func (r *checkoutRig) open() {
 	cfg := CheckoutConfig{
 		Wallet: r.wallet, Registry: r.reg,
 		OrdersPath: filepath.Join(r.dir, "orders.json"), LedgerPath: filepath.Join(r.dir, "payments.jsonl"),
-		Write: WriteDurable, Host: "relay.example", SpeakeasySats: DefaultSpeakeasySats,
+		Write: WriteDurable, Host: "relay.example", SpeakeasySats: DefaultSpeakeasySats, NameSats: DefaultNameSats,
 		Expiry: 10 * time.Minute, Poll: time.Hour,
 		MaxPending: 256, MaxPerRequester: 3, MaxPerNetwork: 6, MaxPerRegion: 2,
 		Now:   r.clock,
@@ -796,7 +796,7 @@ func TestExampleConfigParses(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := c.Payments
-	if p.Enabled || p.SpeakeasySats != 1000 || p.NWCFile != "" || p.MaxPendingInvoices != 256 || p.MaxPendingPerRequester != 3 ||
+	if p.Enabled || p.SpeakeasySats != 1000 || p.NameSats != 7000 || p.NWCFile != "" || p.MaxPendingInvoices != 256 || p.MaxPendingPerRequester != 3 ||
 		p.MaxPendingPerNetwork != 6 || p.MaxPendingPerRegion != 2 {
 		t.Fatalf("payments %+v", p)
 	}
@@ -826,6 +826,128 @@ func TestCheckoutFinalLookupMustBeAnswered(t *testing.T) {
 	}
 	if l := r.ledger(); len(l) != 1 || !strings.HasPrefix(l[0].Outcome, "unknown:") {
 		t.Fatalf("ledger %+v", l)
+	}
+}
+
+// ── names (step 6: only with creation, one invoice) ──────────────────────
+
+func (r *checkoutRig) mustCreateErr(region, who string) (Order, error) { return r.create(region, who) }
+
+func (r *checkoutRig) named(region, name, who string) (Order, error) {
+	return r.co.Create(context.Background(), OrderRequest{Kind: OrderSpeakeasy, Region: region, Name: name, Requester: Requester(who), Network: Network(who)})
+}
+
+// TestCheckoutNamedSpeakeasy: a speakeasy with a name is one invoice of
+// 1,000 + 7,000 sats, marked with both; once paid, the speakeasy exists and
+// the name leads to it.
+func TestCheckoutNamedSpeakeasy(t *testing.T) {
+	r := newCheckoutRig(t)
+	for _, bad := range []string{"cafe", "admin", "Cafe-du-monde", "ab"} {
+		if _, err := r.named("abc", bad, "1.1.1.1"); !errors.Is(err, ErrBadName) {
+			t.Errorf("name %q: %v", bad, err)
+		}
+	}
+	o, err := r.named("abc", "cafe-du-monde", "1.1.1.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.AmountSats != 8000 || o.Name != "cafe-du-monde" || o.Description != "relay.example speakeasy abc named cafe-du-monde" ||
+		bolt11Msat(o.Invoice) != 8_000_000 {
+		t.Fatalf("order %+v", o)
+	}
+	if again, _ := r.named("abc", "cafe-du-monde", "1.1.1.1"); again.ID != o.ID {
+		t.Fatal("asking again made another invoice")
+	}
+	// Unnamed for the same region from the same network: one open invoice
+	// per network per region (ruling), so not while the named one is open.
+	if _, err := r.mustCreateErr("abc", "1.1.1.1"); !errors.Is(err, ErrNetworkHasOrder) {
+		t.Fatalf("a second invoice for the region from the same network: %v", err)
+	}
+	r.wallet.pay(o.PaymentHash)
+	r.poll()
+	got := r.get(o.ID)
+	sp, _ := r.reg.Lookup("/cafe-du-monde")
+	if got.Outcome != OutcomeRegistered || sp == nil || sp.ID != "abc" || sp.PaymentHash != o.PaymentHash {
+		t.Fatalf("after paying: %+v, %+v", got, sp)
+	}
+	if _, err := r.named("abd", "cafe-du-monde", "2.2.2.2"); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("a taken name: %v", err)
+	}
+}
+
+// TestCheckoutNameHoldBlocksOnlyThatName: while one requester's invoice for
+// a name is open (or paid and being applied), nobody else gets one for that
+// name; another name, even for the same region, is not held.
+func TestCheckoutNameHoldBlocksOnlyThatName(t *testing.T) {
+	r := newCheckoutRig(t)
+	first, err := r.named("abc", "cafe-du-monde", "1.1.1.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.named("abd", "cafe-du-monde", "2.2.2.2"); !errors.Is(err, ErrNameHeld) {
+		t.Fatalf("a held name: %v", err)
+	}
+	if _, err := r.named("abc", "other-name", "2.2.2.2"); err != nil {
+		t.Fatalf("another name for the same region: %v", err)
+	}
+	// Paid but not written yet: still held.
+	r.wallet.pay(first.PaymentHash)
+	r.failSave = true
+	r.poll()
+	if _, err := r.named("abe", "cafe-du-monde", "3.3.3.3"); !errors.Is(err, ErrNameHeld) {
+		t.Fatalf("a name being applied: %v", err)
+	}
+	r.failSave = false
+	r.poll()
+	if sp, _ := r.reg.Lookup("/cafe-du-monde"); sp == nil || sp.ID != "abc" {
+		t.Fatal("not applied on the retry")
+	}
+	// An expired hold frees the name.
+	r2 := newCheckoutRig(t)
+	r2.named("abc", "free-later", "1.1.1.1")
+	r2.advance(11 * time.Minute)
+	if _, err := r2.named("abd", "free-later", "2.2.2.2"); err != nil {
+		t.Fatalf("after the hold's invoice stopped being payable: %v", err)
+	}
+}
+
+// TestCheckoutNameTakenFirst: the name was taken another way while the
+// invoice was open (the relay owner): the speakeasy is made without it and
+// the name's part is owed back, alerted; a crash after a named write reads
+// as registered.
+func TestCheckoutNameTakenFirst(t *testing.T) {
+	r := newCheckoutRig(t)
+	o, _ := r.named("abc", "cafe-du-monde", "1.1.1.1")
+	r.reg.Add(Entry{ID: "fff", Names: []string{"cafe-du-monde"}})
+	r.wallet.pay(o.PaymentHash)
+	r.poll()
+	got := r.get(o.ID)
+	sp := r.reg.Get("abc")
+	if got.Outcome != OutcomeNameTaken || !NeedsOwner(got.Outcome) || !MadeSpeakeasy(got.Outcome) || sp == nil || len(sp.Names) != 0 || len(r.alerts) != 1 {
+		t.Fatalf("%+v, %+v, alerts %v", got, sp, r.alerts)
+	}
+
+	r2 := newCheckoutRig(t)
+	o2, _ := r2.named("abc", "second-cafe", "1.1.1.1")
+	r2.wallet.pay(o2.PaymentHash)
+	r2.co.update(o2.ID, func(x *Order) { x.Status, x.SettledAt = StatusPaid, r2.now.Unix() })
+	r2.reg.Add(Entry{ID: "abc", PaymentHash: o2.PaymentHash, Names: []string{"second-cafe"}}) // written before a crash
+	r2.open()
+	r2.poll()
+	if got := r2.get(o2.ID); got.Outcome != OutcomeRegistered || len(r2.alerts) != 0 {
+		t.Fatalf("after the crash: %+v, alerts %v", got, r2.alerts)
+	}
+	// Written without its name (taken first) before a crash: still the
+	// name's part owed, not "registered".
+	r3 := newCheckoutRig(t)
+	o3, _ := r3.named("abc", "third-cafe", "1.1.1.1")
+	r3.wallet.pay(o3.PaymentHash)
+	r3.co.update(o3.ID, func(x *Order) { x.Status, x.SettledAt = StatusPaid, r3.now.Unix() })
+	r3.reg.Add(Entry{ID: "abc", PaymentHash: o3.PaymentHash})
+	r3.open()
+	r3.poll()
+	if got := r3.get(o3.ID); got.Outcome != OutcomeNameTaken {
+		t.Fatalf("a nameless write before a crash: %+v", got)
 	}
 }
 

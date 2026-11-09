@@ -21,9 +21,9 @@ type Entry struct {
 	ID string `json:"id"`
 	// Region is the cube the speakeasy admits in, in region.yml's form.
 	Region RegionJSON `json:"region"`
-	// Names are other paths that lead to the same speakeasy, its reserved
-	// names (step 6 of the speakeasy plan). Empty until names ship; the
-	// registry already routes them.
+	// Names are other paths that lead to the same speakeasy: its reserved
+	// name (step 6 of the speakeasy plan, ruling D3), at most one. A name
+	// is bound to its region for life (Registry's bound names).
 	Names []string `json:"names,omitempty"`
 	// Name and Description, when set, replace the NIP-11 defaults.
 	Name        string `json:"name,omitempty"`
@@ -63,6 +63,10 @@ type Speakeasy struct {
 type registryFile struct {
 	Version     int     `json:"version"`
 	Speakeasies []Entry `json:"speakeasies"`
+	// BoundNames is every name ever reserved, with its region: a name
+	// stays bound to its region for life (ruling D3), also after its
+	// speakeasy is removed, so it can never lead to another region.
+	BoundNames map[string]string `json:"bound_names,omitempty"`
 }
 
 // Registry is the set of speakeasies, kept in registry.json in the data
@@ -77,6 +81,7 @@ type Registry struct {
 	mu     sync.RWMutex
 	byID   map[string]*Speakeasy
 	byPath map[string]*Speakeasy // every id and name
+	bound  map[string]string     // name -> region id, for life
 }
 
 // ErrNotFound is returned for an id the registry does not hold.
@@ -93,7 +98,7 @@ func LoadRegistry(path string, parse RegionPath, planes []uint, write func(strin
 	if len(planes) == 0 {
 		return nil, nil, fmt.Errorf("a region must span at least one plane")
 	}
-	r := &Registry{path: path, parse: parse, planes: planes, write: write, byID: map[string]*Speakeasy{}, byPath: map[string]*Speakeasy{}}
+	r := &Registry{path: path, parse: parse, planes: planes, write: write, byID: map[string]*Speakeasy{}, byPath: map[string]*Speakeasy{}, bound: map[string]string{}}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return r, nil, nil
@@ -104,6 +109,9 @@ func LoadRegistry(path string, parse RegionPath, planes []uint, write func(strin
 	var f registryFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	for name, id := range f.BoundNames {
+		r.bound[name] = id
 	}
 	var bad []error
 	for _, e := range f.Speakeasies {
@@ -146,8 +154,8 @@ func (r *Registry) check(e Entry) (*Speakeasy, error) {
 	if !validID(e.ID) {
 		return nil, fmt.Errorf("id must be 1 to %d lowercase hex characters (a region path, as after ONOSENDAI's /C/)", maxSegment)
 	}
-	if len(e.Names) > 0 && !namesOpen {
-		return nil, fmt.Errorf("named speakeasies are not open yet")
+	if len(e.Names) > 1 {
+		return nil, fmt.Errorf("a speakeasy has at most one name")
 	}
 	for _, n := range e.Names {
 		if err := CheckName(n, r.parse); err != nil {
@@ -190,6 +198,11 @@ func (r *Registry) clash(s *Speakeasy) error {
 			return fmt.Errorf("path %q is already taken", p)
 		}
 	}
+	for _, n := range s.Names {
+		if id, ok := r.bound[n]; ok && id != s.ID {
+			return fmt.Errorf("name %q is bound to region %s for life", n, id)
+		}
+	}
 	return nil
 }
 
@@ -198,6 +211,21 @@ func (r *Registry) insert(s *Speakeasy) {
 	for _, p := range append([]string{s.ID}, s.Names...) {
 		r.byPath[p] = s
 	}
+	for _, n := range s.Names {
+		r.bound[n] = s.ID
+	}
+}
+
+// boundWith is the bound names with s's added, for a save that adds s.
+func (r *Registry) boundWith(s *Speakeasy) map[string]string {
+	out := make(map[string]string, len(r.bound)+len(s.Names))
+	for n, id := range r.bound {
+		out[n] = id
+	}
+	for _, n := range s.Names {
+		out[n] = s.ID
+	}
+	return out
 }
 
 // RegionPrefix starts a speakeasy's canonical path: /C/<region string>,
@@ -371,11 +399,42 @@ func (r *Registry) Add(e Entry) (*Speakeasy, error) {
 	if err := r.clash(s); err != nil {
 		return nil, err
 	}
-	if err := r.save(append(r.entriesLocked(), s.Entry)); err != nil {
+	if err := r.save(append(r.entriesLocked(), s.Entry), r.boundWith(s)); err != nil {
 		return nil, err
 	}
 	r.insert(s)
 	return s, nil
+}
+
+// ErrNameTaken: the name leads to a speakeasy already, or is bound to
+// another region for life.
+var ErrNameTaken = errors.New("that name is taken")
+
+// NameFree says why name cannot be given to region with a new speakeasy,
+// or nil: it must pass CheckName, lead nowhere yet, and not be bound to
+// another region. (Names come only with creation, ruling 2026-11-09: an
+// existing speakeasy is never named.)
+func (r *Registry) NameFree(name, region string) error {
+	if err := CheckName(name, r.parse); err != nil {
+		return err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.byPath[name] != nil {
+		return ErrNameTaken
+	}
+	if b, ok := r.bound[name]; ok && b != region {
+		return ErrNameTaken
+	}
+	return nil
+}
+
+// BoundTo is the region a name is bound to, if it was ever reserved.
+func (r *Registry) BoundTo(name string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.bound[name]
+	return id, ok
 }
 
 // Remove takes a speakeasy out of the registry and writes it. Its database
@@ -393,7 +452,8 @@ func (r *Registry) Remove(id string) error {
 			keep = append(keep, e)
 		}
 	}
-	if err := r.save(keep); err != nil {
+	// Its name stays bound to its region (ruling D3).
+	if err := r.save(keep, r.bound); err != nil {
 		return err
 	}
 	delete(r.byID, id)
@@ -412,9 +472,12 @@ func (r *Registry) entriesLocked() []Entry {
 	return out
 }
 
-func (r *Registry) save(entries []Entry) error {
+func (r *Registry) save(entries []Entry, bound map[string]string) error {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-	data, err := json.MarshalIndent(registryFile{Version: 1, Speakeasies: entries}, "", "  ")
+	if entries == nil {
+		entries = []Entry{}
+	}
+	data, err := json.MarshalIndent(registryFile{Version: 1, Speakeasies: entries, BoundNames: bound}, "", "  ")
 	if err != nil {
 		return err
 	}

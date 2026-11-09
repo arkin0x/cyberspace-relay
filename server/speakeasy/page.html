@@ -54,6 +54,11 @@
   .qr { width: min(18rem, 100%); margin: 0.5rem 0 1rem; }
   .qr svg { width: 100%; height: auto; border-radius: 0.4rem; }
   #bolt11 { max-height: 4.5rem; overflow: auto; display: block; }
+  input[type=text] {
+    background: var(--color-surface-inset-strong, rgb(0 0 0 / 0.35)); color: inherit;
+    border: 1px solid var(--color-border, #2c3226); border-radius: 0.4rem; padding: 0.45rem 0.6rem;
+    font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace); min-width: 0; flex: 1 1 12rem;
+  }
 </style>
 </head>
 <body>
@@ -79,7 +84,9 @@
     <dl>
       <dt>Status</dt><dd class="yes">Open</dd>
       {{if .Name}}<dt>Name</dt><dd><code>{{.Name}}</code></dd>{{end}}
-      <dt>Relay</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>
+      {{if .NameURL}}<dt>Relay</dt><dd><div class="addr"><code id="name-url">{{.NameURL}}</code><button type="button" class="quiet" data-copy="name-url">Copy</button></div></dd>
+      <dt>Also at</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>
+      {{else}}<dt>Relay</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>{{end}}
       <dt>Since</dt><dd>{{.Since}}</dd>
     </dl>
     {{else}}
@@ -92,8 +99,9 @@
         <li>A speakeasy is a private relay for this region.</li>
         <li>Only chains whose head is inside can read or write.</li>
         <li>One payment, kept forever.</li>
+        <li>Optional: a name for a short address (relay.onosendai.tech/your-name), {{.NamePrice}} sats more. 3 to 40 lowercase letters, digits and dashes; first paid wins; bound to this region for life. A name can only be bought now, with the speakeasy.</li>
       </ul>
-      <button type="button" id="create">Create speakeasy for {{.Price}} sats</button>
+      <div class="addr"><input id="create-name" type="text" autocomplete="off" spellcheck="false" maxlength="40" placeholder="name (optional)" aria-label="Name (optional)" data-price="{{.Price}}" data-named-price="{{.NamedPrice}}"><button type="button" id="create">Create speakeasy for {{.Price}} sats</button></div>
       <p class="err" id="create-error" role="alert"></p>
       <div id="invoice" hidden>
         <div class="qr" id="qr"></div>
@@ -142,6 +150,10 @@
     var inv = document.getElementById("invoice");
     var status = document.getElementById("pay-status");
     var key = "speakeasy-order:" + region;
+    var nameIn = document.getElementById("create-name");
+    nameIn.addEventListener("input", function () {
+      btn.textContent = "Create speakeasy for " + (nameIn.value.trim() ? nameIn.getAttribute("data-named-price") : nameIn.getAttribute("data-price")) + " sats";
+    });
     function remember(id) { try { if (id) localStorage.setItem(key, id); else localStorage.removeItem(key); } catch (e) {} }
     function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
     function show(o) {
@@ -152,16 +164,24 @@
       document.getElementById("payment-hash").textContent = o.payment_hash;
       inv.hidden = false;
       btn.hidden = true;
+      nameIn.hidden = true;
     }
     function poll(id) {
       fetch(endpoint + "/" + encodeURIComponent(id), { cache: "no-store" })
         .then(function (r) { if (r.status === 404) { remember(null); throw "gone"; } return r.json(); })
         .then(function (o) {
           show(o);
-          if (o.applied && o.url) {
+          if (o.applied && o.url && !o.needs_owner) {
             remember(null);
-            status.textContent = "Paid. This region is now a speakeasy.";
-            setTimeout(function () { location.reload(); }, 1500);
+            status.textContent = o.name ? "Paid. This region is now a speakeasy named " + o.name + "." : "Paid. This region is now a speakeasy.";
+            setTimeout(function () { location.href = o.name ? "/" + o.name : location.pathname; }, 1500);
+            return;
+          }
+          if (o.applied && o.url) {
+            // Made, but its name was taken first: the name's part is owed.
+            remember(null);
+            status.textContent = "Paid. This region is now a speakeasy, but its name was taken first (" + o.outcome +
+              "): give the relay owner the order and payment hash below for the name's part.";
             return;
           }
           if (o.applied) {
@@ -175,7 +195,7 @@
             remember(null);
             status.textContent = "";
             errEl.textContent = o.status === "expired" ? "That invoice expired." : "The wallet never answered about that invoice; give the relay owner the order and payment hash below.";
-            if (o.status === "expired") { inv.hidden = true; btn.hidden = false; }
+            if (o.status === "expired") { inv.hidden = true; btn.hidden = false; nameIn.hidden = false; }
             return;
           }
           setTimeout(function () { poll(id); }, 3000);
@@ -183,9 +203,15 @@
         .catch(function (e) { if (e !== "gone") setTimeout(function () { poll(id); }, 6000); });
     }
     btn.addEventListener("click", function () {
+      var body = { region: region };
+      var name = nameIn.value.trim().toLowerCase();
+      if (name) {
+        if (!/^[a-z0-9-]{3,40}$/.test(name)) { errEl.textContent = "A name is 3 to 40 lowercase letters, digits and dashes."; return; }
+        body.name = name;
+      }
       btn.disabled = true;
       errEl.textContent = "";
-      fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ region: region }) })
+      fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
         .then(function (r) { return r.json().then(function (o) { return { ok: r.ok, o: o }; }); })
         .then(function (x) {
           btn.disabled = false;

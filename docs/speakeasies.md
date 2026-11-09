@@ -185,6 +185,20 @@ Off by default. On only with `payments: {enabled: true, nwc_file: <path>}` in `s
 3. Add `payments: {enabled: true, nwc_file: /run/secrets/speakeasy/nwc}` to `speakeasies.yml`, restart, and look for `Speakeasy payments on` in the log.
 4. Pay one speakeasy for real, then check the registry entry (its `payment_hash`), `payments.jsonl`, `grain_speakeasy_payments` (empty), and that the path answers as a speakeasy.
 
+## Named speakeasies (step 6, 2026-11-09)
+
+**Ruling B2 (2026-11-09, applied by the coordinator under the owner's "apply my recommendations"; the owner can override): a name can only be bought together with creating the speakeasy, as ONE invoice of 1,000 + 7,000 = 8,000 sats. An existing speakeasy is never named.** Why: when any visitor could buy a name for any existing speakeasy, anyone could name someone else's speakeasy, permanently (a name is bound for life), and could block a name on an existing speakeasy for free by holding an invoice open. Buying it with creation leaves the name to whoever creates the room, and a hold blocks only that one name.
+
+| Rule | How |
+|---|---|
+| Offer | The Create section of a region page (not yet a speakeasy) has an optional name field; the button reads "Create speakeasy for 1,000 sats", and 8,000 once a name is typed. A speakeasy's page offers no name. |
+| Request | `POST /api/speakeasies/orders` `{"region": "<region>", "name": "<name>"}` (`name` optional); one invoice of `speakeasy_sats + name_sats`, description `relay.onosendai.tech speakeasy <region> named <name>`. 400 for a bad name; 409 for a taken name, a held name, or a region that is already a speakeasy. |
+| Names (D3) | 3 to 40 of `a-z0-9-`; not reserved (every top-level path the relay serves is reserved, and a test checks the routing code against the list); never a string that reads as a region (`cafe`, `0xabc`; `dead-beef` is a name, as the dash keeps it from parsing); one per speakeasy; first paid wins; bound to its region for life (the registry's `bound_names`, kept if the speakeasy is removed, so the name can never lead to another region). |
+| Holds | While one requester's invoice for a name can be paid, or a paid one is being applied, nobody else gets an invoice for that name (409, "try again in a few minutes"). It holds only that name: others can still ask for the same region, unnamed or with another name (within the per-region cap of 2). A hold lasts up to the invoice's life (10 minutes). |
+| Applying | Once paid, the speakeasy is made with the name. If the name was taken first another way (the relay owner through NIP-86), the speakeasy is made without it and the outcome is `refund owed: the name was taken first; the speakeasy was made without it`: alerted, ledgered, listed by `grain_speakeasy_payments`, and shown on the page; the owner refunds the name's part by hand. A paid order whose entry was written before a crash reads by its payment hash (`registered`, or that same refund if it was written without the name). |
+| Routing | `/<name>` routes as the hex path does, to the same speakeasy. NIP-11 there is named by the name; AUTH on a connection to the name names the name's URL (#19's rule, per path). Discovery gives the name in `name`; `url` stays the hex address. |
+| Price | `payments.name_sats`, default 7,000, added to `speakeasy_sats` (owner ruling 2026-11-09). |
+
 ## Later: a region picker (owner, 2026-11-04)
 
 An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/C/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.
@@ -204,4 +218,4 @@ The #11 review found a CPU attack: once proofs are checked, re-sending one expen
 - **The per-network queue limit (32 units per /24 or /48) is accepted** as is, though it also slows campus and carrier NAT networks.
 - **Short paths are huge regions** (membership there is nearly free). Noted only; the price is the same; revisit if abused.
 - **D2 detail:** NWC limited to make_invoice and lookup_invoice; the relay makes the invoice itself; the connection string is a secret file outside the repo, never logged, rotatable.
-- **Prices:** 1,000 sats for a speakeasy, 7,000 sats for a name.
+- **Prices:** 1,000 sats for a speakeasy, 7,000 sats for a name (bought only with creation, one invoice of 8,000: ruling B2 under step 6).

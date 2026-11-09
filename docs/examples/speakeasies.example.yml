@@ -44,6 +44,7 @@ payments:
   enabled: false
   # nwc_file: /run/secrets/speakeasy-nwc
   speakeasy_sats: 1000          # owner ruling 2026-11-09
+  name_sats: 7000               # a name, bought only with creation: one invoice of 8,000
   invoice_expiry_seconds: 600
   poll_seconds: 5
   max_pending_invoices: 256       # payable open invoices in all

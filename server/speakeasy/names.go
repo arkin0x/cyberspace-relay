@@ -1,11 +1,12 @@
 package speakeasy
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
-// namesOpen is false until named speakeasies ship (step 6 of the plan, at
-// 7,000 sats): until then an entry with names is refused. CheckName is
-// already the rule every name must pass when they do.
-const namesOpen = false
+// ErrBadName wraps every reason CheckName refuses a name.
+var ErrBadName = errors.New("not a valid name")
 
 // reservedNames can never be a speakeasy name (ruling D3): the project's
 // own words and every path the relay serves itself.
@@ -24,6 +25,13 @@ var reservedNames = map[string]bool{
 // The last check needs the region parser: without it no name is accepted,
 // because "cafe" and "0xabc" fit the characters and both are regions.
 func CheckName(name string, parse RegionPath) error {
+	if err := checkName(name, parse); err != nil {
+		return fmt.Errorf("%w: %w", ErrBadName, err)
+	}
+	return nil
+}
+
+func checkName(name string, parse RegionPath) error {
 	if len(name) < 3 || len(name) > 40 {
 		return fmt.Errorf("a name is 3 to 40 characters")
 	}

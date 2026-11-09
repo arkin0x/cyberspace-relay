@@ -25,7 +25,7 @@ Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/sp
 | Path routing, per-path NIP-11 and AUTH, separate storage | DONE (#19, #21) |
 | Region dashboard and discovery endpoint | in review 2026-11-09 |
 | Create Speakeasy (Lightning, NWC) | in review 2026-11-09; off by default; real-sats test before release |
-| Named speakeasies | not started |
+| Named speakeasies (7,000 sats) | in review 2026-11-09 |
 | ONOSENDAI: show a region's speakeasy and offer to add it | not started |
 
 ## Later
