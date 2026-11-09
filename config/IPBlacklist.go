@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -328,7 +329,13 @@ func RecordIPRateViolation(ip string, cfg cfgType.BlacklistConfig) {
 	if ip == "" {
 		return
 	}
-	if cfg.IPRateViolationThreshold <= 0 && cfg.IPMaxTempBans <= 0 {
+	threshold := cfg.IPRateViolationThreshold
+	if strings.Contains(ip, "/") && cfg.IPPrefixRateViolationThreshold > 0 {
+		// A /64 key (the speakeasy budget): its own threshold, as a /64
+		// can be a shared network.
+		threshold = cfg.IPPrefixRateViolationThreshold
+	}
+	if threshold <= 0 && cfg.IPMaxTempBans <= 0 {
 		return
 	}
 	ipMu.Lock()
@@ -336,7 +343,7 @@ func RecordIPRateViolation(ip string, cfg cfgType.BlacklistConfig) {
 	ipViolations[ip]++
 	violations := ipViolations[ip]
 
-	if cfg.IPRateViolationThreshold <= 0 || violations <= cfg.IPRateViolationThreshold {
+	if threshold <= 0 || violations <= threshold {
 		ipMu.Unlock()
 		return
 	}

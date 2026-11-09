@@ -324,3 +324,33 @@ func TestSlash64EscalatesAsOne(t *testing.T) {
 		t.Error("another /64 was banned")
 	}
 }
+
+// TestSlash64HasItsOwnThreshold: ip_prefix_rate_violation_threshold sets
+// how many violations a /64 key takes before a temp ban (a /64 can be a
+// shared network); unset, it is ip_rate_violation_threshold.
+func TestSlash64HasItsOwnThreshold(t *testing.T) {
+	withEscalation(t) // ip_rate_violation_threshold 1
+	cfg := config.GetConfig()
+	cfg.Blacklist.IPPrefixRateViolationThreshold = 3
+	const limit = 2
+	flood := func(prefix string, extra int) {
+		for i := 0; i < speakeasyBudgetFactor*limit+extra; i++ {
+			CheckSpeakeasyConnectionRate(fmt.Sprintf("%s::%x", prefix, i+1), fmt.Sprintf("a%d", i), limit)
+		}
+	}
+	flood("2001:db8:7:7", 3) // 3 violations: at the /64 threshold, not past it
+	if blocked, _ := config.IsIPBlocked("2001:db8:7:7::1"); blocked {
+		t.Fatal("a /64 banned at its threshold, not past it")
+	}
+	flood("2001:db8:7:8", 4) // 4 violations: past it
+	if blocked, _ := config.IsIPBlocked("2001:db8:7:8::1"); !blocked {
+		t.Fatal("a /64 past its own threshold was not banned")
+	}
+	// An address still bans past the address threshold (1).
+	for i := 0; i < 4; i++ {
+		CheckIPConnectionRate("198.51.100.7", 1)
+	}
+	if blocked, _ := config.IsIPBlocked("198.51.100.7"); !blocked {
+		t.Fatal("the address threshold changed")
+	}
+}

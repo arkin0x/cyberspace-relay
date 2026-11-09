@@ -355,8 +355,10 @@ func (rt *speakeasyRuntime) url(id string) string { return rt.publicURL + speake
 
 // serveWS serves a websocket to speakeasy sp at path (its id or its name).
 func (rt *speakeasyRuntime) serveWS(w http.ResponseWriter, r *http.Request, sp *speakeasy.Speakeasy, path string) {
-	// Its own per-IP budget, apart from the root's and never escalated
-	// to a ban (see CheckSpeakeasyConnectionRate).
+	// Its own budgets, apart from the root's (CheckSpeakeasyConnectionRate):
+	// one per (address, speakeasy) that never escalates, and one per
+	// address for all speakeasies that escalates to a ban as the root's
+	// does.
 	if cfg := config.GetConfig(); cfg != nil {
 		// The open-socket cap first, as at the root: its refusals spend
 		// no rate token and are no violation.
