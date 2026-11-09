@@ -514,6 +514,15 @@ func initRoot(w http.ResponseWriter, r *http.Request) {
 		// attempts. Disabled when limit is 0.
 		cfg := config.GetConfig()
 		if cfg != nil {
+			// Open sockets per address, root and speakeasies together,
+			// first: a refusal here spends no rate token and is no rate
+			// violation, so users behind one carrier NAT address who
+			// retry past the cap are never escalated to a ban for it.
+			release, ok := EnforceOpenSockets(w, r, cfg)
+			if !ok {
+				return
+			}
+			defer release()
 			if !EnforceConnectionRateLimit(w, r, cfg.Server.ConnectionRateLimitPerIP) {
 				return
 			}

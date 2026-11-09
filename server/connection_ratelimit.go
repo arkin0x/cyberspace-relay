@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/0ceanslim/grain/config"
+	cfgType "github.com/0ceanslim/grain/config/types"
+	"github.com/0ceanslim/grain/server/regiongate"
 	"github.com/0ceanslim/grain/server/utils"
 	"github.com/0ceanslim/grain/server/utils/log"
 )
@@ -58,9 +60,18 @@ func CheckIPConnectionRate(ip string, limitPerMinute int) bool {
 		// The max-conn cap and per-client rate limiter still apply.
 		return true
 	}
+	if takeAttempt(ip, limitPerMinute) {
+		return true
+	}
+	RecordIPViolation(ip)
+	return false
+}
 
+// takeAttempt consumes one attempt from the bucket named key and reports
+// whether it was within limitPerMinute.
+func takeAttempt(key string, limitPerMinute int) bool {
 	now := time.Now()
-	v, _ := ipBuckets.LoadOrStore(ip, &ipBucket{windowStart: now})
+	v, _ := ipBuckets.LoadOrStore(key, &ipBucket{windowStart: now})
 	b := v.(*ipBucket)
 
 	b.mu.Lock()
@@ -72,11 +83,130 @@ func CheckIPConnectionRate(ip string, limitPerMinute int) bool {
 	}
 	b.lastSeen = now
 	b.count++
-	if b.count > limitPerMinute {
-		RecordIPViolation(ip)
+	return b.count <= limitPerMinute
+}
+
+// CheckSpeakeasyConnectionRate is CheckIPConnectionRate for a websocket to
+// one speakeasy (server/speakeasies.go). Its buckets are apart from the
+// root's and keyed by the host's address (an IPv4 address or an IPv6 /64):
+//
+//   - every attempt, passed or refused, is charged to one bucket per
+//     address for all speakeasies at speakeasyBudgetFactor times the limit,
+//     and going over it is a rate violation (RecordIPViolation), which
+//     escalates to a ban as at the root: a flood is stopped;
+//   - each (address, speakeasy) pair also has its own bucket at the limit,
+//     whose refusals are counted but never escalated, so a player inside
+//     several nested speakeasies who redials them all on a resume, and
+//     retries a few, is refused at worst, never banned.
+//
+// The root's bucket and its escalation are unchanged; a blocked IP is
+// still refused at a speakeasy (403).
+func CheckSpeakeasyConnectionRate(ip, speakeasyID string, limitPerMinute int) bool {
+	if limitPerMinute <= 0 || ip == "" {
+		return true
+	}
+	key := regiongate.AddressBucket(ip)
+	if !takeAttempt(key+"\x00speakeasies", speakeasyBudgetFactor*limitPerMinute) {
+		// Charged to the address's key (an IPv6 /64), so a host rotating
+		// addresses inside its /64 escalates as one, and is banned as one.
+		RecordIPViolation(key)
+		return false
+	}
+	if !takeAttempt(key+"\x00speakeasy:"+speakeasyID, limitPerMinute) {
+		RecordRejection("rate_limit", ip)
 		return false
 	}
 	return true
+}
+
+// speakeasyBudgetFactor sizes the per-address bucket all speakeasies
+// share, as a multiple of connection_rate_limit_per_ip.
+const speakeasyBudgetFactor = 4
+
+// ── open sockets per address ─────────────────────────────────────────────
+
+// DefaultMaxOpenSocketsPerIP is max_open_sockets_per_ip when unset:
+// generous, since a carrier NAT puts many players behind one address.
+const DefaultMaxOpenSocketsPerIP = 32
+
+var openSockets = struct {
+	sync.Mutex
+	n map[string]int
+}{n: map[string]int{}}
+
+// openSocketLimit is the configured cap on open websockets per address.
+// 0 (unset) is the default; negative turns it off.
+func openSocketLimit(cfg *cfgType.ServerConfig) int {
+	if cfg == nil {
+		return 0
+	}
+	switch v := cfg.Server.MaxOpenSocketsPerIP; {
+	case v == 0:
+		return DefaultMaxOpenSocketsPerIP
+	case v < 0:
+		return 0
+	default:
+		return v
+	}
+}
+
+// takeSocket reserves one open websocket for ip's address (an IPv4 address
+// or an IPv6 /64), across the root and every speakeasy, so one host cannot
+// fill server.max_connections. It returns the release, or false when the
+// address already holds limit sockets. limit 0 is off.
+func takeSocket(ip string, limit int) (release func(), ok bool) {
+	if limit <= 0 || ip == "" {
+		return func() {}, true
+	}
+	key := regiongate.AddressBucket(ip)
+	openSockets.Lock()
+	defer openSockets.Unlock()
+	if openSockets.n[key] >= limit {
+		return nil, false
+	}
+	openSockets.n[key]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			openSockets.Lock()
+			defer openSockets.Unlock()
+			if openSockets.n[key]--; openSockets.n[key] <= 0 {
+				delete(openSockets.n, key)
+			}
+		})
+	}, true
+}
+
+// EnforceOpenSockets reserves an open websocket for the request's address
+// before the upgrade, or answers 429 and returns false. The caller runs
+// release when the socket closes (websocket.Server.ServeHTTP returns then).
+func EnforceOpenSockets(w http.ResponseWriter, r *http.Request, cfg *cfgType.ServerConfig) (release func(), ok bool) {
+	ip := utils.GetClientIP(r)
+	release, ok = takeSocket(ip, openSocketLimit(cfg))
+	if !ok {
+		RecordRejection("max_conn_ip", ip)
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "too many open connections from your address", http.StatusTooManyRequests)
+	}
+	return release, ok
+}
+
+// EnforceSpeakeasyConnectionRateLimit is EnforceConnectionRateLimit for a
+// websocket to speakeasy speakeasyID: the IP block list (403), then the
+// speakeasy's own per-IP bucket (429), with no escalation.
+func EnforceSpeakeasyConnectionRateLimit(w http.ResponseWriter, r *http.Request, speakeasyID string, limitPerMinute int) bool {
+	ip := utils.GetClientIP(r)
+	if blocked, _ := config.IsIPBlocked(ip); blocked {
+		RecordRejection("blocked", ip)
+		w.WriteHeader(http.StatusForbidden)
+		return false
+	}
+	if CheckSpeakeasyConnectionRate(ip, speakeasyID, limitPerMinute) {
+		return true
+	}
+	w.Header().Set("Retry-After", "60")
+	w.WriteHeader(http.StatusTooManyRequests)
+	return false
 }
 
 // startBucketCleanup runs in the background, evicting per-IP buckets idle
@@ -116,17 +246,20 @@ func startBucketCleanup(ctx context.Context) {
 // then resets.
 
 type rejectionStats struct {
-	mu        sync.Mutex
-	maxConn   int
-	rateLimit int
-	blocked   int
-	topIPs    map[string]int
+	mu          sync.Mutex
+	maxConn     int
+	maxConnPath int // a speakeasy at max_connections_per_path
+	maxConnIP   int // an address at max_open_sockets_per_ip
+	rateLimit   int
+	blocked     int
+	topIPs      map[string]int
 }
 
 var rejAgg = &rejectionStats{topIPs: make(map[string]int)}
 
 // RecordRejection bumps the appropriate counter for a rejected connection
-// attempt. category is one of: "max_conn", "rate_limit", "blocked". ip is
+// attempt. category is one of: "max_conn", "max_conn_path",
+// "max_conn_ip", "rate_limit", "blocked". ip is
 // the offending IP (may be empty if unknown — in that case the counter
 // still advances but no IP is attributed).
 func RecordRejection(category, ip string) {
@@ -135,6 +268,10 @@ func RecordRejection(category, ip string) {
 	switch category {
 	case "max_conn":
 		rejAgg.maxConn++
+	case "max_conn_path":
+		rejAgg.maxConnPath++
+	case "max_conn_ip":
+		rejAgg.maxConnIP++
 	case "rate_limit":
 		rejAgg.rateLimit++
 	case "blocked":
@@ -178,11 +315,12 @@ func startRejectionAggregator(ctx context.Context) {
 // (outside the lock) emits the summary WARN if anything happened.
 func emitAndReset() {
 	rejAgg.mu.Lock()
-	if rejAgg.maxConn == 0 && rejAgg.rateLimit == 0 && rejAgg.blocked == 0 {
+	if rejAgg.maxConn == 0 && rejAgg.maxConnPath == 0 && rejAgg.maxConnIP == 0 && rejAgg.rateLimit == 0 && rejAgg.blocked == 0 {
 		rejAgg.mu.Unlock()
 		return
 	}
 	maxConn, rateLimit, blocked := rejAgg.maxConn, rejAgg.rateLimit, rejAgg.blocked
+	maxConnPath, maxConnIP := rejAgg.maxConnPath, rejAgg.maxConnIP
 	ips := make([]string, 0, len(rejAgg.topIPs))
 	for ip := range rejAgg.topIPs {
 		ips = append(ips, ip)
@@ -193,6 +331,8 @@ func emitAndReset() {
 		top = append(top, ips[i]+":"+itoa(rejAgg.topIPs[ips[i]]))
 	}
 	rejAgg.maxConn = 0
+	rejAgg.maxConnPath = 0
+	rejAgg.maxConnIP = 0
 	rejAgg.rateLimit = 0
 	rejAgg.blocked = 0
 	rejAgg.topIPs = make(map[string]int)
@@ -200,6 +340,8 @@ func emitAndReset() {
 
 	log.RelayClient().Warn("Connection rejections (last minute)",
 		"max_conn", maxConn,
+		"max_conn_path", maxConnPath,
+		"max_conn_ip", maxConnIP,
 		"rate_limit", rateLimit,
 		"blocked", blocked,
 		"top_offending_ips", top)

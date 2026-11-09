@@ -54,5 +54,6 @@ permanent_blocked_ips: []
 # Auto-escalation: rate-limit violations roll up into temp bans, temp bans
 # accumulate until promotion to permanent. Set to 0 to disable each stage.
 ip_rate_violation_threshold: 5  # Per-IP rate-limit hits before issuing one temp ban
+# ip_prefix_rate_violation_threshold: 5  # The same for an IPv6 /64 (the speakeasy budget charges a /64); 0 = same as above
 ip_max_temp_bans: 3             # Temp bans accumulated before promotion to permanent
 ip_temp_ban_duration: 600       # Seconds; how long a temp ban lasts

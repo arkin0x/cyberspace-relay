@@ -81,6 +81,7 @@ server:
   max_subscriptions_per_client: 10
   implicit_req_limit: 500 # Default limit applied to REQ when no limit is specified
   connection_rate_limit_per_ip: 30 # Per-IP connection attempts per minute. Rejected before WS upgrade with HTTP 429. 0 disables.
+  max_open_sockets_per_ip: 32 # Open websockets per IPv4 address or IPv6 /64, root and speakeasies together; protects max_connections. Generous for carrier NAT. 0 = default (32), negative = off.
 
 resource_limits:
   cpu_cores: 2 # Limit the number of CPU cores the application can use

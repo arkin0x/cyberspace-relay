@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -302,6 +303,16 @@ func IsIPBlocked(ip string) (bool, string) {
 			return true, "temp"
 		}
 	}
+	// A temp ban may also be keyed by an IPv6 /64 (the speakeasy connection
+	// budget counts a host by its /64, so rotating addresses inside it
+	// escalates): it covers every address in it.
+	if addr.Is6() && !addr.Is4In6() {
+		if p, err := addr.Prefix(64); err == nil {
+			if entry, ok := ipTempBans[p.String()]; ok && time.Now().Before(entry.unbanTime) {
+				return true, "temp"
+			}
+		}
+	}
 	return false, ""
 }
 
@@ -318,7 +329,13 @@ func RecordIPRateViolation(ip string, cfg cfgType.BlacklistConfig) {
 	if ip == "" {
 		return
 	}
-	if cfg.IPRateViolationThreshold <= 0 && cfg.IPMaxTempBans <= 0 {
+	threshold := cfg.IPRateViolationThreshold
+	if strings.Contains(ip, "/") && cfg.IPPrefixRateViolationThreshold > 0 {
+		// A /64 key (the speakeasy budget): its own threshold, as a /64
+		// can be a shared network.
+		threshold = cfg.IPPrefixRateViolationThreshold
+	}
+	if threshold <= 0 && cfg.IPMaxTempBans <= 0 {
 		return
 	}
 	ipMu.Lock()
@@ -326,7 +343,7 @@ func RecordIPRateViolation(ip string, cfg cfgType.BlacklistConfig) {
 	ipViolations[ip]++
 	violations := ipViolations[ip]
 
-	if cfg.IPRateViolationThreshold <= 0 || violations <= cfg.IPRateViolationThreshold {
+	if threshold <= 0 || violations <= threshold {
 		ipMu.Unlock()
 		return
 	}

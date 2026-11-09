@@ -22,4 +22,8 @@ type BlacklistConfig struct {
 	IPMaxTempBans            int      `yaml:"ip_max_temp_bans" json:"ip_max_temp_bans"`                       // temp bans accumulated before promotion to permanent
 	IPTempBanDuration        int      `yaml:"ip_temp_ban_duration" json:"ip_temp_ban_duration"`               // seconds; how long a temp ban lasts
 	IPRateViolationThreshold int      `yaml:"ip_rate_violation_threshold" json:"ip_rate_violation_threshold"` // rate-limit violations before triggering one temp ban
+	// IPPrefixRateViolationThreshold is the same for violations charged to
+	// an IPv6 /64 (the speakeasy budget), which can be a shared network;
+	// 0 means the same as ip_rate_violation_threshold.
+	IPPrefixRateViolationThreshold int `yaml:"ip_prefix_rate_violation_threshold" json:"ip_prefix_rate_violation_threshold"`
 }

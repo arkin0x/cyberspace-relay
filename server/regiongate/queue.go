@@ -327,6 +327,11 @@ func (q *workQueue) work() {
 // under, so they count against a per-address limit like any client's.
 const liveBucket = "live"
 
+// AddressBucket is the key one host's address counts by, as the work
+// queue counts it (addressBucket): an IPv4 address, or an IPv6 /64 such as
+// "2001:db8:1:2::/64". The speakeasy connection budget uses it too.
+func AddressBucket(ip string) string { return addressBucket(ip) }
+
 // addressBucket is the unit the per-address limit counts: an IPv4 address
 // (an IPv4-mapped IPv6 address counts as its IPv4 one), or an IPv6
 // address's /64, since one host is usually given a whole /64 and

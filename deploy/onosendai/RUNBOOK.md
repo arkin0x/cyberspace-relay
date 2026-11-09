@@ -152,6 +152,23 @@ node migrate.mjs publish --target wss://relay.onosendai.tech --state work-catchu
 events per second), resumable, and reports anything refused. Duplicates count
 as done.
 
+## IP bans (rate-limit escalation)
+
+Off in this profile (config.yml has no `blacklist:` IP section). If you
+turn it on (`ip_rate_violation_threshold`, `ip_max_temp_bans`,
+`ip_temp_ban_duration`, and for IPv6 /64 keys
+`ip_prefix_rate_violation_threshold`):
+
+- The speakeasy connection budget charges an IPv6 host by its /64, so a
+  ban there covers the whole /64, which can be a shared network.
+- Repeated temp bans become permanent and are written to
+  `<data dir>/ip_bans.json` (the sidecar). Temp bans live in memory.
+- To lift a temp ban: wait `ip_temp_ban_duration`, or restart.
+- To lift a permanent auto-ban: remove its entry from `ip_bans.json`
+  (`docker compose exec relay vi /data/ip_bans.json`, or edit the volume),
+  then restart the relay. NIP-86 `unblockip` does not touch the sidecar:
+  it only edits config.yml's admin `permanent_blocked_ips`.
+
 ## Rollback
 
 Nothing on the old relay is changed or deleted by any step. To roll back,
