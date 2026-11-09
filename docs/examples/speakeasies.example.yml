@@ -7,8 +7,9 @@ enabled: true
 
 # The relay's public websocket URL, without a path. A speakeasy's one URL
 # is public_url/<region>, and its NIP-42 AUTH must name exactly that.
-# Default: auth.relay_url from config.yml. auth.relay_url_match must be
-# "strict" while speakeasies are on.
+# Default: auth.relay_url from config.yml. It must be wss:// (ws:// only for
+# local tests) with no path. auth.relay_url_match must be "strict" while
+# speakeasies are on.
 # public_url: "wss://relay.onosendai.tech"
 
 # Databases: one nostrdb database per speakeasy (ruling D1), under

@@ -2,6 +2,7 @@ package speakeasy
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -53,6 +54,24 @@ type Config struct {
 	GateConfig *regiongate.Config `yaml:"-"`
 }
 
+// CheckPublicURL says why u cannot be the relay's public websocket URL, or
+// nil: wss:// (ws:// for local tests), a host, and no path, query or
+// fragment, since a speakeasy's URL is u/<path> and its AUTH must name it.
+func CheckPublicURL(u string) error {
+	p, err := url.Parse(u)
+	switch {
+	case err != nil:
+		return fmt.Errorf("not a URL")
+	case p.Scheme != "wss" && p.Scheme != "ws":
+		return fmt.Errorf("must start with wss:// (ws:// only for local tests), got %q", p.Scheme)
+	case p.Host == "" || p.User != nil:
+		return fmt.Errorf("must name a host")
+	case p.Path != "" || p.RawQuery != "" || p.Fragment != "":
+		return fmt.Errorf("must have no path, query or fragment")
+	}
+	return nil
+}
+
 // IngestThreads is how many ingest threads each speakeasy database runs
 // (ruling D1).
 const IngestThreads = 1
@@ -99,6 +118,11 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 	}
 	c.PublicURL = strings.TrimRight(strings.TrimSpace(c.PublicURL), "/")
+	if c.PublicURL != "" {
+		if err := CheckPublicURL(c.PublicURL); err != nil {
+			return nil, fmt.Errorf("%s: public_url: %w", ConfigFile, err)
+		}
+	}
 	if !c.Enabled {
 		return &c, nil
 	}

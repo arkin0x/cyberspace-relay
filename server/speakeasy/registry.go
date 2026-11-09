@@ -246,12 +246,48 @@ func (r *Registry) List() []Entry {
 func (r *Registry) ContainsAny(c regiongate.Coord) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, s := range r.byID {
-		if s.Regions.Contains(c) {
-			return true
+	found := false
+	r.holding(c, func(*Speakeasy) bool { found = true; return false })
+	return found
+}
+
+// holding calls f for every speakeasy whose region holds c, the longest id
+// first, until f returns false. With the region parser, a speakeasy's id
+// is its region string, the region every coordinate whose hex starts with
+// it, so the candidates are the 64 prefixes of c's hex: 64 map lookups,
+// each confirmed by the region (which also applies the planes setting),
+// whatever the registry's size. Without the parser (tests that register
+// regions by hand) ids say nothing, so every entry is checked. Called with
+// mu held.
+func (r *Registry) holding(c regiongate.Coord, f func(*Speakeasy) bool) {
+	if r.parse == nil {
+		var all []*Speakeasy
+		for _, s := range r.byID {
+			if s.Regions.Contains(c) {
+				all = append(all, s)
+			}
+		}
+		sort.Slice(all, func(i, j int) bool {
+			if len(all[i].ID) != len(all[j].ID) {
+				return len(all[i].ID) > len(all[j].ID)
+			}
+			return all[i].ID < all[j].ID
+		})
+		for _, s := range all {
+			if !f(s) {
+				return
+			}
+		}
+		return
+	}
+	h := c.Hex()
+	for k := len(h); k >= 1; k-- {
+		if s := r.byID[h[:k]]; s != nil && s.Regions.Contains(c) {
+			if !f(s) {
+				return
+			}
 		}
 	}
-	return false
 }
 
 // Len is how many speakeasies are registered.
@@ -331,18 +367,8 @@ func (r *Registry) save(entries []Entry) error {
 // answer to "which speakeasies can this position enter".
 func (r *Registry) Containing(c regiongate.Coord) []Entry {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	var out []Entry
-	for _, s := range r.byID {
-		if s.Regions.Contains(c) {
-			out = append(out, s.Entry)
-		}
-	}
-	r.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		if len(out[i].ID) != len(out[j].ID) {
-			return len(out[i].ID) > len(out[j].ID)
-		}
-		return out[i].ID < out[j].ID
-	})
+	r.holding(c, func(s *Speakeasy) bool { out = append(out, s.Entry); return true })
 	return out
 }
