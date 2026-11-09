@@ -114,7 +114,7 @@ func TestCreateSpeakeasy(t *testing.T) {
 	orders := r.root + OrdersPath
 
 	// Payments off: no offer, no endpoint.
-	if _, body, _ := get(t, http.MethodGet, r.root+"/abc", "Accept", browser); strings.Contains(body, "Create speakeasy") {
+	if _, body, _ := get(t, http.MethodGet, r.root+"/C/abc", "Accept", browser); strings.Contains(body, "Create speakeasy") {
 		t.Fatal("Create offered while payments are off")
 	}
 	if code, out := post(t, orders, "application/json", `{"region":"abc"}`); code != 404 || out["error"] == nil {
@@ -122,7 +122,7 @@ func TestCreateSpeakeasy(t *testing.T) {
 	}
 
 	w, co := withCheckout(t, r)
-	_, body, _ := get(t, http.MethodGet, r.root+"/abc", "Accept", browser)
+	_, body, _ := get(t, http.MethodGet, r.root+"/C/abc", "Accept", browser)
 	if !strings.Contains(body, "Create speakeasy for 1,000 sats") || !strings.Contains(body, `data-endpoint="`+OrdersPath+`"`) || !strings.Contains(body, `data-region="abc"`) {
 		t.Fatal("the page does not offer Create Speakeasy for 1,000 sats")
 	}
@@ -162,13 +162,13 @@ func TestCreateSpeakeasy(t *testing.T) {
 	got, _ := co.Get(id)
 	w.pay(got.PaymentHash)
 	co.Poll(context.Background())
-	if code, st := getJSON(t, orders+"/"+id); code != 200 || st["applied"] != true || st["url"] != r.wsRoot+"/abc" || st["outcome"] != speakeasy.OutcomeRegistered || st["qr_svg"] != nil {
+	if code, st := getJSON(t, orders+"/"+id); code != 200 || st["applied"] != true || st["url"] != r.wsRoot+"/C/abc" || st["outcome"] != speakeasy.OutcomeRegistered || st["qr_svg"] != nil {
 		t.Fatalf("after paying: %d %v", code, st)
 	}
-	if code, doc, _ := nip11(t, r.root+"/abc"); code != 200 || doc["name"] != "Speakeasy abc" {
+	if code, doc, _ := nip11(t, r.root+"/C/abc"); code != 200 || doc["name"] != "Speakeasy abc" {
 		t.Fatalf("the paid speakeasy's NIP-11: %d %v", code, doc)
 	}
-	if _, body, _ := get(t, http.MethodGet, r.root+"/abc", "Accept", browser); strings.Contains(body, "Create speakeasy") || !strings.Contains(body, r.wsRoot+"/abc") {
+	if _, body, _ := get(t, http.MethodGet, r.root+"/C/abc", "Accept", browser); strings.Contains(body, "Create speakeasy") || !strings.Contains(body, r.wsRoot+"/C/abc") {
 		t.Fatal("the page still offers Create, or lacks the address")
 	}
 	if code, out := post(t, orders, "application/json", `{"region":"abc"}`); code != 409 {
@@ -248,7 +248,7 @@ func TestRefundOwedIsVisible(t *testing.T) {
 		!strings.HasPrefix(fmt.Sprint(st["outcome"]), "refund owed") {
 		t.Fatalf("the refund as the page sees it: %v", st)
 	}
-	if _, st := getJSON(t, orders+"/"+won.ID); st["url"] != r.wsRoot+"/abc" || st["needs_owner"] != nil {
+	if _, st := getJSON(t, orders+"/"+won.ID); st["url"] != r.wsRoot+"/C/abc" || st["needs_owner"] != nil {
 		t.Fatalf("the payment that made it: %v", st)
 	}
 	res, msg := r.rt.Payments(nil)
@@ -259,7 +259,7 @@ func TestRefundOwedIsVisible(t *testing.T) {
 	}
 	// The page script shows the order and hash, and never calls a refund a
 	// success.
-	_, body, _ := get(t, http.MethodGet, r.root+"/abd", "Accept", browser)
+	_, body, _ := get(t, http.MethodGet, r.root+"/C/abd", "Accept", browser)
 	for _, want := range []string{`id="order-id"`, `id="payment-hash"`, "bought nothing", "localStorage"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the page lacks %q", want)
@@ -312,7 +312,7 @@ func TestPausedSalesAndResolve(t *testing.T) {
 	w.failLookups = true
 	w.mu.Unlock()
 	co.Poll(context.Background())
-	if _, body, _ := get(t, http.MethodGet, r.root+"/abe", "Accept", browser); strings.Contains(body, "Create speakeasy for") {
+	if _, body, _ := get(t, http.MethodGet, r.root+"/C/abe", "Accept", browser); strings.Contains(body, "Create speakeasy for") {
 		t.Fatal("Create offered while paused")
 	}
 	if code, out := post(t, orders, "application/json", `{"region":"abe"}`); code != 503 {
