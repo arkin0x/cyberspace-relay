@@ -49,6 +49,11 @@
   a { color: var(--color-link, var(--color-accent, #9ad04a)); }
   .muted { color: var(--color-text-muted, #506048); }
   .err { color: var(--color-danger, #e0606a); }
+  .create { margin-top: 1rem; }
+  .facts { margin-bottom: 1rem; color: var(--color-text-secondary, #8ea882); }
+  .qr { width: min(18rem, 100%); margin: 0.5rem 0 1rem; }
+  .qr svg { width: 100%; height: auto; border-radius: 0.4rem; }
+  #bolt11 { max-height: 4.5rem; overflow: auto; display: block; }
 </style>
 </head>
 <body>
@@ -81,6 +86,23 @@
     <dl>
       <dt>Status</dt><dd class="no">Not a speakeasy</dd>
     </dl>
+    {{with .Create}}
+    <div class="create" id="create-box" data-endpoint="{{.Endpoint}}" data-region="{{$.Region}}">
+      <ul class="facts">
+        <li>A speakeasy is a private relay for this region.</li>
+        <li>Only chains whose head is inside can read or write.</li>
+        <li>One payment, kept forever.</li>
+      </ul>
+      <button type="button" id="create">Create speakeasy for {{.Price}} sats</button>
+      <p class="err" id="create-error" role="alert"></p>
+      <div id="invoice" hidden>
+        <div class="qr" id="qr"></div>
+        <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
+        <p><a class="button" id="open-wallet" href="#">Open in wallet</a></p>
+        <p id="pay-status" role="status">Waiting for payment</p>
+      </div>
+    </div>
+    {{end}}
     {{end}}
   </section>
 
@@ -108,5 +130,64 @@
     });
   });
 </script>
+{{if .Create}}
+<script>
+  (function () {
+    var box = document.getElementById("create-box");
+    var btn = document.getElementById("create");
+    var endpoint = box.getAttribute("data-endpoint");
+    var region = box.getAttribute("data-region");
+    var errEl = document.getElementById("create-error");
+    var inv = document.getElementById("invoice");
+    var status = document.getElementById("pay-status");
+    function show(o) {
+      document.getElementById("qr").innerHTML = o.qr_svg; // drawn by this relay
+      document.getElementById("bolt11").textContent = o.invoice;
+      document.getElementById("open-wallet").href = "lightning:" + o.invoice;
+      inv.hidden = false;
+      btn.hidden = true;
+    }
+    function poll(id) {
+      fetch(endpoint + "/" + encodeURIComponent(id), { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (o) {
+          if (o.applied && o.url) {
+            status.textContent = "Paid. This region is now a speakeasy.";
+            setTimeout(function () { location.reload(); }, 1500);
+            return;
+          }
+          if (o.applied) {
+            status.textContent = "Paid, but not applied: " + o.outcome + ". Contact the relay owner.";
+            return;
+          }
+          if (o.status === "paid") status.textContent = "Paid. Opening the speakeasy.";
+          if (o.status === "expired") {
+            status.textContent = "";
+            errEl.textContent = "That invoice expired.";
+            inv.hidden = true;
+            btn.hidden = false;
+            return;
+          }
+          setTimeout(function () { poll(id); }, 3000);
+        })
+        .catch(function () { setTimeout(function () { poll(id); }, 6000); });
+    }
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      errEl.textContent = "";
+      fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ region: region }) })
+        .then(function (r) { return r.json().then(function (o) { return { ok: r.ok, o: o }; }); })
+        .then(function (x) {
+          btn.disabled = false;
+          if (!x.ok) { errEl.textContent = x.o.error || "Something went wrong. Try again."; return; }
+          show(x.o);
+          status.textContent = "Waiting for payment";
+          poll(x.o.id);
+        })
+        .catch(function () { btn.disabled = false; errEl.textContent = "Something went wrong. Try again."; });
+    });
+  })();
+</script>
+{{end}}
 </body>
 </html>

@@ -44,6 +44,8 @@ type Config struct {
 	// ONOSENDAI draws the region; [0] or [1] keeps them to one (an owner
 	// decision, pending). Default [0, 1].
 	Planes []uint `yaml:"planes"`
+	// Payments turns on paid creation (step 5). Off by default.
+	Payments PaymentsConfig `yaml:"payments"`
 	// Gate holds the chain settings every speakeasy is judged with: the keys
 	// of region.yml except enabled, regions and gate_reads
 	// (regiongate.ParseSharedConfig).
@@ -52,6 +54,36 @@ type Config struct {
 	// GateConfig is Gate, parsed.
 	GateConfig *regiongate.Config `yaml:"-"`
 }
+
+// PaymentsConfig is speakeasies.yml's payments section: the Create
+// Speakeasy button, paid through NWC (ruling D2).
+type PaymentsConfig struct {
+	// Enabled turns paid creation on. It also needs NWCFile; without a
+	// readable, valid one, payments stay off (speakeasies stay open).
+	Enabled bool `yaml:"enabled"`
+	// NWCFile is the path of a file holding the NWC connection string
+	// (nostr+walletconnect://...), made in the wallet with make_invoice
+	// and lookup_invoice only. Keep it outside the repository and outside
+	// anything the relay serves; it is never logged. Replace the file to
+	// rotate the secret: the relay reads it again when it changes.
+	NWCFile string `yaml:"nwc_file"`
+	// SpeakeasySats is the price of a speakeasy (owner ruling 2026-11-09:
+	// 1,000).
+	SpeakeasySats int64 `yaml:"speakeasy_sats"`
+	// InvoiceExpirySeconds is an invoice's life. Default 600.
+	InvoiceExpirySeconds int `yaml:"invoice_expiry_seconds"`
+	// PollSeconds is how often open invoices are looked up. Default 5.
+	PollSeconds int `yaml:"poll_seconds"`
+	// MaxPendingInvoices caps open invoices in all (default 32), and
+	// MaxPendingPerRequester one client address's (default 3, each for
+	// another region; asking again for the same region returns the same
+	// invoice).
+	MaxPendingInvoices     int `yaml:"max_pending_invoices"`
+	MaxPendingPerRequester int `yaml:"max_pending_per_requester"`
+}
+
+// Default prices (owner ruling 2026-11-09).
+const DefaultSpeakeasySats = 1000
 
 // IngestThreads is how many ingest threads each speakeasy database runs
 // (ruling D1).
@@ -87,6 +119,26 @@ func ParseConfig(data []byte) (*Config, error) {
 	if c.MaxConnectionsPerPath <= 0 {
 		c.MaxConnectionsPerPath = 200
 	}
+	p := &c.Payments
+	if p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 {
+		return nil, fmt.Errorf("%s: payments values must not be negative", ConfigFile)
+	}
+	if p.SpeakeasySats == 0 {
+		p.SpeakeasySats = DefaultSpeakeasySats
+	}
+	if p.InvoiceExpirySeconds == 0 {
+		p.InvoiceExpirySeconds = 600
+	}
+	if p.PollSeconds == 0 {
+		p.PollSeconds = 5
+	}
+	if p.MaxPendingInvoices == 0 {
+		p.MaxPendingInvoices = 32
+	}
+	if p.MaxPendingPerRequester == 0 {
+		p.MaxPendingPerRequester = 3
+	}
+	p.NWCFile = strings.TrimSpace(p.NWCFile)
 	if c.Planes == nil {
 		c.Planes = []uint{0, 1}
 	}

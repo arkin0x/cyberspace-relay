@@ -130,6 +130,42 @@ ONOSENDAI asks this to show a position's speakeasies (step 7). The contract:
 
 `url` is always the region's canonical address (the one its AUTH names), also once the speakeasy has a name; `name` carries the name.
 
+## Create Speakeasy (step 5, 2026-11-09)
+
+Off by default. On only with `payments: {enabled: true, nwc_file: <path>}` in `speakeasies.yml` and a valid connection string in that file. Any problem with payments leaves them off and the speakeasies open.
+
+| Step | What happens |
+|---|---|
+| 1 | The region page (not yet a speakeasy) shows "Create speakeasy for 1,000 sats". |
+| 2 | The button sends `POST /api/speakeasies/orders` `{"region": "<region>"}` (JSON only). |
+| 3 | The relay asks the HOSAKA wallet for an invoice through NWC `make_invoice`: 1,000,000 msat, description `relay.onosendai.tech speakeasy <region>`, 10 minute expiry. |
+| 4 | The page shows the invoice as a QR code (drawn by the relay, no third-party script), the text with Copy, and "Open in wallet" (`lightning:`). |
+| 5 | Every 5 s the relay asks the wallet `lookup_invoice` for each open invoice; the page polls `GET /api/speakeasies/orders/<id>`. |
+| 6 | Once paid: the wallet's description, amount, payment hash and invoice must match the order, then the registry gets the entry (`note`: the sats and payment hash) and the path is a live speakeasy. The page reloads into it. |
+
+| Rule | How |
+|---|---|
+| A payment is bound to its region | The order (kept by the relay, keyed by a random id) holds the region; nothing the visitor sends at payment time names one. The invoice description names the region too, and a paid invoice the wallet describes differently is never applied: it is held for the relay owner and logged at error level. |
+| One open invoice per region and requester | Asking again returns the same invoice (also many requests at once: one `make_invoice` at a time). The requester is a hash of the client address; no address is stored. An invoice with under a minute left is not handed out again. |
+| Caps | 32 open invoices in all, 3 per requester (each for another region); past them, 429 "try again in a few minutes". |
+| Expiry | 10 minutes; an unpaid invoice is still looked up for 2 minutes after, for a payment that settled at the last moment. |
+| Two payers, one region | The first makes it a speakeasy; the second's outcome is "already a speakeasy" (they have what they paid for). |
+| Restarts | Open orders live in `<data dir>/speakeasies/orders.json` (closed ones are dropped after a day), so a payment made while the relay is down is applied when it is back. Every paid order is appended to `<data dir>/speakeasies/payments.jsonl`, forever. A registry write that fails is retried at the next poll. |
+
+| Endpoint | Answers |
+|---|---|
+| `POST /api/speakeasies/orders` | `200` `{"id","kind","region","amount_sats","invoice","qr_svg","expires_at","status":"pending","applied":false}`; `400` not a region; `409` already a speakeasy; `415` not JSON; `429` caps; `502` the wallet made no invoice; `404` payments off |
+| `GET /api/speakeasies/orders/<id>` | the same, with `status` `pending`, `paid` or `expired`, `applied`, `outcome`, and `url` once it is a speakeasy |
+
+**NWC (ruling D2).** `server/nwc` is a NIP-47 client with two methods only, `make_invoice` and `lookup_invoice`: it can never pay. It reads the wallet's info event (kind 13194) and uses `nip44_v2` when listed, otherwise `nip04`, as NIP-47 says. Requests carry an `expiration` tag; answers must be signed by the wallet key and name the request. The connection string never reaches a log or an error (logs name the wallet by an 8-character pubkey prefix and its relay). The file is read again when it changes, so rotating is replacing it. The relay warns if the file is readable by others than its owner.
+
+### Before a real-sats test (the owner)
+
+1. In Alby Hub, make an app connection for the relay with **make_invoice and lookup_invoice only** (no pay, no balance), receiving to the HOSAKA wallet.
+2. Put its `nostr+walletconnect://...` string in a file on the droplet outside the repository and outside the data volume's served files, `chmod 600`, owned by the relay's user, and mount it read-only into the container (for example `/run/secrets/speakeasy-nwc`).
+3. Add `payments: {enabled: true, nwc_file: /run/secrets/speakeasy-nwc}` to `speakeasies.yml`, restart, and look for `Speakeasy payments on` in the log.
+4. Pay one speakeasy for real, then check the registry entry, `payments.jsonl`, and that the path answers as a speakeasy.
+
 ## Later: a region picker (owner, 2026-11-04)
 
 An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.

@@ -22,6 +22,7 @@ import (
 	relay "github.com/0ceanslim/grain/server/api"
 	"github.com/0ceanslim/grain/server/db/nostrdb"
 	"github.com/0ceanslim/grain/server/handlers"
+	"github.com/0ceanslim/grain/server/nwc"
 	"github.com/0ceanslim/grain/server/regiongate"
 	"github.com/0ceanslim/grain/server/speakeasy"
 	nostr "github.com/0ceanslim/grain/server/types"
@@ -117,6 +118,10 @@ type speakeasyRuntime struct {
 	// ownDeletions: always_allow_kinds lists 5, so an author no longer
 	// inside may still delete their own events stored in a speakeasy.
 	ownDeletions bool
+
+	// checkout takes payment for new speakeasies (step 5); nil while
+	// payments are off.
+	checkout *speakeasy.Checkout
 }
 
 // speakeasyState is what the router reads: nil without speakeasies.yml, a
@@ -189,6 +194,15 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 		rt.pool.Run(poolCtx)
 		close(done)
 	}()
+	checkoutDone := make(chan struct{})
+	if rt.checkout = startCheckout(sc, reg, dir, public); rt.checkout != nil {
+		go func() {
+			rt.checkout.Run(poolCtx)
+			close(checkoutDone)
+		}()
+	} else {
+		close(checkoutDone)
+	}
 	speakeasyState.Store(rt)
 	relay.SetSpeakeasyAdmin(rt)
 	log.RegionGate().Info("Speakeasies open",
@@ -196,13 +210,57 @@ func startSpeakeasies(ctx context.Context, cfg *cfgType.ServerConfig) (stop func
 		"region_path_parser", speakeasyRegionPath != nil, "planes", sc.Planes,
 		"max_open_databases", sc.MaxOpenDatabases, "idle_close_seconds", sc.IdleCloseSeconds,
 		"map_size_mb", sc.MapSizeMB, "ingest_threads", speakeasy.IngestThreads,
-		"max_connections_per_path", sc.MaxConnectionsPerPath,
+		"max_connections_per_path", sc.MaxConnectionsPerPath, "payments", rt.checkout != nil,
 		"chain_rules", regiongate.ChainRulesRevision, "mode", sc.GateConfig.Mode, "chain_relays", len(sc.GateConfig.ChainRelays))
 	return func() {
 		relay.SetSpeakeasyAdmin(nil)
 		cancel()
 		<-done
+		<-checkoutDone
 	}
+}
+
+// startCheckout makes the checkout when speakeasies.yml turns payments on
+// and names a valid NWC connection file, or returns nil (payments off; the
+// speakeasies stay open). The connection string is never logged.
+func startCheckout(sc *speakeasy.Config, reg *speakeasy.Registry, dir, public string) *speakeasy.Checkout {
+	p := sc.Payments
+	if !p.Enabled {
+		return nil
+	}
+	if p.NWCFile == "" {
+		log.RegionGate().Error("Speakeasy payments off: payments.nwc_file is not set")
+		return nil
+	}
+	wallet, err := nwc.OpenFile(p.NWCFile)
+	if err != nil {
+		log.RegionGate().Error("Speakeasy payments off: the NWC connection file is unusable", "error", err)
+		return nil
+	}
+	if wallet.Insecure() {
+		log.RegionGate().Warn("The NWC connection file can be read by others than its owner; chmod 600 it", "path", p.NWCFile)
+	}
+	host := public
+	if u, err := url.Parse(public); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	co, err := speakeasy.NewCheckout(speakeasy.CheckoutConfig{
+		Wallet: wallet, Registry: reg,
+		OrdersPath: filepath.Join(dir, "orders.json"), LedgerPath: filepath.Join(dir, "payments.jsonl"),
+		Write: config.AtomicWriteFile, Host: host, SpeakeasySats: p.SpeakeasySats,
+		Expiry:     time.Duration(p.InvoiceExpirySeconds) * time.Second,
+		Poll:       time.Duration(p.PollSeconds) * time.Second,
+		MaxPending: p.MaxPendingInvoices, MaxPerRequester: p.MaxPendingPerRequester,
+		Log:   func(msg string, args ...any) { log.RegionGate().Info(msg, args...) },
+		Alert: func(msg string, args ...any) { log.RegionGate().Error(msg, args...) },
+	})
+	if err != nil {
+		log.RegionGate().Error("Speakeasy payments off: the orders file is unreadable", "error", err)
+		return nil
+	}
+	log.RegionGate().Info("Speakeasy payments on", "wallet", wallet.Describe(), "speakeasy_sats", p.SpeakeasySats,
+		"invoice_expiry_seconds", p.InvoiceExpirySeconds)
+	return co
 }
 
 // speakeasyRoutes sends websocket, NIP-11 and NIP-86 requests for any path
@@ -215,6 +273,10 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 		// (an empty list when they are not), so ONOSENDAI can always ask.
 		if r.URL.EscapedPath() == DiscoveryPath {
 			serveDiscovery(w, r, rt)
+			return
+		}
+		if p := r.URL.EscapedPath(); p == OrdersPath || strings.HasPrefix(p, OrdersPath+"/") {
+			serveOrders(w, r, rt)
 			return
 		}
 		// Matched on the path as sent, never through http.ServeMux, which

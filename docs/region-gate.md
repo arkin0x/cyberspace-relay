@@ -137,7 +137,7 @@ database is never open twice in the process, and a server instance that stops
 connections it leaves behind ("relay restarting, try again").
 
 **The registry** is `<data dir>/speakeasies/registry.json`, written atomically
-by the relay. Until step 5 (paid creation) the relay owner writes it through
+by the relay: by paid creation (step 5, `docs/speakeasies.md`) and by the relay owner through
 NIP-86 at `/` (NIP-98 auth, signer = relay owner):
 
 | Method | Params | Does |

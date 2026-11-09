@@ -36,6 +36,27 @@ type Page struct {
 	// any) and Since describe it when it is.
 	Speakeasy        bool
 	URL, Name, Since string
+	// Create, when set, offers Create Speakeasy (step 5): payments are on
+	// and the region is not one yet.
+	Create *PageCreate
+}
+
+// PageCreate is the Create Speakeasy offer: its price and the endpoint the
+// button asks for an invoice.
+type PageCreate struct {
+	Sats     int64
+	Endpoint string
+}
+
+// Price is the price with a thousands separator.
+func (c PageCreate) Price() string { return groupThousands(c.Sats) }
+
+func groupThousands(n int64) string {
+	s := fmt.Sprint(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // PageAxis is one axis of the box: the first and last gibson, in decimal.
