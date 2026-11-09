@@ -196,29 +196,82 @@ func (r *Registry) insert(s *Speakeasy) {
 	}
 }
 
+// RegionPrefix starts a speakeasy's canonical path: /C/<region string>,
+// exactly as www.onosendai.tech/C/<region string> (owner ruling
+// 2026-11-09). Names stay at /<name>.
+const RegionPrefix = "/C/"
+
+// PathFor is the canonical path of a speakeasy path segment: /C/<id> for a
+// region id (lowercase hex), /<name> for a name. A name never reads as
+// hex (CheckName), so the two cannot be confused.
+func PathFor(seg string) string {
+	if validID(seg) {
+		return RegionPrefix + seg
+	}
+	return "/" + seg
+}
+
 // Lookup returns the speakeasy a request path leads to and its canonical
 // path, or nil. escapedPath is the path as sent
-// (http.Request.URL.EscapedPath()). With a RegionPath, every spelling
-// ONOSENDAI reads as a region (case, 0x, trailing slashes, escapes) leads to
-// that region's speakeasy, and canonical is "/" + its id; the caller sends
-// other spellings there. A path that is not a region is looked up as it is
-// spelled (names, later).
+// (http.Request.URL.EscapedPath()).
+//
+//   - /C/<region string>: the region's speakeasy. The string after /C/ is
+//     read by the RegionPath (ONOSENDAI's rules: case, 0x, trailing
+//     slashes, escapes); canonical is /C/ + its id.
+//   - A bare /<region string>, or /c/ in lower case: the same speakeasy,
+//     with canonical /C/<id>, which differs from the path: the caller sends
+//     browsers there and refuses websockets (an AUTH signs the exact URL).
+//   - /<name>: the named speakeasy, matched exactly as spelled; canonical
+//     is the path itself.
 func (r *Registry) Lookup(escapedPath string) (sp *Speakeasy, canonical string) {
 	if len(escapedPath) < 2 || escapedPath[0] != '/' || len(escapedPath) > 4*maxSegment {
 		return nil, ""
 	}
 	key := escapedPath[1:]
-	if r.parse != nil {
+	region := false
+	if rest, ok := cutRegionPrefix(escapedPath); ok {
+		if r.parse == nil {
+			key, region = rest, true
+		} else if c, _, ok := r.parse("/" + rest); ok {
+			key, region = c, true
+		} else {
+			return nil, ""
+		}
+	} else if r.parse != nil {
 		if c, _, ok := r.parse(escapedPath); ok {
-			key = c
+			key, region = c, true
 		}
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if sp = r.byPath[key]; sp == nil {
+	if sp = r.byPath[key]; sp == nil || region && sp.ID != key {
 		return nil, ""
 	}
-	return sp, "/" + key
+	return sp, PathFor(key)
+}
+
+// cutRegionPrefix returns what follows /C/ (or /c/, a spelling sent to
+// /C/), and whether the path starts with it.
+func cutRegionPrefix(p string) (string, bool) {
+	if len(p) > 3 && p[0] == '/' && (p[1] == 'C' || p[1] == 'c') && p[2] == '/' {
+		return p[3:], true
+	}
+	return "", false
+}
+
+// IsRegionPath reports whether a path names a region in any spelling the
+// relay serves or redirects: /C/<string>, /c/<string> or a bare /<string>,
+// where the string is one the RegionPath reads as a region.
+func IsRegionPath(escapedPath string, parse RegionPath) bool {
+	if parse == nil {
+		return false
+	}
+	if rest, ok := cutRegionPrefix(escapedPath); ok {
+		_, _, ok := parse("/" + rest)
+		return ok
+	}
+	_, _, ok := parse(escapedPath)
+	return ok
 }
 
 // Get returns the speakeasy with this id, or nil.

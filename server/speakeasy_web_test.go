@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/0ceanslim/grain/server/speakeasy"
 )
 
 const webYML = "enabled: true\nmax_open_databases: 1\nmap_size_mb: 32\nplanes: [0, 1]\n"
@@ -38,7 +40,7 @@ func TestRegionDashboard(t *testing.T) {
 	r := startRelay(t, speakeasyRegionPath, webYML)
 	id := "0fe6b3deeb67e952f852e8c1df15"
 
-	code, body, h := get(t, http.MethodGet, r.root+"/"+id, "Accept", browser)
+	code, body, h := get(t, http.MethodGet, r.root+"/C/"+id, "Accept", browser)
 	if code != 200 || !strings.HasPrefix(h.Get("Content-Type"), "text/html") || !strings.Contains(h.Get("Vary"), "Accept") {
 		t.Fatalf("region page: %d %s, Vary %q", code, h.Get("Content-Type"), h.Get("Vary"))
 	}
@@ -48,27 +50,29 @@ func TestRegionDashboard(t *testing.T) {
 			t.Errorf("unregistered region page lacks %q", want)
 		}
 	}
-	if strings.Contains(body, "How to join") || strings.Contains(body, r.wsRoot+"/"+id) {
+	if strings.Contains(body, "How to join") || strings.Contains(body, r.wsRoot+"/C/"+id) {
 		t.Error("an unregistered region page shows a relay address")
 	}
 
 	r.register(t, id)
-	_, body, _ = get(t, http.MethodGet, r.root+"/"+id, "Accept", browser)
-	for _, want := range []string{"Open", r.wsRoot + "/" + id, "How to join", "AUTH, NIP-42", "A Cyberspace speakeasy"} {
+	_, body, _ = get(t, http.MethodGet, r.root+"/C/"+id, "Accept", browser)
+	for _, want := range []string{"Open", r.wsRoot + "/C/" + id, "How to join", "AUTH, NIP-42", "A Cyberspace speakeasy"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("speakeasy page lacks %q", want)
 		}
 	}
 
 	// Another spelling of the region: a redirect to its one page.
-	for _, spelling := range []string{"0X" + strings.ToUpper(id), id + "/", pct(id, false)} {
+	// The bare /<hex>, /c/, and other spellings after /C/: a redirect to
+	// its one page, /C/<hex> (owner ruling 2026-11-09).
+	for _, spelling := range []string{id, "c/" + id, "C/0X" + strings.ToUpper(id), "C/" + id + "/", "C/" + pct(id, false), "0X" + strings.ToUpper(id), pct(id, false)} {
 		code, _, h := get(t, http.MethodGet, r.root+"/"+spelling, "Accept", browser)
-		if code != http.StatusMovedPermanently || h.Get("Location") != "/"+id {
-			t.Errorf("/%s: %d to %q, want 301 to /%s", spelling, code, h.Get("Location"), id)
+		if code != http.StatusMovedPermanently || h.Get("Location") != "/C/"+id || !strings.Contains(h.Get("Vary"), "Accept") {
+			t.Errorf("/%s: %d to %q, want 301 to /C/%s", spelling, code, h.Get("Location"), id)
 		}
 	}
 	// HEAD answers the headers only.
-	if code, body, _ := get(t, http.MethodHead, r.root+"/"+id, "Accept", browser); code != 200 || body != "" {
+	if code, body, _ := get(t, http.MethodHead, r.root+"/C/"+id, "Accept", browser); code != 200 || body != "" {
 		t.Errorf("HEAD: %d with %d bytes", code, len(body))
 	}
 	// Not a region, not a browser, or not a GET: not this page, but grain's
@@ -77,10 +81,10 @@ func TestRegionDashboard(t *testing.T) {
 	passed := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) })
 	for _, c := range []struct{ method, path, accept string }{
 		{http.MethodGet, "/fiatjafs-speakeasy", browser},
-		{http.MethodGet, "/" + id + "/x", browser},
+		{http.MethodGet, "/C/" + id + "/x", browser},
 		{http.MethodGet, "/", browser},
-		{http.MethodGet, "/" + id, "*/*"},
-		{http.MethodPost, "/" + id, browser},
+		{http.MethodGet, "/C/" + id, "*/*"},
+		{http.MethodPost, "/C/" + id, browser},
 	} {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(c.method, c.path, nil)
@@ -91,14 +95,14 @@ func TestRegionDashboard(t *testing.T) {
 		}
 	}
 	// The websocket and NIP-11 at the path are still the speakeasy's.
-	if code, doc, _ := nip11(t, r.root+"/"+id); code != 200 || doc["name"] != "Speakeasy "+id {
+	if code, doc, _ := nip11(t, r.root+"/C/"+id); code != 200 || doc["name"] != "Speakeasy "+id {
 		t.Errorf("NIP-11 at a speakeasy path: %d %v", code, doc)
 	}
 	// Speakeasies closed (an invalid file): no page.
 	rt := speakeasyState.Load()
 	speakeasyState.Store(&speakeasyRuntime{})
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/"+id, nil)
+	req := httptest.NewRequest(http.MethodGet, "/C/"+id, nil)
 	req.Header.Set("Accept", browser)
 	speakeasyRoutes(passed).ServeHTTP(w, req)
 	if w.Code != 299 {
@@ -149,8 +153,8 @@ func TestDiscoveryEndpoint(t *testing.T) {
 	var got []string
 	for _, s := range d.Speakeasies {
 		got = append(got, s.Region)
-		if s.Name != nil || s.URL != r.wsRoot+"/"+s.Region || s.CreatedAt == 0 {
-			t.Errorf("item %+v: want name null, url %s, a created_at", s, r.wsRoot+"/"+s.Region)
+		if s.Name != nil || s.URL != r.wsRoot+"/C/"+s.Region || s.CreatedAt == 0 {
+			t.Errorf("item %+v: want name null, url %s, a created_at", s, r.wsRoot+"/C/"+s.Region)
 		}
 	}
 	if code != 200 || strings.Join(got, ",") != "abc,ab,a" {
@@ -210,5 +214,42 @@ func TestDiscoveryWithoutSpeakeasies(t *testing.T) {
 		if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"speakeasies":[]}` {
 			t.Errorf("runtime %v: %d %s", rt, w.Code, w.Body.String())
 		}
+	}
+}
+
+// TestRegionPathsAreUnderC (owner ruling 2026-11-09): a region's address is
+// /C/<hex>, as www.onosendai.tech/C/<hex>. A websocket at the bare /<hex>
+// or at /c/<hex> is refused, naming the /C/ address (no redirect: AUTH
+// signs the exact URL); /C/<hex> itself is served; "c" can never be a name.
+func TestRegionPathsAreUnderC(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	id := "abc"
+	r.register(t, id)
+	want := r.wsRoot + "/C/" + id
+	for _, p := range []string{"/" + id, "/c/" + id, "/C/" + strings.ToUpper(id)} {
+		req, _ := http.NewRequest(http.MethodGet, r.root+p, nil)
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Connection", "Upgrade")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), want) {
+			t.Errorf("websocket at %s: %d %q, want 400 naming %s", p, resp.StatusCode, body, want)
+		}
+	}
+	c := mustDial(t, want)
+	if ok, msg := c.auth(newKey(t), want, c.challenge); !ok && strings.Contains(msg, "relay URL") {
+		t.Fatalf("AUTH naming the /C/ address: %q", msg)
+	}
+	for _, name := range []string{"c", "C", "c-", "C/abc"} {
+		if speakeasy.CheckName(name, speakeasyRegionPath) == nil {
+			t.Errorf("%q accepted as a name", name)
+		}
+	}
+	if speakeasyDialGuard(want) == nil || speakeasyDialGuard(r.wsRoot+"/c/"+id) == nil {
+		t.Error("the built-in client may dial a /C/ address")
 	}
 }

@@ -99,11 +99,19 @@ func (rt *speakeasyRuntime) servePage(w http.ResponseWriter, r *http.Request) bo
 			return false
 		}
 	default:
-		parsed, err := regiongate.ParseRegionPath(path)
+		// Not registered: any region string, at /C/<string> (canonical) or
+		// bare /<string> and /c/<string> (sent to /C/).
+		s := path
+		if rest, ok := strings.CutPrefix(path, "/C/"); ok {
+			s = "/" + rest
+		} else if rest, ok := strings.CutPrefix(path, "/c/"); ok {
+			s = "/" + rest
+		}
+		parsed, err := regiongate.ParseRegionPath(s)
 		if err != nil {
 			return false // not a region: grain's usual handlers
 		}
-		region, canonical = parsed, "/"+parsed.Hex
+		region, canonical = parsed, speakeasy.RegionPrefix+parsed.Hex
 	}
 	// The same URL answers a websocket, NIP-11 or this page by its
 	// headers: a cache must keep them apart.

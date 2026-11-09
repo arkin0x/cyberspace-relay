@@ -34,7 +34,7 @@ Code is in `server/regiongate/`, documented in `docs/region-gate.md`.
 
 | Vision piece | Reuses | New work |
 |---|---|---|
-| A path per region (`/<hex>`) or per name (`/<name>`) | The websocket server and NIP-11 | Path routing for websocket, NIP-11 and the dashboard. Each speakeasy needs its own NIP-11 and its own AUTH `relay` URL (grain compares the AUTH relay tag to `relay_url`, so a path's AUTH must match that path's URL). |
+| A path per region (`/C/<hex>`, owner ruling 2026-11-09) or per name (`/<name>`) | The websocket server and NIP-11 | Path routing for websocket, NIP-11 and the dashboard. Each speakeasy needs its own NIP-11 and its own AUTH `relay` URL (grain compares the AUTH relay tag to `relay_url`, so a path's AUTH must match that path's URL). |
 | AUTH plus valid chain plus head inside, for reads and writes | Speakeasy mode in full | Looked up per path instead of per instance |
 | Queued validation, DDoS-safe | Rate limits, the concurrency cap, shared lookups | A bounded work queue with fair ordering and a polite "busy, try again" when full; per-IP and per-pubkey caps on queued work |
 | Incremental chain cache | Lookup and verifier | The owner's cache (section 4) replaces the whole-verdict TTL cache. The cache is shared by every speakeasy, since a chain's head is the same whatever region asks. |
@@ -99,11 +99,22 @@ Each PR gets an independent adversarial review. PR 5 and anything that touches m
 - **D4 (2026-11-04):** one payment, kept forever. Revisit only if storage becomes a problem.
 - **D5 (2026-11-04):** only the relay owner moderates (NIP-86 and admin, for abuse). Access is otherwise purely by protocol rules. Payer moderation stays a possible later feature.
 - **D6 (2026-11-04):** any kind except kinds the relay blocks outright. A speakeasy is a private room, and access is already gated by location.
-- **D7 (2026-11-04):** the region in the URL is exactly ONOSENDAI's `/C/` hex-prefix form, so relay.onosendai.tech/<hex> is the same cube as www.onosendai.tech/C/<hex>. One shared test-vector file keeps the two in step.
+- **D7 (2026-11-04):** the region in the URL is exactly ONOSENDAI's `/C/` hex-prefix form, so the relay's path names the same cube as www.onosendai.tech/C/<hex> (since the owner's ruling of 2026-11-09 the relay's path is /C/<hex> too). One shared test-vector file keeps the two in step.
+
+## Ruling 2026-11-09: `/C/` for speakeasies on the relay
+
+The owner: "yes /C/ for speakeasies on the relay". A region's speakeasy is `wss://relay.onosendai.tech/C/<hex>`, exactly mirroring `www.onosendai.tech/C/<hex>`; NIP-11, the AUTH relay URL per path, the dashboard page, the discovery endpoint's `url` and the dial guard all use it. Names stay at `/<name>` (`c` is reserved, and a name is at least 3 characters with no `/`).
+
+| Request | Answer |
+|---|---|
+| `/C/<hex>` (canonical) | the speakeasy: websocket, NIP-11, and the page for a browser |
+| bare `/<hex>`, `/c/<hex>`, or another spelling after `/C/` (case, `0x`, trailing `/`, escapes) | browser or NIP-11: 301 to `/C/<hex>` with `Vary: Accept`; websocket: 400 naming the `/C/` address (no redirect: AUTH signs the exact URL) |
+
+The lowercase `/c/` is treated strictly, as any other non-canonical spelling: never served, only redirected (browsers) or refused (websockets), so no AUTH is ever signed for a second URL of one speakeasy. The string after `/C/` is read by the same `ParseRegionPath` rules and shared vectors as before.
 
 ## The region dashboard and discovery (step 4, 2026-11-09)
 
-While speakeasies are open, a browser at `relay.onosendai.tech/<region>` (a GET or HEAD whose `Accept` has `text/html`; a websocket upgrade or NIP-11 request is still the speakeasy) gets a read-only page:
+While speakeasies are open, a browser at `relay.onosendai.tech/C/<region>` (a GET or HEAD whose `Accept` has `text/html`; a websocket upgrade or NIP-11 request is still the speakeasy) gets a read-only page:
 
 | Shows | From |
 |---|---|
@@ -120,7 +131,7 @@ ONOSENDAI asks this to show a position's speakeasies (step 7). The contract:
 
 | Case | Answer |
 |---|---|
-| A coordinate (64 hex, either case) | `200` `{"speakeasies":[{"region":"<normalized hex>","name":<string or null>,"url":"wss://relay.onosendai.tech/<region>","created_at":<unix>}]}` |
+| A coordinate (64 hex, either case) | `200` `{"speakeasies":[{"region":"<normalized hex>","name":<string or null>,"url":"wss://relay.onosendai.tech/C/<region>","created_at":<unix>}]}` |
 | Order | every registered speakeasy whose region holds the coordinate, the longest region string (the smallest region) first. Found by the coordinate's 64 hex prefixes (64 map lookups, about 3 µs with 100,000 registered), never by scanning the registry |
 | Planes | a prefix speakeasy holds the coordinate in either plane (the `planes` setting, default both); a 64-character speakeasy only in its own |
 | Nothing holds it, none registered, or speakeasies off | `200` `{"speakeasies":[]}` |
@@ -132,7 +143,7 @@ ONOSENDAI asks this to show a position's speakeasies (step 7). The contract:
 
 ## Later: a region picker (owner, 2026-11-04)
 
-An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.
+An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/C/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.
 
 ## Note 2026-11-05: the chain cache is also the DoS fix
 

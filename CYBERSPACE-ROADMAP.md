@@ -12,7 +12,7 @@ This fork of grain runs **relay.onosendai.tech**, the canonical relay for ONOSEN
 
 ## Next: speakeasies (owner's vision, 2026-11-04)
 
-Any region gets a page at `relay.onosendai.tech/<region>`. Paying 1,000 sats (an invoice from hosaka@getalby.com) makes it a **speakeasy**: that path becomes a relay that reads and writes only for authenticated pubkeys whose valid chain has its head inside the region. 7,000 sats reserves a name (`relay.onosendai.tech/<name>`). Chain checks are queued and incrementally cached, and speakeasy events are kept apart from the main pool.
+Any region gets a page at `relay.onosendai.tech/C/<region>` (as ONOSENDAI's `/C/`, owner ruling 2026-11-09). Paying 1,000 sats (an invoice from hosaka@getalby.com) makes it a **speakeasy**: that path becomes a relay that reads and writes only for authenticated pubkeys whose valid chain has its head inside the region. 7,000 sats reserves a name (`relay.onosendai.tech/<name>`). Chain checks are queued and incrementally cached, and speakeasy events are kept apart from the main pool.
 
 Design, open decisions (D1 to D7) and the PR plan: [docs/speakeasies.md](docs/speakeasies.md). Built on the existing region gate: [docs/region-gate.md](docs/region-gate.md).
 
