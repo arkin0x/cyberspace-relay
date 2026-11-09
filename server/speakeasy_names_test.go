@@ -30,12 +30,12 @@ func TestNamedSpeakeasy(t *testing.T) {
 		t.Fatal(msg)
 	}
 	r.storeRoot(t, kIn.spawn(t), kOut.spawn(t))
-	urlHex, urlName := r.wsRoot+"/"+id, r.wsRoot+"/cafe-du-monde"
+	urlHex, urlName := r.wsRoot+"/C/"+id, r.wsRoot+"/cafe-du-monde"
 
 	if code, doc, _ := nip11(t, r.root+"/cafe-du-monde"); code != 200 || doc["name"] != "cafe-du-monde" {
 		t.Fatalf("NIP-11 at the name: %d %v", code, doc)
 	}
-	if code, doc, _ := nip11(t, r.root+"/"+id); code != 200 || doc["name"] != "Speakeasy "+id {
+	if code, doc, _ := nip11(t, r.root+"/C/"+id); code != 200 || doc["name"] != "Speakeasy "+id {
 		t.Fatalf("NIP-11 at the hex path: %d %v", code, doc)
 	}
 	for _, other := range []string{"/Cafe-du-monde", "/cafe-du-monde/", "/cafe-du"} {
@@ -90,7 +90,7 @@ func TestNamedSpeakeasy(t *testing.T) {
 		t.Fatalf("discovery: %+v", d.Speakeasies)
 	}
 	// The page at either path shows both addresses.
-	for _, p := range []string{"/cafe-du-monde", "/" + id} {
+	for _, p := range []string{"/cafe-du-monde", "/C/" + id} {
 		code, body, _ := get(t, http.MethodGet, r.root+p, "Accept", browser)
 		if code != 200 || !strings.Contains(body, urlName) || !strings.Contains(body, urlHex) || !strings.Contains(body, "<title>cafe-du-monde</title>") {
 			t.Errorf("page at %s: %d", p, code)
@@ -110,7 +110,7 @@ func TestCreateNamedSpeakeasy(t *testing.T) {
 	orders := r.root + OrdersPath
 	w, co := withCheckout(t, r)
 
-	_, body, _ := get(t, http.MethodGet, r.root+"/abc", "Accept", browser)
+	_, body, _ := get(t, http.MethodGet, r.root+"/C/abc", "Accept", browser)
 	for _, want := range []string{`id="create-name"`, `data-named-price="8,000"`, "7,000 sats more", "Create speakeasy for 1,000 sats"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the Create section lacks %q", want)
@@ -135,7 +135,7 @@ func TestCreateNamedSpeakeasy(t *testing.T) {
 	if code, doc, _ := nip11(t, r.root+"/cafe-du-monde"); code != 200 || doc["name"] != "cafe-du-monde" {
 		t.Fatalf("NIP-11 at the paid name: %d %v", code, doc)
 	}
-	_, body, _ = get(t, http.MethodGet, r.root+"/abc", "Accept", browser)
+	_, body, _ = get(t, http.MethodGet, r.root+"/C/abc", "Accept", browser)
 	if strings.Contains(body, "create-name") || !strings.Contains(body, r.wsRoot+"/cafe-du-monde") {
 		t.Fatal("the named speakeasy's page offers Create, or lacks its name address")
 	}

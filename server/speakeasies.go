@@ -334,11 +334,20 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 			w.Header().Add("Vary", "Accept")
 			http.Redirect(w, r, canonical, http.StatusMovedPermanently)
 		case ws:
-			rt.serveWS(w, r, sp, canonical[1:])
+			rt.serveWS(w, r, sp, segment(canonical))
 		default:
-			rt.serveInfo(w, r, sp, canonical[1:])
+			rt.serveInfo(w, r, sp, segment(canonical))
 		}
 	})
+}
+
+// segment is the path segment a canonical path names: the id of
+// /C/<id>, the name of /<name>.
+func segment(canonical string) string {
+	if id, ok := strings.CutPrefix(canonical, speakeasy.RegionPrefix); ok {
+		return id
+	}
+	return strings.TrimPrefix(canonical, "/")
 }
 
 // url is a speakeasy's one URL: the public URL and its canonical path. Its
