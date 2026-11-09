@@ -644,7 +644,15 @@ stop of `B` (§5.5 step 2), and the hashes of its sampled blocks (§5.3).
   filled from block headers (`line_fallback_urls`, by default mempool.space
   and blockstream.info): each is fetched by the hash the anchor above names
   as `P`, must hash to it, and the lowest must name the line's tip, so the
-  source is trusted for nothing.
+  source is trusted for nothing. A block above the gap whose headers do not lead
+  down to the tip (a rival's) is asked about again only after 5 minutes,
+  not at every poll.
+- **Blocks at the tip that do not link** (a rival, or a block whose parent
+  is not read yet) make the line read the 1,000 heights below the tip
+  again: when what sits at the tip changed, when the store holds anchors
+  signed after the newest one read (one indexed question), and at least
+  every 10 polls, since anchors signed earlier but stored later are found
+  only that way.
 - **The station** is the sorted lookup of §4.4: the stops ordered by
   coordinate (plane bit aside, ties by height), a segment tree of the least
   height over any run, and a binary search on the shared prefix; the heights
