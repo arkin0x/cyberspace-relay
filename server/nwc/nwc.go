@@ -307,7 +307,11 @@ func (s *Session) call(ctx context.Context, method string, params map[string]any
 			}
 			return c.decodeAnswer(enc, ev, method, result)
 		case len(msg) >= 3 && label == "CLOSED":
-			var why string
+			var id, why string
+			json.Unmarshal(msg[1], &id)
+			if id != sub {
+				continue // another subscription's (an earlier request on this connection)
+			}
 			json.Unmarshal(msg[2], &why)
 			return fmt.Errorf("nwc: %s closed the subscription: %s", relay, why)
 		}
@@ -387,6 +391,11 @@ func (c *Client) encryption(ctx context.Context, conn *wsConn) (string, error) {
 			return "", fmt.Errorf("reading the wallet's info event: %w", err)
 		}
 		if label == "EOSE" || label == "CLOSED" {
+			var id string
+			json.Unmarshal(msg[1], &id)
+			if id != "nwc-info" {
+				continue
+			}
 			break
 		}
 		if len(msg) < 3 || label != "EVENT" {

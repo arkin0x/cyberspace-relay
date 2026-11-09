@@ -94,6 +94,21 @@ type conn struct {
 
 func dial(t *testing.T, url string) (*conn, error) {
 	t.Helper()
+	// A socket closed by an earlier subtest is released by the server a
+	// moment later: a "max connections" notice right after is that lag,
+	// so wait it out (the cap itself is tested with raw websockets).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := dialOnce(t, url)
+		if err == nil || !strings.Contains(err.Error(), "max connections") || time.Now().After(deadline) {
+			return c, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func dialOnce(t *testing.T, url string) (*conn, error) {
+	t.Helper()
 	ws, err := websocket.Dial(url, "", "http://localhost/")
 	if err != nil {
 		return nil, err
@@ -116,6 +131,7 @@ func dial(t *testing.T, url string) (*conn, error) {
 	if len(first) == 2 && first[0] == "AUTH" {
 		c.challenge, _ = first[1].(string)
 	} else {
+		ws.Close()
 		return nil, fmt.Errorf("first message is not an AUTH challenge: %v", first)
 	}
 	t.Cleanup(func() { ws.Close() })

@@ -139,11 +139,20 @@ type CheckoutConfig struct {
 	Expiry   time.Duration // an invoice's life, as asked of the wallet
 	Poll     time.Duration // how often open invoices are looked up
 	// Caps on payable open invoices: in all, per requester (/64), per
-	// network (/48 or /24), per region (across requesters).
+	// network (/48 or /24), per region (distinct networks; and at most one
+	// per network per region).
 	MaxPending, MaxPerRequester, MaxPerNetwork, MaxPerRegion int
-	Now                                                      func() time.Time
-	Log                                                      func(msg string, args ...any)
-	Alert                                                    func(msg string, args ...any)
+	// MaxLingering caps orders that can no longer be paid but whose
+	// answer is still awaited: at the cap, sales pause. Default 64.
+	MaxLingering int
+	// ResolvedPath records the payments the owner marked resolved
+	// (Resolve), so the owner's list shows only open items.
+	ResolvedPath string
+	// RequireSelfCheck keeps sales off until SelfCheck has passed.
+	RequireSelfCheck bool
+	Now              func() time.Time
+	Log              func(msg string, args ...any)
+	Alert            func(msg string, args ...any)
 }
 
 // Checkout makes and watches invoices.
@@ -155,6 +164,14 @@ type Checkout struct {
 	orders map[string]*Order
 	// lastLookup paces lookups of orders whose watch has ended.
 	lastLookup map[string]time.Time
+	// paused says why sales are paused (lookups failed in the last poll
+	// pass), or "". off says why they never start (the self-check
+	// failed); ready is false until a required self-check passed.
+	paused, off string
+	ready       bool
+	// While a poll pass runs, changes mark the orders dirty and the pass
+	// saves them once at its end (batching), not once per change.
+	batching, dirty bool
 }
 
 // Checkout errors a caller shows to the visitor.
@@ -165,7 +182,18 @@ var (
 	ErrNotRegion        = errors.New("not a region string")
 	// ErrNameHeld: someone else has an open invoice for this name.
 	ErrNameHeld = errors.New("someone has an open invoice for this name; try again in a few minutes")
+	// ErrNetworkHasOrder: per region, at most one open invoice per
+	// network (/48 or /24).
+	ErrNetworkHasOrder = errors.New("an invoice for this region from your network is already open; pay it or wait for it to expire")
+	// ErrPaused: sales are paused while the wallet cannot be asked about
+	// invoices (or too many old ones still wait for an answer).
+	ErrPaused = errors.New("payments are paused; try again later")
+	// ErrPaymentsOff: the startup self-check failed; see the relay's log.
+	ErrPaymentsOff = errors.New("payments are off on this relay")
 )
+
+// DefaultMaxLingering is MaxLingering when unset.
+const DefaultMaxLingering = 64
 
 const (
 	// lookupGrace is how long past the watch's start an unpaid invoice is
@@ -198,7 +226,13 @@ func NewCheckout(cfg CheckoutConfig) (*Checkout, error) {
 	if cfg.Alert == nil {
 		cfg.Alert = cfg.Log
 	}
-	c := &Checkout{cfg: cfg, create: make(chan struct{}, 1), orders: map[string]*Order{}, lastLookup: map[string]time.Time{}}
+	if cfg.MaxLingering <= 0 {
+		cfg.MaxLingering = DefaultMaxLingering
+	}
+	if cfg.ResolvedPath == "" && cfg.LedgerPath != "" {
+		cfg.ResolvedPath = cfg.LedgerPath + ".resolved"
+	}
+	c := &Checkout{cfg: cfg, create: make(chan struct{}, 1), orders: map[string]*Order{}, lastLookup: map[string]time.Time{}, ready: !cfg.RequireSelfCheck}
 	data, err := os.ReadFile(cfg.OrdersPath)
 	switch {
 	case os.IsNotExist(err):
@@ -266,6 +300,9 @@ func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) 
 	}
 	if !c.canonicalRegion(req.Region) {
 		return Order{}, ErrNotRegion
+	}
+	if err := c.selling(); err != nil {
+		return Order{}, err
 	}
 	if c.cfg.Registry.Get(req.Region) != nil || c.paidFor(req.Region) {
 		return Order{}, ErrAlreadySpeakeasy
@@ -389,7 +426,8 @@ func (c *Checkout) room(req OrderRequest) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.cfg.Now().Unix()
-	all, mine, network, region := 0, 0, 0, 0
+	all, mine, network := 0, 0, 0
+	regionNets := map[string]bool{} // the networks with an open invoice for this region
 	for _, o := range c.orders {
 		// A name is held, against others, while an invoice for it can be
 		// paid or a paid one is being applied. It holds only that name.
@@ -407,17 +445,138 @@ func (c *Checkout) room(req OrderRequest) error {
 		if req.Network != "" && o.Network == req.Network {
 			network++
 		}
-		if o.Region == req.Region {
-			region++
+		// The requester's own invoice with under a minute left is not
+		// handed out again (open), so it does not hold the region for them.
+		ownExpiring := o.Requester == req.Requester && o.ExpiresAt <= now+60
+		if o.Region == req.Region && !ownExpiring {
+			if o.Network == req.Network {
+				// One open invoice per network per region, so one address
+				// cannot take a region's whole cap.
+				return ErrNetworkHasOrder
+			}
+			regionNets[o.Network] = true
 		}
 	}
 	switch {
-	case region >= c.cfg.MaxPerRegion:
+	case len(regionNets) >= c.cfg.MaxPerRegion:
 		return ErrRegionBusy
 	case all >= c.cfg.MaxPending || mine >= c.cfg.MaxPerRequester || network >= c.cfg.MaxPerNetwork:
 		return ErrTooManyInvoices
 	}
 	return nil
+}
+
+// selling says why no invoice can be sold now, or nil.
+func (c *Checkout) selling() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.off != "":
+		return ErrPaymentsOff
+	case !c.ready:
+		return fmt.Errorf("%w (checking the wallet)", ErrPaused)
+	case c.paused != "":
+		return ErrPaused
+	case c.lingeringLocked() >= c.cfg.MaxLingering:
+		return fmt.Errorf("%w (too many old invoices still wait for an answer)", ErrPaused)
+	}
+	return nil
+}
+
+// Selling reports whether invoices can be sold now (the page offers
+// Create only then).
+func (c *Checkout) Selling() bool { return c.selling() == nil }
+
+// State says whether sales are paused or off, and why ("" when selling).
+func (c *Checkout) State() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.off != "":
+		return "off: " + c.off
+	case !c.ready:
+		return "waiting for the self-check"
+	case c.paused != "":
+		return "paused: " + c.paused
+	case c.lingeringLocked() >= c.cfg.MaxLingering:
+		return "paused: too many old invoices still wait for an answer"
+	}
+	return ""
+}
+
+// lingeringLocked counts orders that can no longer be paid but whose
+// answer is still awaited. Called with mu held.
+func (c *Checkout) lingeringLocked() int {
+	now, n := c.cfg.Now().Unix(), 0
+	for _, o := range c.orders {
+		if o.Status == StatusPending && o.ExpiresAt <= now {
+			n++
+		}
+	}
+	return n
+}
+
+// selfCheckMsat is the amount of the self-check's invoice: 1 sat.
+const selfCheckMsat = 1000
+
+// SelfCheck makes a 1-sat invoice and looks it up, as payments will, so a
+// connection made without lookup_invoice (or not answering) is found at
+// startup, not after invoices were sold. Until it passes (when required),
+// nothing is sold; when it fails, payments stay off.
+func (c *Checkout) SelfCheck(ctx context.Context) error {
+	err := c.selfCheck(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		c.off = err.Error()
+		return err
+	}
+	c.ready = true
+	return nil
+}
+
+func (c *Checkout) selfCheck(ctx context.Context) error {
+	inv, err := c.cfg.Wallet.MakeInvoice(ctx, selfCheckMsat, c.cfg.Host+" payments self-check", time.Minute)
+	if err != nil {
+		if code, cfgErr := walletTrouble(err); cfgErr {
+			return fmt.Errorf("the wallet refuses make_invoice (%s): make the NWC connection with make_invoice and lookup_invoice", code)
+		}
+		return fmt.Errorf("make_invoice failed: %w", err)
+	}
+	if !isLowerHex(strings.ToLower(inv.PaymentHash), 64) {
+		return errors.New("make_invoice gave no payment hash")
+	}
+	if _, err := c.cfg.Wallet.LookupInvoice(ctx, strings.ToLower(inv.PaymentHash)); err != nil {
+		if nwc.IsNotFound(err) {
+			return errors.New("lookup_invoice cannot find the invoice make_invoice just made")
+		}
+		if code, cfgErr := walletTrouble(err); cfgErr {
+			return fmt.Errorf("the wallet refuses lookup_invoice (%s): make the NWC connection with make_invoice and lookup_invoice", code)
+		}
+		return fmt.Errorf("lookup_invoice failed: %w", err)
+	}
+	return nil
+}
+
+// walletTrouble names what a failed lookup says about the wallet: "" when
+// the wallet answered (no error, or NOT_FOUND: the connection works), the
+// error code and true for a connection made without the method
+// (RESTRICTED, UNAUTHORIZED, NOT_IMPLEMENTED), or another reason.
+func walletTrouble(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	var we *nwc.Error
+	if errors.As(err, &we) {
+		switch we.Code {
+		case "NOT_FOUND":
+			return "", false
+		case "RESTRICTED", "UNAUTHORIZED", "NOT_IMPLEMENTED":
+			return we.Code, true
+		}
+		return "wallet error " + we.Code, false
+	}
+	return err.Error(), false
 }
 
 func (c *Checkout) canonicalRegion(region string) bool {
@@ -475,9 +634,32 @@ type lookups struct {
 	c    *Checkout
 	sess nwc.Lookuper
 	lost bool // a session broke; plain calls from now on
+	// What the pass learned about the wallet: answers (NOT_FOUND
+	// included: the connection works), the first trouble, whether it was
+	// a configuration error; orders newly unverifiable, and given up.
+	answers         int
+	trouble         string
+	config          bool
+	newlyFailing    int
+	gaveUp, dropped int
 }
 
+// lookup asks about one invoice and records what the answer says about the
+// wallet.
 func (l *lookups) lookup(ctx context.Context, hash string) (nwc.Invoice, error) {
+	inv, err := l.ask(ctx, hash)
+	if ctx.Err() != nil {
+		return inv, err
+	}
+	if trouble, cfg := walletTrouble(err); trouble == "" {
+		l.answers++
+	} else if l.trouble == "" || cfg {
+		l.trouble, l.config = trouble, cfg
+	}
+	return inv, err
+}
+
+func (l *lookups) ask(ctx context.Context, hash string) (nwc.Invoice, error) {
 	sw, ok := l.c.cfg.Wallet.(sessionWallet)
 	if !ok || l.lost {
 		return l.c.cfg.Wallet.LookupInvoice(ctx, hash)
@@ -513,8 +695,11 @@ func (l *lookups) close() {
 func (c *Checkout) Poll(ctx context.Context) {
 	now := c.cfg.Now()
 	c.mu.Lock()
+	c.batching = true
+	failing := false
 	var todo []Order
 	for _, o := range c.orders {
+		failing = failing || o.Status == StatusPending && o.LookupFailing
 		switch {
 		case o.Status == StatusPaid && !o.Applied:
 			todo = append(todo, *o)
@@ -535,7 +720,18 @@ func (c *Checkout) Poll(ctx context.Context) {
 		return todo[i].CreatedAt < todo[j].CreatedAt || todo[i].CreatedAt == todo[j].CreatedAt && todo[i].ID < todo[j].ID
 	})
 	l := &lookups{c: c}
-	defer l.close()
+	defer func() {
+		l.close()
+		c.mu.Lock()
+		c.batching = false
+		if c.dirty {
+			c.dirty = false
+			if err := c.saveLocked(); err != nil {
+				c.cfg.Alert("speakeasy: could not save the orders", "error", err.Error())
+			}
+		}
+		c.mu.Unlock()
+	}()
 	for _, o := range todo {
 		if ctx.Err() != nil {
 			return
@@ -549,7 +745,58 @@ func (c *Checkout) Poll(ctx context.Context) {
 			c.finalLookup(ctx, l, o)
 		}
 	}
+	c.mu.Lock()
+	paused := c.paused != ""
+	c.mu.Unlock()
+	if (paused || failing) && l.answers == 0 && l.trouble == "" && ctx.Err() == nil {
+		// Nothing this pass showed whether lookups work: ask about an
+		// invoice nobody made. NOT_FOUND means the connection answers.
+		l.lookup(ctx, newID()+newID())
+	}
+	if ctx.Err() == nil {
+		c.health(l)
+	}
 	c.prune()
+}
+
+// health pauses sales while lookups fail and resumes them once the wallet
+// answers, with one alert per outage (not one per order), and merges the
+// pass's per-order news into one alert each.
+func (c *Checkout) health(l *lookups) {
+	c.mu.Lock()
+	was := c.paused
+	open := 0
+	for _, o := range c.orders {
+		if o.Status == StatusPending {
+			open++
+		}
+	}
+	switch {
+	case l.trouble != "":
+		c.paused = l.trouble
+	case l.answers > 0:
+		c.paused = ""
+	}
+	now := c.paused
+	c.mu.Unlock()
+	switch {
+	case now != "" && was == "" && l.config:
+		c.cfg.Alert("speakeasy: payments paused: the wallet refuses lookup_invoice, a configuration error; make the NWC connection with make_invoice and lookup_invoice",
+			"code", l.trouble, "open_orders", open)
+	case now != "" && was == "":
+		c.cfg.Alert("speakeasy: payments paused: the wallet cannot be asked about invoices; open orders stay open until it answers",
+			"reason", l.trouble, "open_orders", open)
+	case now == "" && was != "":
+		c.cfg.Log("speakeasy: the wallet answers again; payments resume", "was", was)
+	}
+	if l.newlyFailing > 0 && now == "" { // during an outage, its one alert covers them
+		c.cfg.Alert("speakeasy: invoices that can no longer be paid cannot be checked (the wallet does not know them, or did not answer); they stay open until it answers",
+			"orders", l.newlyFailing)
+	}
+	if l.gaveUp+l.dropped > 0 {
+		c.cfg.Alert("speakeasy: gave up on orders the wallet never answered about; check the wallet by hand (grain_speakeasy_payments lists them)",
+			"orders", l.gaveUp+l.dropped)
+	}
 }
 
 func (c *Checkout) markLooked(id string) {
@@ -577,14 +824,13 @@ func (c *Checkout) lookup(ctx context.Context, l *lookups, o Order) {
 		// owner once and keep asking; give up only after GiveUp.
 		c.cfg.Log("speakeasy: invoice lookup failed", "order", o.ID, "error", err.Error())
 		if now.Unix() > o.ExpiresAt && !o.LookupFailing {
-			c.cfg.Alert("speakeasy: the wallet cannot be asked about an invoice that is no longer payable; it stays open until the wallet answers",
-				"order", o.ID, "payment_hash", o.PaymentHash, "error", err.Error())
+			l.newlyFailing++ // one alert for the pass (health)
 			c.update(o.ID, func(x *Order) { x.LookupFailing = true })
 		}
 		if now.Unix() > o.WatchUntil+int64(GiveUp/time.Second) {
 			o.Status, o.Outcome = StatusUnknown, "unknown: the wallet never answered; check the wallet for payment hash "+o.PaymentHash
 			c.ledger(o)
-			c.cfg.Alert("speakeasy: giving up on an order the wallet never answered about; check the wallet by hand", "order", o.ID, "payment_hash", o.PaymentHash)
+			l.gaveUp++
 			c.update(o.ID, func(x *Order) { x.Status, x.Outcome, x.ClosedAt = o.Status, o.Outcome, now.Unix() })
 		}
 		return
@@ -612,7 +858,7 @@ func (c *Checkout) finalLookup(ctx context.Context, l *lookups, o Order) {
 	case c.cfg.Now().Unix() > o.WatchUntil+int64(GiveUp/time.Second):
 		o.Outcome = "unknown: no last answer from the wallet; check the wallet for payment hash " + o.PaymentHash
 		c.ledger(o)
-		c.cfg.Alert("speakeasy: dropping an expired order the wallet never answered about one last time", "order", o.ID, "payment_hash", o.PaymentHash)
+		l.dropped++
 		c.drop(o.ID)
 	}
 }
@@ -642,7 +888,9 @@ func (c *Checkout) settle(o Order, inv nwc.Invoice, late bool) {
 }
 
 // mismatch says how a paid invoice differs from the order, or "". The
-// payment hash and the exact amount must be there and equal; the
+// payment hash must be there and equal, and the amount there and at least
+// the price (an overpayment is allowed, BOLT 11; creation requires the
+// exact amount); the
 // description and invoice, when the wallet gives them, must be ours.
 func mismatch(o Order, inv nwc.Invoice) string {
 	switch {
@@ -652,7 +900,8 @@ func mismatch(o Order, inv nwc.Invoice) string {
 		return "payment hash"
 	case inv.Amount == 0:
 		return "the wallet's answer has no amount"
-	case inv.Amount != o.AmountSats*1000:
+	case inv.Amount < o.AmountSats*1000:
+		// BOLT 11 lets a payer pay more than asked; less is never enough.
 		return "amount"
 	case inv.Description != "" && inv.Description != o.Description:
 		return "description"
@@ -765,14 +1014,84 @@ func (c *Checkout) Ledger() ([]Order, error) {
 	return out, nil
 }
 
+// Resolution is the owner's mark that a payment needing them (a refund
+// owed, held, unknown) is settled.
+type Resolution struct {
+	PaymentHash string `json:"payment_hash"`
+	Note        string `json:"note"`
+	ResolvedAt  int64  `json:"resolved_at"`
+}
+
+// ErrNothingToResolve: no open payment needing the owner has that hash.
+var ErrNothingToResolve = errors.New("no open payment needing the owner has that payment hash")
+
+// Resolve marks a payment the owner settled by hand (a refund paid, a held
+// payment checked), appending to ResolvedPath; the ledger is not changed.
+func (c *Checkout) Resolve(paymentHash, note string) (Resolution, error) {
+	paymentHash = strings.ToLower(paymentHash)
+	open, err := c.NeedsOwnerOpen()
+	if err != nil {
+		return Resolution{}, err
+	}
+	found := false
+	for _, o := range open {
+		found = found || o.PaymentHash == paymentHash
+	}
+	if !found {
+		return Resolution{}, ErrNothingToResolve
+	}
+	r := Resolution{PaymentHash: paymentHash, Note: note, ResolvedAt: c.cfg.Now().Unix()}
+	line, _ := json.Marshal(r)
+	f, err := os.OpenFile(c.cfg.ResolvedPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return Resolution{}, err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		return Resolution{}, err
+	}
+	return r, f.Sync()
+}
+
+// NeedsOwnerOpen is every ledger line the owner must settle by hand (a
+// refund owed, held, or unknown) and has not marked resolved, oldest
+// first, one per payment hash.
+func (c *Checkout) NeedsOwnerOpen() ([]Order, error) {
+	lines, err := c.Ledger()
+	if err != nil {
+		return nil, err
+	}
+	resolved := map[string]bool{}
+	if c.cfg.ResolvedPath != "" {
+		data, err := os.ReadFile(c.cfg.ResolvedPath)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var r Resolution
+			if json.Unmarshal([]byte(line), &r) == nil && r.PaymentHash != "" {
+				resolved[r.PaymentHash] = true
+			}
+		}
+	}
+	out := []Order{}
+	seen := map[string]bool{}
+	for _, o := range lines {
+		if !(NeedsOwner(o.Outcome) || strings.HasPrefix(o.Outcome, "unknown:")) || resolved[o.PaymentHash] || seen[o.PaymentHash] {
+			continue
+		}
+		seen[o.PaymentHash] = true
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 func (c *Checkout) update(id string, f func(*Order)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if o := c.orders[id]; o != nil {
 		f(o)
-		if err := c.saveLocked(); err != nil {
-			c.cfg.Alert("speakeasy: could not save the orders", "error", err.Error())
-		}
+		c.changedLocked()
 	}
 }
 
@@ -781,6 +1100,17 @@ func (c *Checkout) drop(id string) {
 	defer c.mu.Unlock()
 	delete(c.orders, id)
 	delete(c.lastLookup, id)
+	c.changedLocked()
+}
+
+// changedLocked saves the orders, or, during a poll pass, marks them for
+// the pass's one save at its end: the file is written at most once per
+// pass, whatever the number of orders. Called with mu held.
+func (c *Checkout) changedLocked() {
+	if c.batching {
+		c.dirty = true
+		return
+	}
 	if err := c.saveLocked(); err != nil {
 		c.cfg.Alert("speakeasy: could not save the orders", "error", err.Error())
 	}
@@ -802,9 +1132,7 @@ func (c *Checkout) prune() {
 		}
 	}
 	if len(c.orders) != n {
-		if err := c.saveLocked(); err != nil {
-			c.cfg.Alert("speakeasy: could not save the orders", "error", err.Error())
-		}
+		c.changedLocked()
 	}
 }
 
