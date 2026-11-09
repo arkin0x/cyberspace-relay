@@ -126,7 +126,7 @@ ONOSENDAI asks this to show a position's speakeasies (step 7). The contract:
 | Nothing holds it, none registered, or speakeasies off | `200` `{"speakeasies":[]}` |
 | A bad or missing `coord` | `400` `{"error":"..."}` |
 | Another method | `405` (OPTIONS answers a CORS preflight with `204`) |
-| Headers | `Content-Type: application/json`, `Cache-Control: public, max-age=30`, `Access-Control-Allow-Origin` echoing `https://www.onosendai.tech` or any `http(s)://localhost`, `127.0.0.1` or `[::1]` origin (any port), with `Vary: Origin` |
+| Headers | `Content-Type: application/json`, `Cache-Control: public, max-age=30`, `Access-Control-Allow-Origin: *` (public, read-only, no credentials; so ONOSENDAI's preview deployments can read it too) |
 
 `url` is always the region's canonical address (the one its AUTH names), also once the speakeasy has a name; `name` carries the name.
 

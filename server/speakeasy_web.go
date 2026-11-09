@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/0ceanslim/grain/server/regiongate"
@@ -21,10 +20,6 @@ import (
 // DiscoveryPath is the discovery endpoint's path.
 const DiscoveryPath = "/.well-known/cyberspace-speakeasies"
 
-// discoveryOrigins may read the discovery endpoint from a browser, besides
-// any http or https origin on localhost.
-var discoveryOrigins = map[string]bool{"https://www.onosendai.tech": true}
-
 // discoveryItem is one speakeasy in a discovery answer. The field names and
 // types are the contract ONOSENDAI codes against.
 type discoveryItem struct {
@@ -38,13 +33,12 @@ type discoveryItem struct {
 // hex>: every registered speakeasy whose region holds the coordinate, the
 // longest region string (the smallest region) first. A bad coordinate is
 // 400 {"error": ...}; with speakeasies off or none registered the list is
-// empty.
+// empty. Any origin may read it (Access-Control-Allow-Origin: *): it is
+// public, read-only and uses no credentials, and ONOSENDAI's preview
+// deployments have origins nobody can list ahead.
 func serveDiscovery(w http.ResponseWriter, r *http.Request, rt *speakeasyRuntime) {
 	h := w.Header()
-	if allowedOrigin(r.Header.Get("Origin")) {
-		h.Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
-	}
-	h.Add("Vary", "Origin")
+	h.Set("Access-Control-Allow-Origin", "*")
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 	case http.MethodOptions:
@@ -76,23 +70,6 @@ func serveDiscovery(w http.ResponseWriter, r *http.Request, rt *speakeasyRuntime
 	}
 	h.Set("Cache-Control", "public, max-age=30")
 	writeJSON(w, http.StatusOK, map[string]any{"speakeasies": items})
-}
-
-// allowedOrigin reports whether a browser page at origin may read the
-// discovery endpoint: www.onosendai.tech, or localhost on any port.
-func allowedOrigin(origin string) bool {
-	if discoveryOrigins[origin] {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" || u.User != nil {
-		return false
-	}
-	switch u.Hostname() {
-	case "localhost", "127.0.0.1", "::1":
-		return true
-	}
-	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -177,15 +177,21 @@ func TestDiscoveryEndpoint(t *testing.T) {
 		}
 	}
 
-	// CORS: www.onosendai.tech and localhost, nobody else.
-	for origin, allowed := range map[string]bool{
-		"https://www.onosendai.tech": true, "http://localhost:5173": true, "http://127.0.0.1:8080": true, "https://localhost": true,
-		"https://onosendai.tech.evil.example": false, "http://www.onosendai.tech": false, "null": false, "https://evil.example": false,
-	} {
-		_, _, h, _ := discover(t, r.root, coord, "Origin", origin)
-		if got := h.Get("Access-Control-Allow-Origin"); (got == origin) != allowed || (!allowed && got != "") {
-			t.Errorf("Origin %s: Access-Control-Allow-Origin %q", origin, got)
+	// CORS: any origin (public, read-only, no credentials; preview
+	// deployments have unlisted origins), with or without an Origin.
+	for _, origin := range []string{"https://www.onosendai.tech", "http://localhost:5173", "https://onosendai-git-x.vercel.app", ""} {
+		var hs []string
+		if origin != "" {
+			hs = []string{"Origin", origin}
 		}
+		_, _, h, _ := discover(t, r.root, coord, hs...)
+		if got := h.Get("Access-Control-Allow-Origin"); got != "*" || h.Get("Access-Control-Allow-Credentials") != "" {
+			t.Errorf("Origin %q: Access-Control-Allow-Origin %q", origin, got)
+		}
+	}
+	// Errors too, so a page can read the message.
+	if _, _, h, _ := discover(t, r.root, "bad", "Origin", "https://x.example"); h.Get("Access-Control-Allow-Origin") != "*" {
+		t.Error("a 400 lacks the CORS header")
 	}
 	if code, _, h := get(t, http.MethodOptions, r.root+DiscoveryPath, "Origin", "https://www.onosendai.tech"); code != 204 || !strings.Contains(h.Get("Access-Control-Allow-Methods"), "GET") {
 		t.Errorf("preflight: %d %q", code, h.Get("Access-Control-Allow-Methods"))
