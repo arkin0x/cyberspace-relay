@@ -74,12 +74,16 @@ type PaymentsConfig struct {
 	InvoiceExpirySeconds int `yaml:"invoice_expiry_seconds"`
 	// PollSeconds is how often open invoices are looked up. Default 5.
 	PollSeconds int `yaml:"poll_seconds"`
-	// MaxPendingInvoices caps open invoices in all (default 32), and
-	// MaxPendingPerRequester one client address's (default 3, each for
-	// another region; asking again for the same region returns the same
-	// invoice).
+	// Caps on payable open invoices: in all (default 256); per requester,
+	// a client address or IPv6 /64 (default 3, each for another region;
+	// asking again for the same region returns the same invoice); per
+	// network, an IPv6 /48 or IPv4 /24 (default 6); per region, across
+	// requesters (default 2). An invoice that can no longer be paid holds
+	// no slot.
 	MaxPendingInvoices     int `yaml:"max_pending_invoices"`
 	MaxPendingPerRequester int `yaml:"max_pending_per_requester"`
+	MaxPendingPerNetwork   int `yaml:"max_pending_per_network"`
+	MaxPendingPerRegion    int `yaml:"max_pending_per_region"`
 }
 
 // Default prices (owner ruling 2026-11-09).
@@ -120,7 +124,7 @@ func ParseConfig(data []byte) (*Config, error) {
 		c.MaxConnectionsPerPath = 200
 	}
 	p := &c.Payments
-	if p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 {
+	if p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 || p.MaxPendingPerNetwork < 0 || p.MaxPendingPerRegion < 0 {
 		return nil, fmt.Errorf("%s: payments values must not be negative", ConfigFile)
 	}
 	if p.SpeakeasySats == 0 {
@@ -133,10 +137,16 @@ func ParseConfig(data []byte) (*Config, error) {
 		p.PollSeconds = 5
 	}
 	if p.MaxPendingInvoices == 0 {
-		p.MaxPendingInvoices = 32
+		p.MaxPendingInvoices = 256
 	}
 	if p.MaxPendingPerRequester == 0 {
 		p.MaxPendingPerRequester = 3
+	}
+	if p.MaxPendingPerNetwork == 0 {
+		p.MaxPendingPerNetwork = 6
+	}
+	if p.MaxPendingPerRegion == 0 {
+		p.MaxPendingPerRegion = 2
 	}
 	p.NWCFile = strings.TrimSpace(p.NWCFile)
 	if c.Planes == nil {

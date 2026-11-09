@@ -100,6 +100,7 @@
         <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
         <p><a class="button" id="open-wallet" href="#">Open in wallet</a></p>
         <p id="pay-status" role="status">Waiting for payment</p>
+        <p class="muted mono">Order <span id="order-id"></span> · payment hash <span id="payment-hash"></span></p>
       </div>
     </div>
     {{end}}
@@ -140,37 +141,46 @@
     var errEl = document.getElementById("create-error");
     var inv = document.getElementById("invoice");
     var status = document.getElementById("pay-status");
+    var key = "speakeasy-order:" + region;
+    function remember(id) { try { if (id) localStorage.setItem(key, id); else localStorage.removeItem(key); } catch (e) {} }
+    function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
     function show(o) {
-      document.getElementById("qr").innerHTML = o.qr_svg; // drawn by this relay
+      if (o.qr_svg) document.getElementById("qr").innerHTML = o.qr_svg; // drawn by this relay
       document.getElementById("bolt11").textContent = o.invoice;
       document.getElementById("open-wallet").href = "lightning:" + o.invoice;
+      document.getElementById("order-id").textContent = o.id;
+      document.getElementById("payment-hash").textContent = o.payment_hash;
       inv.hidden = false;
       btn.hidden = true;
     }
     function poll(id) {
       fetch(endpoint + "/" + encodeURIComponent(id), { cache: "no-store" })
-        .then(function (r) { return r.json(); })
+        .then(function (r) { if (r.status === 404) { remember(null); throw "gone"; } return r.json(); })
         .then(function (o) {
+          show(o);
           if (o.applied && o.url) {
+            remember(null);
             status.textContent = "Paid. This region is now a speakeasy.";
             setTimeout(function () { location.reload(); }, 1500);
             return;
           }
           if (o.applied) {
-            status.textContent = "Paid, but not applied: " + o.outcome + ". Contact the relay owner.";
+            // A refund owed, or held: never a success.
+            status.textContent = "Paid, but it bought nothing (" + o.outcome + "). " + o.amount_sats +
+              " sats are owed back: give the relay owner the order and payment hash below.";
             return;
           }
           if (o.status === "paid") status.textContent = "Paid. Opening the speakeasy.";
-          if (o.status === "expired") {
+          if (o.status === "expired" || o.status === "unknown") {
+            remember(null);
             status.textContent = "";
-            errEl.textContent = "That invoice expired.";
-            inv.hidden = true;
-            btn.hidden = false;
+            errEl.textContent = o.status === "expired" ? "That invoice expired." : "The wallet never answered about that invoice; give the relay owner the order and payment hash below.";
+            if (o.status === "expired") { inv.hidden = true; btn.hidden = false; }
             return;
           }
           setTimeout(function () { poll(id); }, 3000);
         })
-        .catch(function () { setTimeout(function () { poll(id); }, 6000); });
+        .catch(function (e) { if (e !== "gone") setTimeout(function () { poll(id); }, 6000); });
     }
     btn.addEventListener("click", function () {
       btn.disabled = true;
@@ -180,12 +190,16 @@
         .then(function (x) {
           btn.disabled = false;
           if (!x.ok) { errEl.textContent = x.o.error || "Something went wrong. Try again."; return; }
+          remember(x.o.id);
           show(x.o);
           status.textContent = "Waiting for payment";
           poll(x.o.id);
         })
         .catch(function () { btn.disabled = false; errEl.textContent = "Something went wrong. Try again."; });
     });
+    // After a reload: pick up the order this browser was paying.
+    var last = remembered();
+    if (last) poll(last);
   })();
 </script>
 {{end}}

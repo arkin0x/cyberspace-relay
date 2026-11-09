@@ -32,6 +32,10 @@ type Entry struct {
 	// relay owner wants to remember about it (how it was paid, for now).
 	CreatedAt int64  `json:"created_at"`
 	Note      string `json:"note,omitempty"`
+	// PaymentHash is the payment that created it, when it was paid for
+	// (step 5): a paid order whose entry already carries its hash was
+	// applied before a crash, not beaten to the region by another.
+	PaymentHash string `json:"payment_hash,omitempty"`
 }
 
 // RegionJSON is regiongate.RegionSpec with JSON names: base with height or

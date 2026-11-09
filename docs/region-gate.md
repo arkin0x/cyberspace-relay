@@ -137,7 +137,7 @@ database is never open twice in the process, and a server instance that stops
 connections it leaves behind ("relay restarting, try again").
 
 **The registry** is `<data dir>/speakeasies/registry.json`, written atomically
-by the relay: by paid creation (step 5, `docs/speakeasies.md`) and by the relay owner through
+and durably (temp file fsynced, renamed, directory fsynced) by the relay: by paid creation (step 5, `docs/speakeasies.md`) and by the relay owner through
 NIP-86 at `/` (NIP-98 auth, signer = relay owner):
 
 | Method | Params | Does |
@@ -146,6 +146,7 @@ NIP-86 at `/` (NIP-98 auth, signer = relay owner):
 | `grain_speakeasy_add` | `[{"id": <region string, canonical>, "name"?, "description"?, "note"?}]` | registers it; the path names the region, which the registry stores (an entry may also give `"region": {"base", "heights"}`, which must be that region) |
 | `grain_speakeasy_remove` | `[<id>]` | unregisters it at once (open connections included); its database stays on disk, and adding it again serves it again |
 | `grain_speakeasy_deleteevent` | `[<id>, <event id>]` | deletes one event from that speakeasy (ruling D5) |
+| `grain_speakeasy_payments` | none | what the owner must settle by hand: ledger lines whose payment bought nothing (refund owed, held) or is unknown, and open orders the wallet cannot be asked about (`docs/speakeasies.md`, step 5) |
 
 They exist (and `supportedmethods` lists them) only while speakeasies are on.
 Paths are read by `regiongate.ParseRegionPath` (arkin0x/cyberspace-relay #18,

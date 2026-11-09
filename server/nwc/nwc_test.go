@@ -43,6 +43,7 @@ type fakeWallet struct {
 	methods  []string
 	encs     []string // the scheme each request used
 	senders  []string // the pubkey each request came from
+	conns    int      // websocket connections served
 }
 
 func newFakeWallet(t *testing.T) *fakeWallet {
@@ -63,6 +64,9 @@ func (w *fakeWallet) pay(hash string) {
 
 func (w *fakeWallet) serve() *httptest.Server {
 	srv := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		w.mu.Lock()
+		w.conns++
+		w.mu.Unlock()
 		subs := map[string]string{} // request id -> subscription
 		send := func(v ...any) {
 			b, _ := json.Marshal(v)
@@ -257,6 +261,31 @@ func TestParseURI(t *testing.T) {
 	}
 }
 
+// TestNIP04KnownVector: a vector made with OpenSSL alone (ECDH on
+// secp256k1, AES-256-CBC; testdata/make-nip04-vector.sh), so it does not
+// come from the code it tests. The peer key is given x-only, as nostr
+// keys are; the shared x is the same for either y.
+func TestNIP04KnownVector(t *testing.T) {
+	const (
+		aPubX   = "9e7affcf0a0595609f279b76805c465ca6a54d95a26d6f1f06e47acf06f4fac5"
+		bPriv   = "77de7ab6e9badef17652afd94a24f1d5b88bdc6c103775ddc15b9b2b4b1fa466"
+		shared  = "ebee61b9cadff43905d78a551f53b5892adc2e7203fcc9aab0aeb9755bae600a"
+		payload = "/1lMznDD0Z6dR4PwIr1wpq5d3bJNUoiSJ0u+U77OyRo1TgiGc+K2Ojbow/T6/htN5neTXyVUxxvws0vAaEPCDA==?iv=AAECAwQFBgcICQoLDA0ODw=="
+		message = `{"method":"lookup_invoice","params":{"payment_hash":"ab"}}`
+	)
+	b, _ := btcec.PrivKeyFromBytes(mustHex(bPriv))
+	a, err := schnorr.ParsePubKey(mustHex(aPubX))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(nip04Key(b, a)); got != shared {
+		t.Fatalf("shared key %s, OpenSSL says %s", got, shared)
+	}
+	if got, err := nip04Decrypt(b, a, payload); err != nil || got != message {
+		t.Fatalf("decrypted %q %v", got, err)
+	}
+}
+
 // TestNIP04RoundTrip: what one side encrypts the other decrypts; a wrong
 // key or a tampered payload does not decrypt to the message.
 func TestNIP04RoundTrip(t *testing.T) {
@@ -385,6 +414,39 @@ func TestEncryptionIsKeptOnlyFromAnInfoEvent(t *testing.T) {
 	}
 }
 
+// TestLookupSessionUsesOneConnection: many lookups on one session are one
+// websocket connection.
+func TestLookupSessionUsesOneConnection(t *testing.T) {
+	w := newFakeWallet(t)
+	cl := newClient(t, w, wsURL(w.serve()))
+	ctx := context.Background()
+	inv, err := cl.MakeInvoice(ctx, 1000, "x", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	w.conns = 0
+	w.mu.Unlock()
+	s, err := cl.LookupSession(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := s.LookupInvoice(ctx, inv.PaymentHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.LookupInvoice(ctx, strings.Repeat("e", 64)); !IsNotFound(err) {
+		t.Fatalf("a wallet error on a session: %v", err)
+	}
+	s.Close()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.conns != 1 {
+		t.Fatalf("%d connections for six lookups, want 1", w.conns)
+	}
+}
+
 // TestClientTriesTheNextRelay: a relay that cannot be reached is skipped.
 func TestClientTriesTheNextRelay(t *testing.T) {
 	w := newFakeWallet(t)
@@ -405,12 +467,13 @@ func TestFileWalletRotates(t *testing.T) {
 	relay := wsURL(w.serve())
 	path := filepath.Join(t.TempDir(), "nwc")
 	os.WriteFile(path, []byte(connString(w.pub, testSecret, relay)+"\n"), 0o600)
-	f, err := OpenFile(path)
+	var warns []string
+	f, err := OpenFile(path, func(msg string, args ...any) { warns = append(warns, msg) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Insecure() || strings.Contains(f.Describe(), testSecret) {
-		t.Fatalf("insecure %v, describe %q", f.Insecure(), f.Describe())
+	if len(warns) != 0 || strings.Contains(f.Describe(), testSecret) {
+		t.Fatalf("warnings %v, describe %q", warns, f.Describe())
 	}
 	ctx := context.Background()
 	if _, err := f.MakeInvoice(ctx, 1000, "one", time.Minute); err != nil {
@@ -429,16 +492,22 @@ func TestFileWalletRotates(t *testing.T) {
 	if len(senders) != 2 || senders[0] != s1.PublicKey() || senders[1] != s2.PublicKey() {
 		t.Fatalf("senders %v, want the first key then the rotated one", senders)
 	}
-	os.WriteFile(path, []byte("nostr+walletconnect://broken?secret="+second), 0o600)
+	// Rotated to a file others can read: warned again at the change.
+	third := strings.Repeat("2", 64)
+	os.WriteFile(path, []byte(connString(w.pub, third, relay)), 0o600)
 	os.Chmod(path, 0o644)
-	if !f.Insecure() {
-		t.Error("a world-readable file is not reported")
+	if _, err := f.MakeInvoice(ctx, 1000, "three", time.Minute); err != nil {
+		t.Fatal(err)
 	}
+	if len(warns) != 1 {
+		t.Fatalf("warnings after rotating to a readable file: %v", warns)
+	}
+	os.WriteFile(path, []byte("nostr+walletconnect://broken?secret="+second), 0o600)
 	_, err = f.MakeInvoice(ctx, 1000, "three", time.Minute)
 	if err == nil || strings.Contains(err.Error(), second[:16]) {
 		t.Fatalf("broken file: %v", err)
 	}
-	if _, err := OpenFile(filepath.Join(t.TempDir(), "missing")); err == nil {
+	if _, err := OpenFile(filepath.Join(t.TempDir(), "missing"), nil); err == nil {
 		t.Fatal("a missing file opened")
 	}
 }
