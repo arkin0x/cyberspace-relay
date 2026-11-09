@@ -59,7 +59,7 @@ Verified over the wire: outsider REQ without AUTH `auth-required`, with AUTH
 
 `speakeasies.yml` in the data directory (start from
 [`examples/speakeasies.example.yml`](examples/speakeasies.example.yml)) makes
-`relay.onosendai.tech/<region>` its own speakeasy relay, for every region in
+`relay.onosendai.tech/C/<region>` its own speakeasy relay, for every region in
 the speakeasy registry, while the bare relay at `/` stays the relay it was
 (`docs/speakeasies.md`, step 3). `region.yml` still gates the root; the two
 are independent.
@@ -67,22 +67,27 @@ are independent.
 | Path | Without `speakeasies.yml` | With it |
 |---|---|---|
 | `/` | the root relay | the root relay, unchanged |
-| `/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
+| `/C/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
+| the bare `/<region>`, `/c/<region>`, or another spelling after `/C/` (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11 and the page: 301 to `/C/<region>` (`Vary: Accept`); websocket: 400 naming the `/C/` address |
 | another spelling of a registered region (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11: 301 to the one URL; websocket: 400 naming it |
 | any other path | the root relay | websocket, NIP-11, NIP-86: 404 "not a relay" |
-| a browser (GET or HEAD, `Accept` with `text/html`) at any region string | grain's usual handlers | the region dashboard (step 4; other spellings 301 to the canonical path) |
+| a browser (GET or HEAD, `Accept` with `text/html`) at `/C/<region>` for any region string | grain's usual handlers | the region dashboard (step 4; the bare `/<region>`, `/c/` and other spellings 301 to `/C/<region>`) |
 | `/.well-known/cyberspace-speakeasies?coord=<64 hex>` | an empty list | the speakeasies holding that coordinate (`docs/speakeasies.md`) |
 
 Once the file exists no path but `/` falls back to the root: also when it is
-invalid or says `enabled: false`, so a client that took `/<region>` for a
+invalid or says `enabled: false`, so a client that took `/C/<region>` for a
 speakeasy never posts its private room to the public relay. Paths are matched
 on the path as sent (`URL.EscapedPath()`), never through `http.ServeMux`,
 which cleans and redirects (`//abc`, `/x/../abc`, `/abc/.`); a plain browser
 request for a path that is not a region string goes on to grain's usual handlers.
 
-**One URL per speakeasy.** `public_url` (default `auth.relay_url`) plus `/`
-and the region string in its canonical spelling, as ONOSENDAI writes it after
-`/C/` (ruling D7): lowercase hex, no `0x`, no trailing slash. Its NIP-11 names
+**One URL per speakeasy.** `public_url` (default `auth.relay_url`) plus `/C/`
+and the region string in its canonical spelling: lowercase hex, no `0x`, no
+trailing slash, exactly ONOSENDAI's `www.onosendai.tech/C/<hex>` (ruling D7;
+owner ruling 2026-11-09: "/C/ for speakeasies on the relay"). A name's URL is
+`public_url/<name>`. The lowercase `/c/` is never served: like any other
+spelling, browsers are sent to `/C/` and a websocket is refused, so no AUTH is
+ever signed for a second URL. Its NIP-11 names
 it, and its NIP-42 AUTH must name exactly it, compared strictly (the path is
 significant) whatever `auth.relay_url_match` says. An AUTH for one speakeasy
 therefore never passes at another or at the root; the root must run
@@ -708,8 +713,8 @@ stop equals the reference's.
 may be listed; any match admits.
 
 A speakeasy path names its region by a region string, `ParseRegionPath` in
-`regionpath.go` (not routed yet): `/<hex>` is exactly ONOSENDAI's
-`/C/<hex>`. The hex is the top 4n bits of a coordinate (§2.2), so the region
+`regionpath.go`: a speakeasy's `/C/<hex>` is exactly ONOSENDAI's
+`/C/<hex>` (the string after `/C/` is read by the same rules). The hex is the top 4n bits of a coordinate (§2.2), so the region
 is every coordinate whose 64-hex form starts with it: a hint box whose
 heights are equal only when n is a multiple of 3. A prefix of 1 to 63
 characters leaves the plane bit open, so the box is the same in both planes;

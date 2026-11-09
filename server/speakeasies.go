@@ -90,10 +90,8 @@ func speakeasyDialGuard(raw string) error {
 	if p == "" || p == "/" {
 		return nil
 	}
-	if speakeasyRegionPath != nil {
-		if _, _, ok := speakeasyRegionPath(p); ok {
-			return errSpeakeasyDial
-		}
+	if speakeasy.IsRegionPath(p, speakeasyRegionPath) {
+		return errSpeakeasyDial
 	}
 	if rt := speakeasyState.Load(); rt != nil && rt.reg != nil {
 		if sp, _ := rt.reg.Lookup(p); sp != nil {
@@ -333,6 +331,7 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 				http.Error(w, "this speakeasy's address is "+rt.url(sp.ID)+"; connect there", http.StatusBadRequest)
 				return
 			}
+			w.Header().Add("Vary", "Accept")
 			http.Redirect(w, r, canonical, http.StatusMovedPermanently)
 		case ws:
 			rt.serveWS(w, r, sp, canonical[1:])
@@ -344,7 +343,10 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 
 // url is a speakeasy's one URL: the public URL and its canonical path. Its
 // NIP-11 names it, and its AUTH events must name it.
-func (rt *speakeasyRuntime) url(id string) string { return rt.publicURL + "/" + id }
+//
+// A region's URL is public_url/C/<id>, exactly as www.onosendai.tech/C/<id>
+// (owner ruling 2026-11-09); a name's is public_url/<name>.
+func (rt *speakeasyRuntime) url(id string) string { return rt.publicURL + speakeasy.PathFor(id) }
 
 // serveWS serves a websocket to speakeasy sp at path (its id or its name).
 func (rt *speakeasyRuntime) serveWS(w http.ResponseWriter, r *http.Request, sp *speakeasy.Speakeasy, path string) {
