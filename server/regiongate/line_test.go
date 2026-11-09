@@ -495,6 +495,155 @@ func TestAnchorLineLoadIsNotCapped(t *testing.T) {
 	}
 }
 
+// TestAnchorLineRefusedRivalAndAGap (second review, #25 item 1): the line
+// is at 49, a longer rival forked at 43 is refused, and the honest anchors
+// resume at 51 with 50 missing. With the fallback configured, the line must
+// fill 50 from headers and grow past 49: the refused rival may neither sit
+// in pending at the tip nor be the block the fill starts from.
+func TestAnchorLineRefusedRivalAndAGap(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 56, 31)
+	s := &memStore{}
+	for _, b := range main[:50] {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	l, logs := newTestLine(s, pub.pubkey, headersOf(main))
+	l.Load(context.Background())
+	checkLine(t, l, main[:50])
+	rival := testChain(43, main[42].hash, 10, 32) // 43..52
+	for _, b := range rival {
+		s.add(b.anchor(t, pub, true, 2))
+	}
+	for _, b := range main[51:] { // 50 missing
+		s.add(b.anchor(t, pub, true, 3))
+	}
+	l.Update(context.Background())
+	l.Update(context.Background())
+	checkLine(t, l, main)
+	if l.Epoch() != 0 || countLogs(logs, "REFUSED") != 1 {
+		t.Fatalf("epoch %d, %d refusals", l.Epoch(), countLogs(logs, "REFUSED"))
+	}
+	// The refused rival's blocks are not kept.
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, bs := range l.pending {
+		for _, b := range bs {
+			if slices.ContainsFunc(rival, func(r testBlock) bool { return r.hash == b.hash }) {
+				t.Fatalf("a refused rival block at %d is still pending", b.height)
+			}
+		}
+	}
+}
+
+// TestAnchorLineStrayBlockAtTheTip: a stray block anchored at the tip's
+// height that names some other previous (a stale block whose parent nobody
+// anchored) must not stop the fallback from filling a gap there.
+func TestAnchorLineStrayBlockAtTheTip(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 30, 33)
+	stray := testChain(20, [32]byte{9}, 1, 34)[0] // at 20, parent unknown
+	s := &memStore{}
+	for _, b := range main {
+		if b.height != 20 {
+			s.add(b.anchor(t, pub, true, 1))
+		}
+	}
+	s.add(stray.anchor(t, pub, true, 2))
+	l, _ := newTestLine(s, pub.pubkey, headersOf(main))
+	l.Load(context.Background())
+	checkLine(t, l, main)
+}
+
+// TestAnchorLineFillTriesEveryBlockAboveTheGap: when the first block
+// anchored just above a gap is a stray whose headers do not lead down to
+// the tip, the fill goes on to the next one.
+func TestAnchorLineFillTriesEveryBlockAboveTheGap(t *testing.T) {
+	main := testChain(0, [32]byte{}, 30, 41)
+	stray := testChain(21, [32]byte{5}, 1, 42) // at 21, parent unknown
+	l, _ := newTestLine(&memStore{}, "", headersOf(main))
+	l.add(asBlocks(main[:20]))
+	l.add(asBlocks(stray)) // first above the gap at 20
+	l.add(asBlocks(main[21:]))
+	l.fill(context.Background())
+	checkLine(t, l, main)
+}
+
+// TestAnchorLineAlertsOnABigAppend (#25 item 2): an update that appends
+// more blocks than the cap is reported; a few are not.
+func TestAnchorLineAlertsOnABigAppend(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 40, 35)
+	s := &memStore{}
+	for _, b := range main[:20] {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	l, logs := newTestLine(s, pub.pubkey, nil)
+	l.Load(context.Background())
+	for _, b := range main[20:26] {
+		s.add(b.anchor(t, pub, true, 2))
+	}
+	l.Update(context.Background())
+	if n := countLogs(logs, "appended more blocks"); n != 0 {
+		t.Fatalf("six appended blocks reported %d times", n)
+	}
+	for _, b := range main[26:] {
+		s.add(b.anchor(t, pub, true, 3))
+	}
+	l.Update(context.Background())
+	checkLine(t, l, main)
+	if n := countLogs(logs, "appended more blocks"); n != 1 {
+		t.Fatalf("fourteen appended blocks reported %d times, want 1", n)
+	}
+}
+
+// TestAnchorLineAlertsOnADeepLoadReorganization (#25 item 3): the load is
+// not capped, but a reorganization deeper than the cap during it is
+// reported.
+func TestAnchorLineAlertsOnADeepLoadReorganization(t *testing.T) {
+	main := testChain(0, [32]byte{}, 50, 36)
+	l, logs := newTestLine(&memStore{}, "", nil)
+	l.add(asBlocks(main))
+	l.add(asBlocks(testChain(30, main[29].hash, 30, 37))) // 20 deep
+	if l.Epoch() != 1 || countLogs(logs, "the load took a reorganization deeper") != 1 {
+		t.Fatalf("epoch %d, logs %v", l.Epoch(), *logs)
+	}
+	l2, logs2 := newTestLine(&memStore{}, "", nil)
+	l2.add(asBlocks(main))
+	l2.add(asBlocks(testChain(46, main[45].hash, 6, 38))) // 4 deep
+	if l2.Epoch() != 1 || countLogs(logs2, "the load took") != 0 {
+		t.Fatalf("a shallow load reorganization reported: %v", *logs2)
+	}
+}
+
+// TestAnchorLineStuckPathReadsOncePerTip (#25 item 4): a block at the tip
+// that does not link does not make every poll read about 1,000 heights
+// below again.
+func TestAnchorLineStuckPathReadsOncePerTip(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 30, 39)
+	stray := testChain(30, [32]byte{7}, 1, 40)[0] // at the tip's height, parent unknown
+	s := &memStore{}
+	for _, b := range main {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	s.add(stray.anchor(t, pub, true, 2))
+	l, _ := newTestLine(s, pub.pubkey, nil)
+	l.Load(context.Background())
+	l.Update(context.Background())
+	s.mu.Lock()
+	before := s.queries
+	s.mu.Unlock()
+	for i := 0; i < 5; i++ {
+		l.Update(context.Background())
+	}
+	s.mu.Lock()
+	after := s.queries
+	s.mu.Unlock()
+	if after-before > 5 {
+		t.Fatalf("%d queries for five polls; the stuck path re-reads every poll", after-before)
+	}
+}
+
 // TestAnchorLineUsesOnlyItsPublisher: an anchor by anyone else is not
 // used, even from a store that returned it.
 func TestAnchorLineUsesOnlyItsPublisher(t *testing.T) {
