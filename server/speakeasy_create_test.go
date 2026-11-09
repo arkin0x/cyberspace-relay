@@ -59,7 +59,7 @@ func withCheckout(t *testing.T, r *relayUnderTest) (*memWallet, *speakeasy.Check
 	dir := t.TempDir()
 	co, err := speakeasy.NewCheckout(speakeasy.CheckoutConfig{
 		Wallet: w, Registry: r.rt.reg, OrdersPath: filepath.Join(dir, "orders.json"), LedgerPath: filepath.Join(dir, "payments.jsonl"),
-		Write: config.AtomicWriteFile, Host: "relay.example", SpeakeasySats: 1000, Expiry: 10 * time.Minute, Poll: time.Hour,
+		Write: config.AtomicWriteFile, Host: "relay.example", SpeakeasySats: 1000, NameSats: 7000, Expiry: 10 * time.Minute, Poll: time.Hour,
 		MaxPending: 8, MaxPerRequester: 3,
 	})
 	if err != nil {
@@ -67,6 +67,7 @@ func withCheckout(t *testing.T, r *relayUnderTest) (*memWallet, *speakeasy.Check
 	}
 	r.rt.checkout = co
 	r.rt.cfg.Payments.SpeakeasySats = 1000
+	r.rt.cfg.Payments.NameSats = 7000
 	t.Cleanup(func() { r.rt.checkout = nil })
 	return w, co
 }

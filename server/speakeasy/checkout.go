@@ -39,6 +39,8 @@ type Wallet interface {
 // Order kinds.
 const (
 	OrderSpeakeasy = "speakeasy"
+	// OrderName reserves a name for an existing speakeasy (step 6).
+	OrderName = "name"
 )
 
 // Order statuses.
@@ -53,6 +55,8 @@ type Order struct {
 	ID     string `json:"id"`
 	Kind   string `json:"kind"`
 	Region string `json:"region"`
+	// Name is the name a name order reserves.
+	Name string `json:"name,omitempty"`
 	// Requester is a hash of the client's address: one pending order per
 	// region and requester.
 	Requester   string `json:"requester"`
@@ -80,6 +84,12 @@ const (
 	// (two payers, or one who paid two invoices). The region is one, but
 	// this payment bought nothing: the relay owner owes a refund.
 	OutcomeAlready = "refund owed: already a speakeasy"
+	// OutcomeNamed: the name now leads to the speakeasy.
+	OutcomeNamed = "name reserved"
+	// OutcomeRefund prefixes every paid order that bought nothing (the
+	// region was a speakeasy already, the name was taken first): the
+	// relay owner owes a refund.
+	OutcomeRefund = "refund owed: "
 )
 
 // CheckoutConfig configures a Checkout.
@@ -94,6 +104,7 @@ type CheckoutConfig struct {
 	// Host names the relay in invoice descriptions (relay.onosendai.tech).
 	Host          string
 	SpeakeasySats int64
+	NameSats      int64
 	Expiry        time.Duration // an invoice's life
 	Poll          time.Duration // how often pending invoices are looked up
 	// MaxPending caps open invoices in all; MaxPerRequester caps one
@@ -118,6 +129,11 @@ var (
 	ErrAlreadySpeakeasy = errors.New("this region is already a speakeasy")
 	ErrTooManyInvoices  = errors.New("too many open invoices; try again in a few minutes")
 	ErrNotRegion        = errors.New("not a region string")
+	ErrNotSpeakeasy     = errors.New("this region is not a speakeasy yet; create it first")
+	// ErrNameHeld: someone has an open invoice for this name, or for a
+	// name for this speakeasy. Holding them keeps two payers from paying
+	// for one name.
+	ErrNameHeld = errors.New("someone has an open invoice for this name or this speakeasy; try again in a few minutes")
 )
 
 // lookupGrace is how long after its expiry an unpaid invoice is still
@@ -171,23 +187,37 @@ func Requester(addr string) string {
 	return hex.EncodeToString(sum[:12])
 }
 
-// OrderRequest is what a visitor asks for.
+// OrderRequest is what a visitor asks for. Name is for a name order.
 type OrderRequest struct {
-	Kind, Region, Requester string
+	Kind, Region, Name, Requester string
 }
 
 // Create returns the requester's open order for this region, or makes one
 // with a new invoice. region must be a region string in its canonical
 // spelling.
 func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) {
-	if req.Kind != OrderSpeakeasy {
-		return Order{}, fmt.Errorf("unknown order kind %q", req.Kind)
-	}
 	if !c.canonicalRegion(req.Region) {
 		return Order{}, ErrNotRegion
 	}
-	if c.cfg.Registry.Get(req.Region) != nil || c.paidFor(req.Region) {
-		return Order{}, ErrAlreadySpeakeasy
+	var sats int64
+	var desc string
+	switch req.Kind {
+	case OrderSpeakeasy:
+		if c.cfg.Registry.Get(req.Region) != nil || c.paidFor(req.Region) {
+			return Order{}, ErrAlreadySpeakeasy
+		}
+		req.Name = ""
+		sats, desc = c.cfg.SpeakeasySats, fmt.Sprintf("%s speakeasy %s", c.cfg.Host, req.Region)
+	case OrderName:
+		switch err := c.cfg.Registry.CanName(req.Region, req.Name); {
+		case errors.Is(err, ErrNotFound):
+			return Order{}, ErrNotSpeakeasy
+		case err != nil:
+			return Order{}, err
+		}
+		sats, desc = c.cfg.NameSats, fmt.Sprintf("%s name %s for speakeasy %s", c.cfg.Host, req.Name, req.Region)
+	default:
+		return Order{}, fmt.Errorf("unknown order kind %q", req.Kind)
 	}
 	if o, ok := c.open(req); ok {
 		return o, nil
@@ -199,11 +229,9 @@ func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) 
 	if o, ok := c.open(req); ok {
 		return o, nil
 	}
-	if err := c.room(req.Requester); err != nil {
+	if err := c.room(req); err != nil {
 		return Order{}, err
 	}
-	sats := c.cfg.SpeakeasySats
-	desc := fmt.Sprintf("%s speakeasy %s", c.cfg.Host, req.Region)
 	inv, err := c.cfg.Wallet.MakeInvoice(ctx, sats*1000, desc, c.cfg.Expiry)
 	if err != nil {
 		return Order{}, fmt.Errorf("the wallet made no invoice: %w", err)
@@ -213,7 +241,7 @@ func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) 
 	}
 	now := c.cfg.Now()
 	o := &Order{
-		ID: newID(), Kind: req.Kind, Region: req.Region, Requester: req.Requester,
+		ID: newID(), Kind: req.Kind, Region: req.Region, Name: req.Name, Requester: req.Requester,
 		AmountSats: sats, Invoice: strings.ToLower(inv.Invoice), PaymentHash: strings.ToLower(inv.PaymentHash),
 		Description: desc, CreatedAt: now.Unix(), ExpiresAt: now.Add(c.cfg.Expiry).Unix(), Status: StatusPending,
 	}
@@ -231,7 +259,7 @@ func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) 
 	if err != nil {
 		return Order{}, fmt.Errorf("could not keep the order: %w", err)
 	}
-	c.cfg.Log("speakeasy: invoice made", "order", o.ID, "kind", o.Kind, "region", o.Region, "sats", sats, "payment_hash", o.PaymentHash)
+	c.cfg.Log("speakeasy: invoice made", "order", o.ID, "kind", o.Kind, "region", o.Region, "name", o.Name, "sats", sats, "payment_hash", o.PaymentHash)
 	return out, nil
 }
 
@@ -242,7 +270,7 @@ func (c *Checkout) open(req OrderRequest) (Order, bool) {
 	defer c.mu.Unlock()
 	soon := c.cfg.Now().Add(time.Minute).Unix()
 	for _, o := range c.orders {
-		if o.Status == StatusPending && o.Kind == req.Kind && o.Region == req.Region && o.Requester == req.Requester && o.ExpiresAt > soon {
+		if o.Status == StatusPending && o.Kind == req.Kind && o.Region == req.Region && o.Name == req.Name && o.Requester == req.Requester && o.ExpiresAt > soon {
 			return *o, true
 		}
 	}
@@ -262,17 +290,24 @@ func (c *Checkout) paidFor(region string) bool {
 	return false
 }
 
-// room says whether one more pending order fits.
-func (c *Checkout) room(requester string) error {
+// room says whether one more pending order fits, and for a name order
+// that no other open or paid-but-unapplied name order holds the name or
+// the speakeasy.
+func (c *Checkout) room(req OrderRequest) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	all, mine := 0, 0
 	for _, o := range c.orders {
-		if o.Status == StatusPending {
-			all++
-			if o.Requester == requester {
-				mine++
-			}
+		applying := o.Status == StatusPaid && !o.Applied
+		if req.Kind == OrderName && o.Kind == OrderName && (o.Status == StatusPending || applying) && (o.Name == req.Name || o.Region == req.Region) {
+			return ErrNameHeld
+		}
+		if o.Status != StatusPending {
+			continue
+		}
+		all++
+		if o.Requester == req.Requester {
+			mine++
 		}
 	}
 	if all >= c.cfg.MaxPending || mine >= c.cfg.MaxPerRequester {
@@ -404,22 +439,14 @@ func (c *Checkout) apply(id string) {
 	if !ok || o.Status != StatusPaid || o.Applied {
 		return
 	}
-	outcome := OutcomeRegistered
-	_, err := c.cfg.Registry.Add(Entry{
-		ID: o.Region, CreatedAt: o.SettledAt,
-		Note: fmt.Sprintf("paid %d sats, payment hash %s", o.AmountSats, o.PaymentHash),
-	})
-	switch {
-	case err == nil:
-	case c.cfg.Registry.Get(o.Region) != nil:
-		outcome = OutcomeAlready
-	default:
-		c.cfg.Alert("speakeasy: paid but the registry write failed; retrying", "order", o.ID, "region", o.Region, "error", err.Error())
+	outcome, retry := c.applyTo(o)
+	if retry != nil {
+		c.cfg.Alert("speakeasy: paid but the registry write failed; retrying", "order", o.ID, "region", o.Region, "error", retry.Error())
 		return
 	}
-	if outcome == OutcomeAlready {
-		c.cfg.Alert("speakeasy: paid for a region that is already a speakeasy; a refund is owed", "order", o.ID, "region", o.Region,
-			"sats", o.AmountSats, "payment_hash", o.PaymentHash)
+	if strings.HasPrefix(outcome, OutcomeRefund) {
+		c.cfg.Alert("speakeasy: paid but bought nothing; a refund is owed", "order", o.ID, "region", o.Region, "name", o.Name,
+			"sats", o.AmountSats, "payment_hash", o.PaymentHash, "outcome", outcome)
 	}
 	// The ledger first: after a crash in between, a line twice is better
 	// than none.
@@ -427,6 +454,42 @@ func (c *Checkout) apply(id string) {
 	c.ledger(o)
 	c.update(id, func(x *Order) { x.Applied, x.Outcome = true, outcome })
 	c.cfg.Log("speakeasy: order applied", "order", o.ID, "region", o.Region, "outcome", outcome)
+}
+
+// applyTo writes a paid order into the registry and says how it ended, or
+// returns an error worth retrying (the registry could not be written).
+func (c *Checkout) applyTo(o Order) (string, error) {
+	reg := c.cfg.Registry
+	switch o.Kind {
+	case OrderName:
+		// Already done (a stop between the write and marking the order
+		// applied): the speakeasy has exactly this name.
+		if sp := reg.Get(o.Region); sp != nil && len(sp.Names) == 1 && sp.Names[0] == o.Name {
+			return OutcomeNamed, nil
+		}
+		err := reg.SetName(o.Region, o.Name)
+		switch {
+		case err == nil:
+			return OutcomeNamed, nil
+		case errors.Is(err, ErrNotFound), errors.Is(err, ErrHasName), errors.Is(err, ErrNameTaken):
+			return OutcomeRefund + err.Error(), nil
+		case reg.CanName(o.Region, o.Name) != nil:
+			return OutcomeRefund + err.Error(), nil
+		}
+		return "", err
+	default:
+		_, err := reg.Add(Entry{
+			ID: o.Region, CreatedAt: o.SettledAt,
+			Note: fmt.Sprintf("paid %d sats, payment hash %s", o.AmountSats, o.PaymentHash),
+		})
+		switch {
+		case err == nil:
+			return OutcomeRegistered, nil
+		case reg.Get(o.Region) != nil:
+			return OutcomeAlready, nil
+		}
+		return "", err
+	}
 }
 
 // ledger appends a paid order to the ledger, the record that outlives the

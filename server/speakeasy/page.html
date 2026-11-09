@@ -1,4 +1,10 @@
-<!DOCTYPE html>
+{{define "invoice"}}<p class="err" id="pay-error" role="alert"></p>
+      <div id="invoice" hidden>
+        <div class="qr" id="qr"></div>
+        <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
+        <p><a class="button" id="open-wallet" href="#">Open in wallet</a></p>
+        <p id="pay-status" role="status">Waiting for payment</p>
+      </div>{{end}}<!DOCTYPE html>
 <html lang="en" data-theme="">
 <head>
 <meta charset="UTF-8">
@@ -54,6 +60,11 @@
   .qr { width: min(18rem, 100%); margin: 0.5rem 0 1rem; }
   .qr svg { width: 100%; height: auto; border-radius: 0.4rem; }
   #bolt11 { max-height: 4.5rem; overflow: auto; display: block; }
+  input[type=text] {
+    background: var(--color-surface-inset-strong, rgb(0 0 0 / 0.35)); color: inherit;
+    border: 1px solid var(--color-border, #2c3226); border-radius: 0.4rem; padding: 0.45rem 0.6rem;
+    font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace); min-width: 0; flex: 1 1 12rem;
+  }
 </style>
 </head>
 <body>
@@ -79,28 +90,35 @@
     <dl>
       <dt>Status</dt><dd class="yes">Open</dd>
       {{if .Name}}<dt>Name</dt><dd><code>{{.Name}}</code></dd>{{end}}
-      <dt>Relay</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>
+      {{if .NameURL}}<dt>Relay</dt><dd><div class="addr"><code id="name-url">{{.NameURL}}</code><button type="button" class="quiet" data-copy="name-url">Copy</button></div></dd>
+      <dt>Also at</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>
+      {{else}}<dt>Relay</dt><dd><div class="addr"><code id="relay-url">{{.URL}}</code><button type="button" class="quiet" data-copy="relay-url">Copy</button></div></dd>{{end}}
       <dt>Since</dt><dd>{{.Since}}</dd>
     </dl>
+    {{with .Reserve}}
+    <div class="create" id="pay-box" data-endpoint="{{.Endpoint}}" data-region="{{$.Region}}">
+      <ul class="facts">
+        <li>A name gives this speakeasy a short address: relay.onosendai.tech/your-name.</li>
+        <li>3 to 40 lowercase letters, digits and dashes. First paid wins.</li>
+        <li>One name per speakeasy, bound to this region for life.</li>
+      </ul>
+      <div class="addr"><input id="pay-name" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="40" pattern="[a-z0-9-]{3,40}" placeholder="your-name" aria-label="Name"><button type="button" id="pay">Reserve for {{.Price}} sats</button></div>
+      {{template "invoice"}}
+    </div>
+    {{end}}
     {{else}}
     <dl>
       <dt>Status</dt><dd class="no">Not a speakeasy</dd>
     </dl>
     {{with .Create}}
-    <div class="create" id="create-box" data-endpoint="{{.Endpoint}}" data-region="{{$.Region}}">
+    <div class="create" id="pay-box" data-endpoint="{{.Endpoint}}" data-region="{{$.Region}}">
       <ul class="facts">
         <li>A speakeasy is a private relay for this region.</li>
         <li>Only chains whose head is inside can read or write.</li>
         <li>One payment, kept forever.</li>
       </ul>
-      <button type="button" id="create">Create speakeasy for {{.Price}} sats</button>
-      <p class="err" id="create-error" role="alert"></p>
-      <div id="invoice" hidden>
-        <div class="qr" id="qr"></div>
-        <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
-        <p><a class="button" id="open-wallet" href="#">Open in wallet</a></p>
-        <p id="pay-status" role="status">Waiting for payment</p>
-      </div>
+      <button type="button" id="pay">Create speakeasy for {{.Price}} sats</button>
+      {{template "invoice"}}
     </div>
     {{end}}
     {{end}}
@@ -130,14 +148,15 @@
     });
   });
 </script>
-{{if .Create}}
+{{if or .Create .Reserve}}
 <script>
   (function () {
-    var box = document.getElementById("create-box");
-    var btn = document.getElementById("create");
+    var box = document.getElementById("pay-box");
+    var btn = document.getElementById("pay");
+    var nameIn = document.getElementById("pay-name");
     var endpoint = box.getAttribute("data-endpoint");
     var region = box.getAttribute("data-region");
-    var errEl = document.getElementById("create-error");
+    var errEl = document.getElementById("pay-error");
     var inv = document.getElementById("invoice");
     var status = document.getElementById("pay-status");
     function show(o) {
@@ -145,46 +164,52 @@
       document.getElementById("bolt11").textContent = o.invoice;
       document.getElementById("open-wallet").href = "lightning:" + o.invoice;
       inv.hidden = false;
-      btn.hidden = true;
+      btn.disabled = true;
+      if (nameIn) nameIn.disabled = true;
+    }
+    function reset(msg) {
+      status.textContent = "";
+      errEl.textContent = msg;
+      inv.hidden = true;
+      btn.disabled = false;
+      if (nameIn) nameIn.disabled = false;
     }
     function poll(id) {
       fetch(endpoint + "/" + encodeURIComponent(id), { cache: "no-store" })
         .then(function (r) { return r.json(); })
         .then(function (o) {
           if (o.applied && o.url) {
-            status.textContent = "Paid. This region is now a speakeasy.";
-            setTimeout(function () { location.reload(); }, 1500);
+            status.textContent = o.kind === "name" ? "Paid. The name is yours." : "Paid. This region is now a speakeasy.";
+            setTimeout(function () { location.href = o.kind === "name" ? "/" + o.name : location.pathname; }, 1500);
             return;
           }
           if (o.applied) {
             status.textContent = "Paid, but not applied: " + o.outcome + ". Contact the relay owner.";
             return;
           }
-          if (o.status === "paid") status.textContent = "Paid. Opening the speakeasy.";
-          if (o.status === "expired") {
-            status.textContent = "";
-            errEl.textContent = "That invoice expired.";
-            inv.hidden = true;
-            btn.hidden = false;
-            return;
-          }
+          if (o.status === "paid") status.textContent = "Paid. Applying it.";
+          if (o.status === "expired") { reset("That invoice expired."); return; }
           setTimeout(function () { poll(id); }, 3000);
         })
         .catch(function () { setTimeout(function () { poll(id); }, 6000); });
     }
     btn.addEventListener("click", function () {
+      var body = { region: region };
+      if (nameIn) {
+        body.name = nameIn.value.trim().toLowerCase();
+        if (!/^[a-z0-9-]{3,40}$/.test(body.name)) { errEl.textContent = "3 to 40 lowercase letters, digits and dashes."; return; }
+      }
       btn.disabled = true;
       errEl.textContent = "";
-      fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ region: region }) })
+      fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
         .then(function (r) { return r.json().then(function (o) { return { ok: r.ok, o: o }; }); })
         .then(function (x) {
-          btn.disabled = false;
-          if (!x.ok) { errEl.textContent = x.o.error || "Something went wrong. Try again."; return; }
+          if (!x.ok) { reset(x.o.error || "Something went wrong. Try again."); return; }
           show(x.o);
           status.textContent = "Waiting for payment";
           poll(x.o.id);
         })
-        .catch(function () { btn.disabled = false; errEl.textContent = "Something went wrong. Try again."; });
+        .catch(function () { reset("Something went wrong. Try again."); });
     });
   })();
 </script>

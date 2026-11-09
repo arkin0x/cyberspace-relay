@@ -166,6 +166,20 @@ Off by default. On only with `payments: {enabled: true, nwc_file: <path>}` in `s
 3. Add `payments: {enabled: true, nwc_file: /run/secrets/speakeasy-nwc}` to `speakeasies.yml`, restart, and look for `Speakeasy payments on` in the log.
 4. Pay one speakeasy for real, then check the registry entry, `payments.jsonl`, and that the path answers as a speakeasy.
 
+## Named speakeasies (step 6, 2026-11-09)
+
+**Reading of the design:** "if you pay 7000 sats, you can reserve a name for your speakeasy" and section 3's "one name per speakeasy" mean a name is bought for a region that is **already a speakeasy**, separately from creating it (1,000 sats, then 7,000 sats for a name; 8,000 in all for a named one). Buying both in one invoice was not built.
+
+| Rule | How |
+|---|---|
+| Offer | The page of a speakeasy without a name shows a name field and "Reserve for 7,000 sats" (same invoice, QR and polling as step 5). |
+| Request | `POST /api/speakeasies/orders` `{"region": "<region>", "name": "<name>"}`; description `relay.onosendai.tech name <name> for speakeasy <region>`. 400 for a bad name or a region that is not a speakeasy; 409 for a taken name, a speakeasy that has one, or a held name. |
+| Names (D3) | 3 to 40 of `a-z0-9-`; not reserved; never a string that reads as a region (`cafe`, `0xabc`); one per speakeasy; first paid wins; bound to its region for life (kept in the registry's `bound_names`, also if the speakeasy is removed, so the name can never lead to another region). |
+| Holds | While one invoice for a name is open, nobody gets another for that name, nor for another name for that speakeasy (409, "try again in a few minutes"), so two payers never pay for one name. A hold lasts while the invoice is open (10 minutes, plus up to 2 minutes of lookups), and while a paid name is still being applied. |
+| Applying | Once paid, the name leads to the speakeasy. If it was taken first another way (the relay owner through NIP-86), the outcome is `refund owed: ...`, logged at error level and in `payments.jsonl`: the owner refunds by hand. |
+| Routing | `/<name>` routes as the hex path does, to the same speakeasy. NIP-11 there is named by the name; AUTH on a connection to the name names the name's URL (#19's rule, per path). Discovery gives the name in `name`; `url` stays the hex address. |
+| Price | `payments.name_sats`, default 7,000 (owner ruling 2026-11-09). |
+
 ## Later: a region picker (owner, 2026-11-04)
 
 An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.

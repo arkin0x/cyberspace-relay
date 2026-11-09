@@ -70,6 +70,9 @@ type PaymentsConfig struct {
 	// SpeakeasySats is the price of a speakeasy (owner ruling 2026-11-09:
 	// 1,000).
 	SpeakeasySats int64 `yaml:"speakeasy_sats"`
+	// NameSats is the price of a name for a speakeasy (owner ruling
+	// 2026-11-09: 7,000).
+	NameSats int64 `yaml:"name_sats"`
 	// InvoiceExpirySeconds is an invoice's life. Default 600.
 	InvoiceExpirySeconds int `yaml:"invoice_expiry_seconds"`
 	// PollSeconds is how often open invoices are looked up. Default 5.
@@ -83,7 +86,10 @@ type PaymentsConfig struct {
 }
 
 // Default prices (owner ruling 2026-11-09).
-const DefaultSpeakeasySats = 1000
+const (
+	DefaultSpeakeasySats = 1000
+	DefaultNameSats      = 7000
+)
 
 // IngestThreads is how many ingest threads each speakeasy database runs
 // (ruling D1).
@@ -120,11 +126,14 @@ func ParseConfig(data []byte) (*Config, error) {
 		c.MaxConnectionsPerPath = 200
 	}
 	p := &c.Payments
-	if p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 {
+	if p.NameSats < 0 || p.SpeakeasySats < 0 || p.InvoiceExpirySeconds < 0 || p.PollSeconds < 0 || p.MaxPendingInvoices < 0 || p.MaxPendingPerRequester < 0 {
 		return nil, fmt.Errorf("%s: payments values must not be negative", ConfigFile)
 	}
 	if p.SpeakeasySats == 0 {
 		p.SpeakeasySats = DefaultSpeakeasySats
+	}
+	if p.NameSats == 0 {
+		p.NameSats = DefaultNameSats
 	}
 	if p.InvoiceExpirySeconds == 0 {
 		p.InvoiceExpirySeconds = 600

@@ -36,13 +36,16 @@ type Page struct {
 	// any) and Since describe it when it is.
 	Speakeasy        bool
 	URL, Name, Since string
+	// NameURL is the speakeasy's address at its name, once it has one.
+	NameURL string
 	// Create, when set, offers Create Speakeasy (step 5): payments are on
-	// and the region is not one yet.
-	Create *PageCreate
+	// and the region is not one yet. Reserve offers a name (step 6): the
+	// region is a speakeasy without one.
+	Create, Reserve *PageCreate
 }
 
-// PageCreate is the Create Speakeasy offer: its price and the endpoint the
-// button asks for an invoice.
+// PageCreate is an offer (Create Speakeasy, or a name): its price and the
+// endpoint the button asks for an invoice.
 type PageCreate struct {
 	Sats     int64
 	Endpoint string

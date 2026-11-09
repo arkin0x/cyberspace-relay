@@ -155,9 +155,16 @@ once, so `/%2530a` (a double encoding) is not region `0a`, while `/0A`,
 region string in its canonical spelling, and an entry's region is the one its
 id names. An entry that fails its checks at load is left out and logged; its
 path is then not a relay.
-Names (step 6) are refused for now; `speakeasy.CheckName` is the rule they
-will pass (ruling D3: 3 to 40 of `a-z0-9-`, not reserved, and never a string
-the region parser reads as a region, such as `cafe` or `0xabc`).
+**Names (step 6, `docs/speakeasies.md`).** A speakeasy may have one name,
+which passes `speakeasy.CheckName` (ruling D3: 3 to 40 of `a-z0-9-`, not
+reserved, and never a string the region parser reads as a region, such as
+`cafe` or `0xabc`) and stays bound to its region for life (`bound_names` in
+the registry, kept when the speakeasy is removed). `/<name>` is matched
+exactly as spelled and routes as the hex path does, to the same speakeasy
+(one database, one set of live events, one connection cap), but it is its
+own URL: a connection to `/<name>` must AUTH naming `public_url/<name>`,
+and one to the hex path naming the hex URL, since a client signs AUTH for
+the URL it connected to. NIP-11 at the name is named by the name.
 
 | Limit | Default |
 |---|---|

@@ -247,7 +247,7 @@ func startCheckout(sc *speakeasy.Config, reg *speakeasy.Registry, dir, public st
 	co, err := speakeasy.NewCheckout(speakeasy.CheckoutConfig{
 		Wallet: wallet, Registry: reg,
 		OrdersPath: filepath.Join(dir, "orders.json"), LedgerPath: filepath.Join(dir, "payments.jsonl"),
-		Write: config.AtomicWriteFile, Host: host, SpeakeasySats: p.SpeakeasySats,
+		Write: config.AtomicWriteFile, Host: host, SpeakeasySats: p.SpeakeasySats, NameSats: p.NameSats,
 		Expiry:     time.Duration(p.InvoiceExpirySeconds) * time.Second,
 		Poll:       time.Duration(p.PollSeconds) * time.Second,
 		MaxPending: p.MaxPendingInvoices, MaxPerRequester: p.MaxPendingPerRequester,
@@ -258,7 +258,7 @@ func startCheckout(sc *speakeasy.Config, reg *speakeasy.Registry, dir, public st
 		log.RegionGate().Error("Speakeasy payments off: the orders file is unreadable", "error", err)
 		return nil
 	}
-	log.RegionGate().Info("Speakeasy payments on", "wallet", wallet.Describe(), "speakeasy_sats", p.SpeakeasySats,
+	log.RegionGate().Info("Speakeasy payments on", "wallet", wallet.Describe(), "speakeasy_sats", p.SpeakeasySats, "name_sats", p.NameSats,
 		"invoice_expiry_seconds", p.InvoiceExpirySeconds)
 	return co
 }
@@ -321,9 +321,9 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 			}
 			http.Redirect(w, r, canonical, http.StatusMovedPermanently)
 		case ws:
-			rt.serveWS(w, r, sp)
+			rt.serveWS(w, r, sp, canonical[1:])
 		default:
-			rt.serveInfo(w, r, sp)
+			rt.serveInfo(w, r, sp, canonical[1:])
 		}
 	})
 }
@@ -332,13 +332,14 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 // NIP-11 names it, and its AUTH events must name it.
 func (rt *speakeasyRuntime) url(id string) string { return rt.publicURL + "/" + id }
 
-func (rt *speakeasyRuntime) serveWS(w http.ResponseWriter, r *http.Request, sp *speakeasy.Speakeasy) {
+// serveWS serves a websocket to speakeasy sp at path (its id or its name).
+func (rt *speakeasyRuntime) serveWS(w http.ResponseWriter, r *http.Request, sp *speakeasy.Speakeasy, path string) {
 	if cfg := config.GetConfig(); cfg != nil {
 		if !EnforceConnectionRateLimit(w, r, cfg.Server.ConnectionRateLimitPerIP) {
 			return
 		}
 	}
-	scope := rt.scope(sp)
+	scope := rt.scope(sp, path)
 	srv := websocket.Server{
 		Handshake: func(*websocket.Config, *http.Request) error { return nil },
 		Handler: func(ws *websocket.Conn) {
@@ -373,11 +374,15 @@ func (rt *speakeasyRuntime) dropConn(id string) {
 	}
 }
 
-// scope is what a connection to speakeasy sp is served with.
-func (rt *speakeasyRuntime) scope(sp *speakeasy.Speakeasy) *handlers.Scope {
+// scope is what a connection to speakeasy sp at path (its id or its name)
+// is served with. Connections to every path of one speakeasy share its id
+// (its database, its live events, its connection cap); each path has its
+// own URL, which that connection's AUTH must name, as a client signs AUTH
+// for the URL it connected to.
+func (rt *speakeasyRuntime) scope(sp *speakeasy.Speakeasy, path string) *handlers.Scope {
 	id, in := sp.ID, sp.Regions
 	return &handlers.Scope{
-		ID: id, Path: id, RelayURL: rt.url(id),
+		ID: id, Path: path, RelayURL: rt.url(path),
 		Acquire: func() (*nostrdb.NDB, func(), error) {
 			// A speakeasy taken out of the registry stops serving at once,
 			// open connections included.
@@ -484,11 +489,15 @@ func (rt *speakeasyRuntime) ownDeletion(id string, evt nostr.Event) string {
 	return ""
 }
 
-// serveInfo is the speakeasy's NIP-11 document: the relay's own, renamed,
-// with AUTH required and writes restricted.
-func (rt *speakeasyRuntime) serveInfo(w http.ResponseWriter, r *http.Request, sp *speakeasy.Speakeasy) {
+// serveInfo is the speakeasy's NIP-11 document at path: the relay's own,
+// renamed, with AUTH required and writes restricted. At its name's path it
+// is named by its name.
+func (rt *speakeasyRuntime) serveInfo(w http.ResponseWriter, r *http.Request, sp *speakeasy.Speakeasy, path string) {
 	utils.RelayInfoHandlerFor(w, r, func(md *utils.RelayMetadata) {
 		md.Name = sp.Name
+		if md.Name == "" && path != sp.ID {
+			md.Name = path
+		}
 		if md.Name == "" {
 			md.Name = "Speakeasy " + sp.ID
 		}

@@ -106,7 +106,7 @@ func (r *checkoutRig) open() {
 	co, err := NewCheckout(CheckoutConfig{
 		Wallet: r.wallet, Registry: r.reg,
 		OrdersPath: filepath.Join(r.dir, "orders.json"), LedgerPath: filepath.Join(r.dir, "payments.jsonl"),
-		Write: os.WriteFile, Host: "relay.example", SpeakeasySats: DefaultSpeakeasySats,
+		Write: os.WriteFile, Host: "relay.example", SpeakeasySats: DefaultSpeakeasySats, NameSats: DefaultNameSats,
 		Expiry: 10 * time.Minute, Poll: time.Hour, MaxPending: 5, MaxPerRequester: 3,
 		Now:   func() time.Time { return r.now },
 		Alert: func(msg string, args ...any) { r.alerts = append(r.alerts, msg) },
@@ -425,7 +425,122 @@ func TestExampleConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Payments.Enabled || c.Payments.SpeakeasySats != 1000 || c.Payments.NWCFile != "" {
+	if c.Payments.Enabled || c.Payments.SpeakeasySats != 1000 || c.Payments.NameSats != 7000 || c.Payments.NWCFile != "" {
 		t.Fatalf("payments %+v", c.Payments)
+	}
+}
+
+func (r *checkoutRig) name(region, name, who string) (Order, error) {
+	return r.co.Create(context.Background(), OrderRequest{Kind: OrderName, Region: region, Name: name, Requester: Requester(who)})
+}
+
+// TestCheckoutReservesAName (step 6): 7,000 sats for a name for an existing
+// speakeasy, marked with the name and the region; once paid, the name leads
+// there.
+func TestCheckoutReservesAName(t *testing.T) {
+	r := newCheckoutRig(t)
+	if _, err := r.name("abc", "cafe-du-monde", "1.1.1.1"); !errors.Is(err, ErrNotSpeakeasy) {
+		t.Fatalf("a name for a region that is not a speakeasy: %v", err)
+	}
+	r.reg.Add(Entry{ID: "abc", CreatedAt: 1})
+	for _, bad := range []string{"cafe", "admin", "Cafe-du-monde", "ab"} {
+		if _, err := r.name("abc", bad, "1.1.1.1"); !errors.Is(err, ErrBadName) {
+			t.Errorf("name %q: %v", bad, err)
+		}
+	}
+	o, err := r.name("abc", "cafe-du-monde", "1.1.1.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.AmountSats != 7000 || o.Kind != OrderName || o.Name != "cafe-du-monde" || o.Description != "relay.example name cafe-du-monde for speakeasy abc" {
+		t.Fatalf("order %+v", o)
+	}
+	if again, _ := r.name("abc", "cafe-du-monde", "1.1.1.1"); again.ID != o.ID {
+		t.Fatal("asking again made another invoice")
+	}
+	r.wallet.pay(o.PaymentHash)
+	r.co.Poll(context.Background())
+	got, _ := r.co.Get(o.ID)
+	if sp, _ := r.reg.Lookup("/cafe-du-monde"); got.Outcome != OutcomeNamed || sp == nil || sp.ID != "abc" {
+		t.Fatalf("after paying: %+v", got)
+	}
+	if _, err := r.name("abc", "other-name", "1.1.1.1"); !errors.Is(err, ErrHasName) {
+		t.Fatalf("a second name: %v", err)
+	}
+	if l := r.ledger(); len(l) != 1 || l[0].Name != "cafe-du-monde" {
+		t.Fatalf("ledger %+v", l)
+	}
+}
+
+// TestCheckoutHoldsANameWhileItsInvoiceIsOpen: while one requester's
+// invoice for a name is open, nobody else gets one for that name, nor for
+// another name for the same speakeasy, so two payers never pay for one.
+func TestCheckoutHoldsANameWhileItsInvoiceIsOpen(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.reg.Add(Entry{ID: "abc", CreatedAt: 1})
+	r.reg.Add(Entry{ID: "abd", CreatedAt: 1})
+	first, err := r.name("abc", "cafe-du-monde", "1.1.1.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ region, name, who string }{
+		{"abd", "cafe-du-monde", "2.2.2.2"},
+		{"abc", "other-name", "2.2.2.2"},
+		{"abc", "other-name", "1.1.1.1"},
+	} {
+		if _, err := r.name(c.region, c.name, c.who); !errors.Is(err, ErrNameHeld) {
+			t.Errorf("%+v: %v, want ErrNameHeld", c, err)
+		}
+	}
+	if _, err := r.name("abd", "free-name", "2.2.2.2"); err != nil {
+		t.Fatalf("an unrelated name: %v", err)
+	}
+	// Once the first expires, the name is free again.
+	r.now = r.now.Add(10*time.Minute + lookupGrace + time.Second)
+	r.co.Poll(context.Background())
+	if got, _ := r.co.Get(first.ID); got.Status != StatusExpired {
+		t.Fatalf("%+v", got)
+	}
+	held, err := r.name("abc", "cafe-du-monde", "2.2.2.2")
+	if err != nil {
+		t.Fatalf("after expiry: %v", err)
+	}
+	// Paid but not written yet (the registry write is retried): still held.
+	r.wallet.pay(held.PaymentHash)
+	r.failSave = true
+	r.co.Poll(context.Background())
+	if _, err := r.name("abd", "cafe-du-monde", "3.3.3.3"); !errors.Is(err, ErrNameHeld) {
+		t.Fatalf("a name being applied was offered again: %v", err)
+	}
+	r.failSave = false
+	r.co.Poll(context.Background())
+	if sp, _ := r.reg.Lookup("/cafe-du-monde"); sp == nil || sp.ID != "abc" {
+		t.Fatal("the held name was not applied on the retry")
+	}
+}
+
+// TestCheckoutNameTakenFirst: a paid name order whose speakeasy got a name
+// another way first (the relay owner) cannot be applied: the outcome says a
+// refund is owed and the owner is alerted. A stop after the registry write
+// but before the order was marked applied does not read as a refund.
+func TestCheckoutNameTakenFirst(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.reg.Add(Entry{ID: "abc", CreatedAt: 1})
+	r.reg.Add(Entry{ID: "abd", CreatedAt: 1})
+	o, _ := r.name("abc", "cafe-du-monde", "1.1.1.1")
+	r.wallet.pay(o.PaymentHash)
+	r.reg.SetName("abc", "owners-choice")
+	r.co.Poll(context.Background())
+	got, _ := r.co.Get(o.ID)
+	if !got.Applied || !strings.HasPrefix(got.Outcome, OutcomeRefund) || len(r.alerts) != 1 || len(r.ledger()) != 1 {
+		t.Fatalf("%+v, alerts %v", got, r.alerts)
+	}
+
+	o2, _ := r.name("abd", "second-cafe", "1.1.1.1")
+	r.wallet.pay(o2.PaymentHash)
+	r.reg.SetName("abd", "second-cafe") // as if applied just before a stop
+	r.co.Poll(context.Background())
+	if got, _ := r.co.Get(o2.ID); got.Outcome != OutcomeNamed || len(r.alerts) != 1 {
+		t.Fatalf("re-applied after a stop: %+v, alerts %v", got, r.alerts)
 	}
 }
