@@ -45,8 +45,8 @@ largest entries out as kind 33335 events and names them by address, and the
 writer must not publish the bag until a relay has taken each one. Without it,
 every write to a full bag fails here. A sealed entry is at most one event, so
 `max_event_size` (512 KB) already covers it; a lock change of a room with N
-sealed entries sends about 3N addressable events (seal, emptied, deletion),
-which ONOSENDAI paces under the addressable rate limit.
+sealed entries sends about 2N addressable events (seal, emptied) plus N
+kind 5 deletions, which ONOSENDAI paces under the relay's rate limits.
 
 ## Rate limits
 
