@@ -334,8 +334,10 @@ func (rt *speakeasyRuntime) url(id string) string { return rt.publicURL + "/" + 
 
 // serveWS serves a websocket to speakeasy sp at path (its id or its name).
 func (rt *speakeasyRuntime) serveWS(w http.ResponseWriter, r *http.Request, sp *speakeasy.Speakeasy, path string) {
+	// Its own per-IP budget, apart from the root's and never escalated
+	// to a ban (see CheckSpeakeasyConnectionRate).
 	if cfg := config.GetConfig(); cfg != nil {
-		if !EnforceConnectionRateLimit(w, r, cfg.Server.ConnectionRateLimitPerIP) {
+		if !EnforceSpeakeasyConnectionRateLimit(w, r, sp.ID, cfg.Server.ConnectionRateLimitPerIP) {
 			return
 		}
 	}

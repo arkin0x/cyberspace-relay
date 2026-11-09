@@ -172,6 +172,7 @@ the URL it connected to. NIP-11 at the name is named by the name.
 | `idle_close_seconds` | 300 |
 | `map_size_mb` | 4096 |
 | `max_connections_per_path` (all of one speakeasy's paths; `server.max_connections` still caps the relay) | 200 |
+| `server.connection_rate_limit_per_ip` at a speakeasy: its own budget per (IP, speakeasy), apart from the root's, so a player inside nested speakeasies who redials them all on a resume spends one attempt from each; a 429 there is counted but never escalated to an IP ban (a banned IP is still refused, 403). Attempts that pass also share one bucket per IP for all speakeasies at 4 times the limit, which does escalate, so many speakeasies do not multiply one IP's rate unchecked | the same number as the root's; shared: 4 times it |
 
 Measured on a local build (the onosendai profile, `max_open_databases: 4`,
 `idle_close_seconds: 5`, `map_size_mb: 4096`): with 100 speakeasies

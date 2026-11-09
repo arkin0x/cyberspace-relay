@@ -58,9 +58,18 @@ func CheckIPConnectionRate(ip string, limitPerMinute int) bool {
 		// The max-conn cap and per-client rate limiter still apply.
 		return true
 	}
+	if takeAttempt(ip, limitPerMinute) {
+		return true
+	}
+	RecordIPViolation(ip)
+	return false
+}
 
+// takeAttempt consumes one attempt from the bucket named key and reports
+// whether it was within limitPerMinute.
+func takeAttempt(key string, limitPerMinute int) bool {
 	now := time.Now()
-	v, _ := ipBuckets.LoadOrStore(ip, &ipBucket{windowStart: now})
+	v, _ := ipBuckets.LoadOrStore(key, &ipBucket{windowStart: now})
 	b := v.(*ipBucket)
 
 	b.mu.Lock()
@@ -72,11 +81,64 @@ func CheckIPConnectionRate(ip string, limitPerMinute int) bool {
 	}
 	b.lastSeen = now
 	b.count++
-	if b.count > limitPerMinute {
+	return b.count <= limitPerMinute
+}
+
+// CheckSpeakeasyConnectionRate is CheckIPConnectionRate for a websocket to
+// one speakeasy (server/speakeasies.go). Each (IP, speakeasy) pair has its
+// own bucket at the same limit, apart from the root's, and a rejection is
+// counted for the per-minute summary but never fed to the IP ban
+// escalation (RecordIPViolation).
+//
+// Why: a player inside several nested speakeasies holds a socket to each
+// and to the root, and a phone that resumes redials them all at once. In
+// one shared bucket, N speakeasies spend N+1 attempts per resume, and a
+// client that retries on 429 piles up violations, which with
+// ip_rate_violation_threshold set become a temporary ban from the whole
+// relay, then a permanent one. The root's bucket and its escalation are
+// unchanged; a speakeasy path stays capped per IP (and by
+// max_connections_per_path), and a blocked IP is still refused there.
+//
+// So that many speakeasies do not multiply one IP's rate unchecked, the
+// attempts that pass their own buckets also share one bucket per IP at
+// speakeasyBudgetFactor times the limit, and that one does escalate: a
+// player in 3 nested speakeasies would need 40 resumes a minute to reach
+// it, while one IP opening sockets to many speakeasies reaches it soon.
+func CheckSpeakeasyConnectionRate(ip, speakeasyID string, limitPerMinute int) bool {
+	if limitPerMinute <= 0 || ip == "" {
+		return true
+	}
+	if !takeAttempt(ip+"\x00speakeasy:"+speakeasyID, limitPerMinute) {
+		RecordRejection("rate_limit", ip)
+		return false
+	}
+	if !takeAttempt(ip+"\x00speakeasies", speakeasyBudgetFactor*limitPerMinute) {
 		RecordIPViolation(ip)
 		return false
 	}
 	return true
+}
+
+// speakeasyBudgetFactor sizes the per-IP bucket all speakeasies share, as
+// a multiple of connection_rate_limit_per_ip.
+const speakeasyBudgetFactor = 4
+
+// EnforceSpeakeasyConnectionRateLimit is EnforceConnectionRateLimit for a
+// websocket to speakeasy speakeasyID: the IP block list (403), then the
+// speakeasy's own per-IP bucket (429), with no escalation.
+func EnforceSpeakeasyConnectionRateLimit(w http.ResponseWriter, r *http.Request, speakeasyID string, limitPerMinute int) bool {
+	ip := utils.GetClientIP(r)
+	if blocked, _ := config.IsIPBlocked(ip); blocked {
+		RecordRejection("blocked", ip)
+		w.WriteHeader(http.StatusForbidden)
+		return false
+	}
+	if CheckSpeakeasyConnectionRate(ip, speakeasyID, limitPerMinute) {
+		return true
+	}
+	w.Header().Set("Retry-After", "60")
+	w.WriteHeader(http.StatusTooManyRequests)
+	return false
 }
 
 // startBucketCleanup runs in the background, evicting per-IP buckets idle
