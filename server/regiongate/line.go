@@ -36,6 +36,14 @@ import (
 // line are not used (Gate.rules). The publisher anchors a block only once it
 // has six confirmations, so this should not happen.
 //
+// Once loaded, the line accepts a reorganization only if it displaces at
+// most MaxReorgDepth blocks (owner ruling 2026-11-09: 6). Since anchors
+// come at six confirmations, a deeper one would mean a mainnet
+// reorganization more than a dozen blocks deep, which has not happened
+// since 2013, so it is far more likely a leaked publisher key rewriting
+// history: the line keeps its chain, reports it through Alert once per
+// rival tip, and needs the operator.
+//
 // A height no anchor covers, between two that do, can be filled from block
 // headers fetched from a public source (Fallback): each header is fetched by
 // the hash the anchor above names as previous and must hash to it, so the
@@ -55,6 +63,9 @@ type AnchorLine struct {
 
 	update sync.Mutex // one Load or Update at a time
 	gapLog uint64     // the gap last logged, so each is logged once
+	// refused holds the deep rivals already reported (fork height and
+	// rival tip), so each is reported once, not at every poll.
+	refused map[[2]uint64]bool
 }
 
 // AnchorLineConfig configures an AnchorLine.
@@ -73,9 +84,21 @@ type AnchorLineConfig struct {
 	MaxFallbackGap int
 	// Workers derive landfalls and check signatures; default half the cores.
 	Workers int
+	// MaxReorgDepth is the most blocks a reorganization may displace once
+	// the line is loaded. Default DefaultMaxReorgDepth.
+	MaxReorgDepth int
 	// Log reports progress and problems; nil is silent.
 	Log func(msg string, args ...any)
+	// Alert reports what needs the operator (a refused deep
+	// reorganization); nil uses Log.
+	Alert func(msg string, args ...any)
 }
+
+// DefaultMaxReorgDepth is the deepest reorganization a loaded line accepts
+// (owner ruling 2026-11-09). The publisher anchors at six confirmations, so
+// displacing even one anchored block already takes a deep mainnet
+// reorganization.
+const DefaultMaxReorgDepth = 6
 
 // HeaderSource returns the 80-byte header of the block with a given hash.
 // Nothing it returns is trusted: the line checks that the header hashes to
@@ -104,7 +127,13 @@ func NewAnchorLine(cfg AnchorLineConfig) *AnchorLine {
 	if cfg.Workers <= 0 {
 		cfg.Workers = max(1, runtime.GOMAXPROCS(0)/2)
 	}
-	return &AnchorLine{cfg: cfg, pending: map[uint64][]anchorBlock{}}
+	if cfg.MaxReorgDepth <= 0 {
+		cfg.MaxReorgDepth = DefaultMaxReorgDepth
+	}
+	if cfg.Alert == nil {
+		cfg.Alert = cfg.Log
+	}
+	return &AnchorLine{cfg: cfg, pending: map[uint64][]anchorBlock{}, refused: map[[2]uint64]bool{}}
 }
 
 func (l *AnchorLine) log(msg string, args ...any) {
@@ -602,12 +631,24 @@ func (l *AnchorLine) longest(starts []anchorBlock) []anchorBlock {
 
 // reorganize replaces the top of the line with a longer pending chain that
 // parts from it below the tip, if there is one. The blocks it displaces go
-// to pending. Called with mu held.
+// to pending. Once the line is loaded, a chain that would displace more
+// than MaxReorgDepth blocks is refused and reported (once per rival tip): the
+// line keeps its chain. During Load the cap does not apply, since the line
+// is still being built in batches of heights and a rival read in one batch
+// may only prove longer in the next. Called with mu held.
 func (l *AnchorLine) reorganize() bool {
 	tip := uint64(len(l.hashes))
 	var bestFork uint64
 	var best []anchorBlock
-	for h, bs := range l.pending {
+	// Map order is random; walk the fork heights in order so the result
+	// and the reports never depend on it.
+	heights := make([]uint64, 0, len(l.pending))
+	for h := range l.pending {
+		heights = append(heights, h)
+	}
+	slices.Sort(heights)
+	for _, h := range heights {
+		bs := l.pending[h]
 		if h == 0 || h >= tip {
 			continue
 		}
@@ -621,6 +662,17 @@ func (l *AnchorLine) reorganize() bool {
 			continue
 		}
 		chain := l.longest(starts)
+		if end := h + uint64(len(chain)); end > tip && l.loaded && tip-h > uint64(l.cfg.MaxReorgDepth) {
+			if key := [2]uint64{h, end}; !l.refused[key] {
+				l.refused[key] = true
+				if l.cfg.Alert != nil {
+					l.cfg.Alert("line: REFUSED a reorganization deeper than the cap; the line keeps its chain and needs the operator (a leaked publisher key?)",
+						"from_height", h, "depth", tip-h, "max_depth", l.cfg.MaxReorgDepth, "tip", tip-1, "rival_tip", end-1,
+						"rival_hash", hex.EncodeToString(chain[len(chain)-1].hash[:]))
+				}
+			}
+			continue
+		}
 		if h+uint64(len(chain)) > tip && (best == nil || h+uint64(len(chain)) > bestFork+uint64(len(best))) {
 			bestFork, best = h, chain
 		}

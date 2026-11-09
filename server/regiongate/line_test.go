@@ -378,6 +378,123 @@ func TestAnchorLineFollowsTheLongerChain(t *testing.T) {
 	}
 }
 
+// asBlocks gives test blocks as the line holds them, for add.
+func asBlocks(tbs ...[]testBlock) []anchorBlock {
+	var out []anchorBlock
+	for _, part := range tbs {
+		for _, b := range part {
+			out = append(out, anchorBlock{height: b.height, hash: b.hash, prev: b.prev, coord: b.coord, seen: 1})
+		}
+	}
+	return out
+}
+
+func countLogs(logs *[]string, substr string) int {
+	n := 0
+	for _, m := range *logs {
+		if strings.Contains(m, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestAnchorLineRefusesADeepReorganization: once loaded, a longer rival
+// that would displace more than 6 blocks (owner ruling 2026-11-09) is
+// refused: the line keeps its chain and its epoch, the refusal is reported
+// once however many polls see it, and the line still grows on its own chain.
+func TestAnchorLineRefusesADeepReorganization(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 60, 21)
+	s := &memStore{}
+	for _, b := range main[:50] {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	l, logs := newTestLine(s, pub.pubkey, nil)
+	l.Load(context.Background())
+	checkLine(t, l, main[:50])
+	// Parts at 43: it would displace 43..49, seven blocks, and is longer.
+	rival := testChain(43, main[42].hash, 10, 22) // 43..52
+	for _, b := range rival {
+		s.add(b.anchor(t, pub, true, 2))
+	}
+	l.Update(context.Background())
+	l.Update(context.Background())
+	checkLine(t, l, main[:50])
+	if l.Epoch() != 0 {
+		t.Fatalf("epoch %d: a seven-deep reorganization was taken", l.Epoch())
+	}
+	if n := countLogs(logs, "REFUSED"); n != 1 {
+		t.Fatalf("the refusal was reported %d times over two polls, want 1", n)
+	}
+	// The line goes on along its own chain past the rival's tip.
+	for _, b := range main[50:] {
+		s.add(b.anchor(t, pub, true, 3))
+	}
+	l.Update(context.Background())
+	checkLine(t, l, main)
+	if l.Epoch() != 0 {
+		t.Fatalf("epoch %d", l.Epoch())
+	}
+}
+
+// TestAnchorLineTakesASixDeepReorganization: displacing exactly 6 blocks
+// is inside the cap.
+func TestAnchorLineTakesASixDeepReorganization(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 50, 23)
+	s := &memStore{}
+	for _, b := range main {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	l, logs := newTestLine(s, pub.pubkey, nil)
+	l.Load(context.Background())
+	rival := testChain(44, main[43].hash, 7, 24) // 44..50: displaces 44..49
+	for _, b := range rival {
+		s.add(b.anchor(t, pub, true, 2))
+	}
+	l.Update(context.Background())
+	checkLine(t, l, append(append([]testBlock(nil), main[:44]...), rival...))
+	if l.Epoch() != 1 || countLogs(logs, "REFUSED") != 0 {
+		t.Fatalf("epoch %d, %d refusals", l.Epoch(), countLogs(logs, "REFUSED"))
+	}
+}
+
+// TestAnchorLineCapPicksTheShallowRival: with a refused deep rival and a
+// longer shallow one, the line takes the shallow one, and the deep one is
+// reported once even though link looks at it again after the shallow
+// reorganization.
+func TestAnchorLineCapPicksTheShallowRival(t *testing.T) {
+	main := testChain(0, [32]byte{}, 50, 25)
+	l, logs := newTestLine(&memStore{}, "", nil)
+	l.add(asBlocks(main))
+	l.mu.Lock()
+	l.loaded = true
+	l.mu.Unlock()
+	deep := testChain(40, main[39].hash, 15, 26)   // 40..54
+	shallow := testChain(46, main[45].hash, 6, 27) // 46..51
+	l.add(asBlocks(deep, shallow))
+	checkLine(t, l, append(append([]testBlock(nil), main[:46]...), shallow...))
+	if l.Epoch() != 1 || countLogs(logs, "REFUSED") != 1 {
+		t.Fatalf("epoch %d, %d refusals; want 1 and 1", l.Epoch(), countLogs(logs, "REFUSED"))
+	}
+}
+
+// TestAnchorLineLoadIsNotCapped: while the line is being built, a rival
+// that proves longer in a later batch replaces any depth of it (the cap
+// guards a running line, not the reading of the store).
+func TestAnchorLineLoadIsNotCapped(t *testing.T) {
+	main := testChain(0, [32]byte{}, 50, 28)
+	l, logs := newTestLine(&memStore{}, "", nil)
+	l.add(asBlocks(main))
+	rival := testChain(20, main[19].hash, 40, 29) // 20..59
+	l.add(asBlocks(rival))
+	checkLine(t, l, append(append([]testBlock(nil), main[:20]...), rival...))
+	if l.Epoch() != 1 || countLogs(logs, "REFUSED") != 0 {
+		t.Fatalf("epoch %d, %d refusals", l.Epoch(), countLogs(logs, "REFUSED"))
+	}
+}
+
 // TestAnchorLineUsesOnlyItsPublisher: an anchor by anyone else is not
 // used, even from a store that returned it.
 func TestAnchorLineUsesOnlyItsPublisher(t *testing.T) {

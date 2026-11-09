@@ -616,6 +616,16 @@ stop of `B` (§5.5 step 2), and the hashes of its sampled blocks (§5.3).
   a reorganization, which changes the line's state in the gate's rules, so
   no verdict or failure made on the old line is used again, and a check that
   a reorganization cut across keeps nothing.
+- **Reorganization cap** (owner ruling 2026-11-09). Once loaded, the line
+  takes a reorganization only if it displaces at most 6 blocks
+  (`DefaultMaxReorgDepth`). Anchors come at six confirmations, so a deeper
+  one means a mainnet reorganization more than a dozen blocks deep, which
+  has not happened since 2013; it is far more likely a leaked publisher key
+  rewriting history. The line keeps its chain and goes on growing along it,
+  and logs `line: REFUSED a reorganization deeper than the cap` at error
+  level once per rival tip. The cap does not apply while the line loads,
+  since it is built in batches of heights and a rival may prove longer only
+  in a later batch.
 - **Gaps.** The line stops at the first height no anchor covers. With
   `line_fallback: true`, a gap of up to 64 blocks between two anchors is
   filled from block headers (`line_fallback_urls`, by default mempool.space
@@ -736,3 +746,7 @@ shared vectors above lock every rule.
   daily whole read, or at once if it is published here.
 - The chain cache is in memory: after a restart every identity's chain is
   read and checked whole again at its first check.
+- A refused deep reorganization is refused only by a running line. A
+  restart reads the store again, where the longer anchored chain wins. After
+  the refusal log, the operator must remove the rival anchors (or change
+  `line_publisher`, if the key leaked) before the next restart.

@@ -144,6 +144,7 @@ func rideLine(ctx context.Context, cfg *regiongate.Config) *regiongate.AnchorLin
 		MaxResults: nostrdb.MaxQueryResults,
 		Signature:  validation.CheckSignature,
 		Log:        func(msg string, args ...any) { log.RegionGate().Info(msg, args...) },
+		Alert:      func(msg string, args ...any) { log.RegionGate().Error(msg, args...) },
 	}
 	if cfg.LineFallback {
 		lcfg.Fallback = regiongate.HTTPHeaders{Bases: cfg.LineFallbackURLs}
