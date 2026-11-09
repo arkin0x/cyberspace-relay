@@ -968,3 +968,36 @@ func TestAnchorLineLoadsMainnet(t *testing.T) {
 		runRealRides(t, f, l)
 	}
 }
+
+// TestReReadSkipsAnchorsOnTheLine: anchors whose block is already on the
+// line at their height are not checked again (signature, landfall) when
+// the stuck path reads below the tip; one naming another block at a
+// height is checked.
+func TestReReadSkipsAnchorsOnTheLine(t *testing.T) {
+	pub := newSigner(t)
+	main := testChain(0, [32]byte{}, 40, 47)
+	stray := testChain(40, [32]byte{8}, 1, 48)[0] // at the tip's height, parent unknown
+	s := &memStore{}
+	for _, b := range main {
+		s.add(b.anchor(t, pub, true, 1))
+	}
+	var checks int
+	var mu sync.Mutex
+	l := NewAnchorLine(AnchorLineConfig{Publisher: pub.pubkey, Query: s.query, Workers: 2,
+		Signature: func(e nostr.Event) bool { mu.Lock(); checks++; mu.Unlock(); return validation.CheckSignature(e) }})
+	l.Load(context.Background())
+	checkLine(t, l, main)
+	s.add(stray.anchor(t, pub, true, 2))
+	mu.Lock()
+	checks = 0
+	mu.Unlock()
+	l.Update(context.Background()) // reads the stray, then the 40 below again
+	mu.Lock()
+	defer mu.Unlock()
+	if checks != 1 {
+		t.Fatalf("%d signatures checked; want 1 (the stray), not the 40 on the line", checks)
+	}
+	if !alreadyOnLine(main[5].anchor(t, pub, true, 1), l.snapshotHashes()) || alreadyOnLine(stray.anchor(t, pub, true, 1), l.snapshotHashes()) {
+		t.Fatal("alreadyOnLine")
+	}
+}
