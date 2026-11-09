@@ -89,6 +89,9 @@ type Order struct {
 	// LookupFailing is set once the owner was told the wallet cannot be
 	// asked about this order after it stopped being payable.
 	LookupFailing bool `json:"lookup_failing,omitempty"`
+	// LineID names one ledger line (set when it is written), so the owner
+	// resolves that line, not every line with its payment hash.
+	LineID string `json:"line_id,omitempty"`
 	// ClosedAt is when the relay saw it paid, or gave up on it
 	// (StatusUnknown): what keepClosed counts from.
 	ClosedAt int64 `json:"closed_at,omitempty"`
@@ -142,17 +145,21 @@ type CheckoutConfig struct {
 	// network (/48 or /24), per region (distinct networks; and at most one
 	// per network per region).
 	MaxPending, MaxPerRequester, MaxPerNetwork, MaxPerRegion int
-	// MaxLingering caps orders that can no longer be paid but whose
-	// answer is still awaited: at the cap, sales pause. Default 64.
+	// MaxLingering caps orders past their watch window with no answer yet,
+	// or marked LookupFailing: at the cap, sales pause. Default 64.
 	MaxLingering int
 	// ResolvedPath records the payments the owner marked resolved
 	// (Resolve), so the owner's list shows only open items.
 	ResolvedPath string
 	// RequireSelfCheck keeps sales off until SelfCheck has passed.
 	RequireSelfCheck bool
-	Now              func() time.Time
-	Log              func(msg string, args ...any)
-	Alert            func(msg string, args ...any)
+	// SelfCheckRetry is RunSelfCheck's first wait after a failure that
+	// may pass later (default 30 s); it doubles up to SelfCheckRetryCap
+	// (default 10 min).
+	SelfCheckRetry, SelfCheckRetryCap time.Duration
+	Now                               func() time.Time
+	Log                               func(msg string, args ...any)
+	Alert                             func(msg string, args ...any)
 }
 
 // Checkout makes and watches invoices.
@@ -169,6 +176,11 @@ type Checkout struct {
 	// failed); ready is false until a required self-check passed.
 	paused, off string
 	ready       bool
+	// checkErr is the last self-check failure that may pass on a retry.
+	checkErr string
+	// badPasses counts poll passes in a row whose lookups mostly failed:
+	// sales pause at two (at once for a configuration error).
+	badPasses int
 	// While a poll pass runs, changes mark the orders dirty and the pass
 	// saves them once at its end (batching), not once per change.
 	batching, dirty bool
@@ -228,6 +240,12 @@ func NewCheckout(cfg CheckoutConfig) (*Checkout, error) {
 	}
 	if cfg.MaxLingering <= 0 {
 		cfg.MaxLingering = DefaultMaxLingering
+	}
+	if cfg.SelfCheckRetry <= 0 {
+		cfg.SelfCheckRetry = 30 * time.Second
+	}
+	if cfg.SelfCheckRetryCap <= 0 {
+		cfg.SelfCheckRetryCap = 10 * time.Minute
 	}
 	if cfg.ResolvedPath == "" && cfg.LedgerPath != "" {
 		cfg.ResolvedPath = cfg.LedgerPath + ".resolved"
@@ -494,6 +512,8 @@ func (c *Checkout) State() string {
 	switch {
 	case c.off != "":
 		return "off: " + c.off
+	case !c.ready && c.checkErr != "":
+		return "waiting: the wallet self-check failed (" + c.checkErr + "); retrying"
 	case !c.ready:
 		return "waiting for the self-check"
 	case c.paused != "":
@@ -504,12 +524,13 @@ func (c *Checkout) State() string {
 	return ""
 }
 
-// lingeringLocked counts orders that can no longer be paid but whose
-// answer is still awaited. Called with mu held.
+// lingeringLocked counts orders that linger: past their watch (expiry
+// plus grace) with no answer yet, or marked LookupFailing. An ordinary
+// abandoned checkout in its grace does not count. Called with mu held.
 func (c *Checkout) lingeringLocked() int {
 	now, n := c.cfg.Now().Unix(), 0
 	for _, o := range c.orders {
-		if o.Status == StatusPending && o.ExpiresAt <= now {
+		if o.Status == StatusPending && (now > o.WatchUntil || o.LookupFailing) {
 			n++
 		}
 	}
@@ -519,27 +540,69 @@ func (c *Checkout) lingeringLocked() int {
 // selfCheckMsat is the amount of the self-check's invoice: 1 sat.
 const selfCheckMsat = 1000
 
-// SelfCheck makes a 1-sat invoice and looks it up, as payments will, so a
-// connection made without lookup_invoice (or not answering) is found at
-// startup, not after invoices were sold. Until it passes (when required),
-// nothing is sold; when it fails, payments stay off.
+// SelfCheck makes a 1-sat invoice and looks it up, once, as payments
+// will. On success sales may start. A permanent failure (the wallet
+// refuses a method: a connection made without it; or lookup cannot find
+// the invoice make just made) turns payments off; any other failure (a
+// timeout, a relay down) leaves them waiting, for RunSelfCheck to retry.
 func (c *Checkout) SelfCheck(ctx context.Context) error {
 	err := c.selfCheck(ctx)
+	permanent := errors.Is(err, ErrSelfCheckPermanent)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err != nil {
+	switch {
+	case err == nil:
+		c.ready, c.off, c.checkErr = true, "", ""
+	case permanent:
 		c.off = err.Error()
-		return err
+	default:
+		c.checkErr = err.Error()
 	}
-	c.ready = true
-	return nil
+	return err
 }
+
+// ErrSelfCheckPermanent marks a self-check failure no retry can fix.
+var ErrSelfCheckPermanent = errors.New("permanent")
+
+// RunSelfCheck runs SelfCheck until it passes or fails permanently,
+// retrying other failures with backoff (SelfCheckRetry, doubling, capped
+// at SelfCheckRetryCap), and logs each change of state: on, waiting, off.
+func (c *Checkout) RunSelfCheck(ctx context.Context, info, alert func(msg string, args ...any)) {
+	wait := c.cfg.SelfCheckRetry
+	failing := ""
+	for {
+		err := c.SelfCheck(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		switch {
+		case err == nil:
+			info("speakeasy payments on: the wallet self-check passed")
+			return
+		case errors.Is(err, ErrSelfCheckPermanent):
+			alert("speakeasy payments off: the wallet self-check failed; fix the NWC connection and restart", "error", err.Error())
+			return
+		case failing != err.Error():
+			failing = err.Error()
+			alert("speakeasy payments waiting: the wallet self-check failed; retrying", "error", failing, "retry_in", wait.String())
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = nextWait(wait, c.cfg.SelfCheckRetryCap)
+	}
+}
+
+// nextWait is the self-check's next wait: double, capped.
+func nextWait(wait, limit time.Duration) time.Duration { return min(2*wait, limit) }
 
 func (c *Checkout) selfCheck(ctx context.Context) error {
 	inv, err := c.cfg.Wallet.MakeInvoice(ctx, selfCheckMsat, c.cfg.Host+" payments self-check", time.Minute)
 	if err != nil {
 		if code, cfgErr := walletTrouble(err); cfgErr {
-			return fmt.Errorf("the wallet refuses make_invoice (%s): make the NWC connection with make_invoice and lookup_invoice", code)
+			return fmt.Errorf("%w: the wallet refuses make_invoice (%s): make the NWC connection with make_invoice and lookup_invoice", ErrSelfCheckPermanent, code)
 		}
 		return fmt.Errorf("make_invoice failed: %w", err)
 	}
@@ -548,10 +611,10 @@ func (c *Checkout) selfCheck(ctx context.Context) error {
 	}
 	if _, err := c.cfg.Wallet.LookupInvoice(ctx, strings.ToLower(inv.PaymentHash)); err != nil {
 		if nwc.IsNotFound(err) {
-			return errors.New("lookup_invoice cannot find the invoice make_invoice just made")
+			return fmt.Errorf("%w: lookup_invoice cannot find the invoice make_invoice just made", ErrSelfCheckPermanent)
 		}
 		if code, cfgErr := walletTrouble(err); cfgErr {
-			return fmt.Errorf("the wallet refuses lookup_invoice (%s): make the NWC connection with make_invoice and lookup_invoice", code)
+			return fmt.Errorf("%w: the wallet refuses lookup_invoice (%s): make the NWC connection with make_invoice and lookup_invoice", ErrSelfCheckPermanent, code)
 		}
 		return fmt.Errorf("lookup_invoice failed: %w", err)
 	}
@@ -637,11 +700,11 @@ type lookups struct {
 	// What the pass learned about the wallet: answers (NOT_FOUND
 	// included: the connection works), the first trouble, whether it was
 	// a configuration error; orders newly unverifiable, and given up.
-	answers         int
-	trouble         string
-	config          bool
-	newlyFailing    int
-	gaveUp, dropped int
+	answers, failures int
+	trouble           string
+	config            bool
+	newlyFailing      int
+	gaveUp, dropped   int
 }
 
 // lookup asks about one invoice and records what the answer says about the
@@ -653,8 +716,11 @@ func (l *lookups) lookup(ctx context.Context, hash string) (nwc.Invoice, error) 
 	}
 	if trouble, cfg := walletTrouble(err); trouble == "" {
 		l.answers++
-	} else if l.trouble == "" || cfg {
-		l.trouble, l.config = trouble, cfg
+	} else {
+		l.failures++
+		if l.trouble == "" || cfg {
+			l.trouble, l.config = trouble, cfg
+		}
 	}
 	return inv, err
 }
@@ -748,7 +814,10 @@ func (c *Checkout) Poll(ctx context.Context) {
 	c.mu.Lock()
 	paused := c.paused != ""
 	c.mu.Unlock()
-	if (paused || failing) && l.answers == 0 && l.trouble == "" && ctx.Err() == nil {
+	c.mu.Lock()
+	unsure := c.badPasses > 0
+	c.mu.Unlock()
+	if (paused || failing || unsure) && l.answers == 0 && l.trouble == "" && ctx.Err() == nil {
 		// Nothing this pass showed whether lookups work: ask about an
 		// invoice nobody made. NOT_FOUND means the connection answers.
 		l.lookup(ctx, newID()+newID())
@@ -771,10 +840,22 @@ func (c *Checkout) health(l *lookups) {
 			open++
 		}
 	}
+	// A pass is bad when its lookups got no answer at all, or failed more
+	// often than not. Sales pause at once on a configuration error, and on
+	// other trouble after two bad passes in a row, so a one-off timeout
+	// pauses nothing. A pass that got answers and was not bad resumes them.
+	bad := l.failures > 0 && (l.answers == 0 || l.failures > l.answers)
 	switch {
-	case l.trouble != "":
+	case l.config:
+		c.badPasses++
 		c.paused = l.trouble
+	case bad:
+		c.badPasses++
+		if c.badPasses >= 2 {
+			c.paused = l.trouble
+		}
 	case l.answers > 0:
+		c.badPasses = 0
 		c.paused = ""
 	}
 	now := c.paused
@@ -789,7 +870,9 @@ func (c *Checkout) health(l *lookups) {
 	case now == "" && was != "":
 		c.cfg.Log("speakeasy: the wallet answers again; payments resume", "was", was)
 	}
-	if l.newlyFailing > 0 && now == "" { // during an outage, its one alert covers them
+	// During an outage (or a bad pass that may start one) its one alert
+	// covers them; this is for orders the wallet answers about (NOT_FOUND).
+	if l.newlyFailing > 0 && now == "" && !bad && !l.config {
 		c.cfg.Alert("speakeasy: invoices that can no longer be paid cannot be checked (the wallet does not know them, or did not answer); they stay open until it answers",
 			"orders", l.newlyFailing)
 	}
@@ -979,6 +1062,7 @@ func (c *Checkout) ledger(o Order) {
 	if c.cfg.LedgerPath == "" {
 		return
 	}
+	o.LineID = newID()
 	line, _ := json.Marshal(o)
 	f, err := os.OpenFile(c.cfg.LedgerPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err == nil {
@@ -1014,54 +1098,61 @@ func (c *Checkout) Ledger() ([]Order, error) {
 	return out, nil
 }
 
-// Resolution is the owner's mark that a payment needing them (a refund
-// owed, held, unknown) is settled.
+// Resolution is the owner's mark that one ledger line needing them (a
+// refund owed, held, unknown) is settled.
 type Resolution struct {
+	LineID      string `json:"line_id"`
 	PaymentHash string `json:"payment_hash"`
+	Outcome     string `json:"outcome"`
 	Note        string `json:"note"`
 	ResolvedAt  int64  `json:"resolved_at"`
 }
 
-// ErrNothingToResolve: no open payment needing the owner has that hash.
-var ErrNothingToResolve = errors.New("no open payment needing the owner has that payment hash")
+// ErrNothingToResolve: no open line needing the owner has that id.
+var ErrNothingToResolve = errors.New("no open payment line needing the owner has that line id")
 
-// Resolve marks a payment the owner settled by hand (a refund paid, a held
-// payment checked), appending to ResolvedPath; the ledger is not changed.
-func (c *Checkout) Resolve(paymentHash, note string) (Resolution, error) {
-	paymentHash = strings.ToLower(paymentHash)
+// Resolve marks one ledger line the owner settled by hand (a refund paid,
+// a held payment checked), by its line id, appending to ResolvedPath; the
+// ledger is not changed. A later line for the same payment hash with
+// another outcome stays listed.
+func (c *Checkout) Resolve(lineID, note string) (Resolution, error) {
 	open, err := c.NeedsOwnerOpen()
 	if err != nil {
 		return Resolution{}, err
 	}
-	found := false
-	for _, o := range open {
-		found = found || o.PaymentHash == paymentHash
+	var line *Order
+	for i := range open {
+		if open[i].LineID == lineID {
+			line = &open[i]
+		}
 	}
-	if !found {
+	if line == nil {
 		return Resolution{}, ErrNothingToResolve
 	}
-	r := Resolution{PaymentHash: paymentHash, Note: note, ResolvedAt: c.cfg.Now().Unix()}
-	line, _ := json.Marshal(r)
+	r := Resolution{LineID: lineID, PaymentHash: line.PaymentHash, Outcome: line.Outcome, Note: note, ResolvedAt: c.cfg.Now().Unix()}
+	data, _ := json.Marshal(r)
 	f, err := os.OpenFile(c.cfg.ResolvedPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return Resolution{}, err
 	}
 	defer f.Close()
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	if _, err := f.Write(append(data, '\n')); err != nil {
 		return Resolution{}, err
 	}
 	return r, f.Sync()
 }
 
 // NeedsOwnerOpen is every ledger line the owner must settle by hand (a
-// refund owed, held, or unknown) and has not marked resolved, oldest
-// first, one per payment hash.
+// refund owed, held, or unknown) and has not resolved, oldest first. A
+// line written twice (a crash between the ledger and the orders file) is
+// one item: same payment hash and outcome; resolving either resolves both.
 func (c *Checkout) NeedsOwnerOpen() ([]Order, error) {
 	lines, err := c.Ledger()
 	if err != nil {
 		return nil, err
 	}
-	resolved := map[string]bool{}
+	type key struct{ hash, outcome string }
+	resolved := map[key]bool{}
 	if c.cfg.ResolvedPath != "" {
 		data, err := os.ReadFile(c.cfg.ResolvedPath)
 		if err != nil && !os.IsNotExist(err) {
@@ -1069,18 +1160,19 @@ func (c *Checkout) NeedsOwnerOpen() ([]Order, error) {
 		}
 		for _, line := range strings.Split(string(data), "\n") {
 			var r Resolution
-			if json.Unmarshal([]byte(line), &r) == nil && r.PaymentHash != "" {
-				resolved[r.PaymentHash] = true
+			if json.Unmarshal([]byte(line), &r) == nil && r.LineID != "" {
+				resolved[key{r.PaymentHash, r.Outcome}] = true
 			}
 		}
 	}
 	out := []Order{}
-	seen := map[string]bool{}
+	seen := map[key]bool{}
 	for _, o := range lines {
-		if !(NeedsOwner(o.Outcome) || strings.HasPrefix(o.Outcome, "unknown:")) || resolved[o.PaymentHash] || seen[o.PaymentHash] {
+		k := key{o.PaymentHash, o.Outcome}
+		if !(NeedsOwner(o.Outcome) || strings.HasPrefix(o.Outcome, "unknown:")) || resolved[k] || seen[k] {
 			continue
 		}
-		seen[o.PaymentHash] = true
+		seen[k] = true
 		out = append(out, o)
 	}
 	return out, nil

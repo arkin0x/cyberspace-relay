@@ -37,6 +37,8 @@ type fakeWallet struct {
 	// (a new connection that cannot see the old one's invoices).
 	lookupErr error
 	rotated   bool
+	// failHashes fails the lookups of these invoices only.
+	failHashes map[string]bool
 	// shape changes what make_invoice answers; answer what lookup does.
 	shape  func(*nwc.Invoice)
 	answer func(nwc.Invoice) nwc.Invoice
@@ -94,6 +96,9 @@ func (w *fakeWallet) LookupInvoice(ctx context.Context, hash string) (nwc.Invoic
 	w.lookups++
 	if w.lookupErr != nil {
 		return nwc.Invoice{}, w.lookupErr
+	}
+	if w.failHashes[hash] {
+		return nwc.Invoice{}, errors.New("timeout")
 	}
 	inv, ok := w.invoices[hash]
 	if !ok || w.rotated {
@@ -628,7 +633,8 @@ func TestCheckoutNotFoundAfterRotation(t *testing.T) {
 				t.Fatalf("after failed lookups: %+v, alerts %v", got, r.alerts)
 			}
 			before := len(r.alerts)
-			r.open() // across a restart too (a new process may alert once more)
+			r.open() // across a restart too (a new process may alert once more,
+			r.poll() // after its own two bad passes)
 			r.poll()
 			if got := r.get(o.ID); got.Status != StatusPending || len(r.alerts) > before+1 {
 				t.Fatalf("after a restart: %+v, alerts %v", got, r.alerts)
@@ -1127,7 +1133,7 @@ func TestResolveAPayment(t *testing.T) {
 	if len(open) != 1 || open[0].PaymentHash != b.PaymentHash {
 		t.Fatalf("open %+v", open)
 	}
-	if _, err := r.co.Resolve(strings.ToUpper(b.PaymentHash), "refunded by hand"); err != nil {
+	if _, err := r.co.Resolve(open[0].LineID, "refunded by hand"); err != nil {
 		t.Fatal(err)
 	}
 	if open, _ := r.co.NeedsOwnerOpen(); len(open) != 0 {
@@ -1136,9 +1142,9 @@ func TestResolveAPayment(t *testing.T) {
 	if len(r.ledger()) != 2 {
 		t.Fatal("the ledger lost history")
 	}
-	for _, h := range []string{b.PaymentHash, a.PaymentHash, strings.Repeat("0", 64)} {
-		if _, err := r.co.Resolve(h, "again"); !errors.Is(err, ErrNothingToResolve) {
-			t.Errorf("resolve %s: %v", h[:8], err)
+	for _, id := range []string{open[0].LineID, b.PaymentHash, strings.Repeat("0", 32)} {
+		if _, err := r.co.Resolve(id, "again"); !errors.Is(err, ErrNothingToResolve) {
+			t.Errorf("resolve %s: %v", id[:8], err)
 		}
 	}
 }
@@ -1160,5 +1166,191 @@ func TestOnePassWritesTheOrdersOnce(t *testing.T) {
 	r.poll()
 	if n := len(r.co.Orders()); writes != 1 || n != 40 || r.get(r.co.Orders()[0].ID).Status != StatusExpired {
 		t.Fatalf("%d writes for a pass that closed %d orders", writes, n)
+	}
+}
+
+// ── the third payments review ────────────────────────────────────────────
+
+// TestSelfCheckRetries (the reviewer's probe): a self-check that times out
+// at boot leaves payments waiting, not off; it is retried with backoff and
+// sales start once the wallet answers. The waiting state is logged once.
+func TestSelfCheckRetries(t *testing.T) {
+	r := newCheckoutRig(t)
+	r.cfg = func(c *CheckoutConfig) {
+		c.RequireSelfCheck, c.SelfCheckRetry, c.SelfCheckRetryCap = true, 5*time.Millisecond, 20*time.Millisecond
+	}
+	r.open()
+	r.wallet.mu.Lock()
+	r.wallet.makeErr = errors.New("timeout")
+	r.wallet.mu.Unlock()
+	var mu sync.Mutex
+	var infos, alerts []string
+	done := make(chan struct{})
+	go func() {
+		r.co.RunSelfCheck(context.Background(),
+			func(m string, _ ...any) { mu.Lock(); infos = append(infos, m); mu.Unlock() },
+			func(m string, _ ...any) { mu.Lock(); alerts = append(alerts, m); mu.Unlock() })
+		close(done)
+	}()
+	time.Sleep(60 * time.Millisecond)
+	if _, err := r.create("abc", "1.1.1.1"); !errors.Is(err, ErrPaused) || !strings.HasPrefix(r.co.State(), "waiting: the wallet self-check failed") {
+		t.Fatalf("while the self-check fails: %v %q", err, r.co.State())
+	}
+	r.wallet.mu.Lock()
+	r.wallet.makeErr = nil
+	r.wallet.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the self-check was not retried")
+	}
+	if !r.co.Selling() {
+		t.Fatalf("not selling after a passed retry: %q", r.co.State())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alerts) != 1 || len(infos) != 1 || !strings.Contains(infos[0], "payments on") {
+		t.Fatalf("alerts %v, infos %v", alerts, infos)
+	}
+}
+
+// TestSelfCheckPermanentFailures: a refused method, or lookup not finding
+// the invoice make just made, turns payments off at once, with no retry.
+func TestSelfCheckPermanentFailures(t *testing.T) {
+	for name, set := range map[string]func(*fakeWallet){
+		"lookup refused": func(w *fakeWallet) { w.lookupErr = &nwc.Error{Code: "RESTRICTED"} },
+		"make refused":   func(w *fakeWallet) { w.makeErr = &nwc.Error{Code: "UNAUTHORIZED"} },
+		"own invoice":    func(w *fakeWallet) { w.rotated = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newCheckoutRig(t)
+			r.cfg = func(c *CheckoutConfig) { c.RequireSelfCheck, c.SelfCheckRetry = true, time.Millisecond }
+			r.open()
+			set(r.wallet)
+			var alerts []string
+			r.co.RunSelfCheck(context.Background(), func(string, ...any) {}, func(m string, _ ...any) { alerts = append(alerts, m) })
+			if _, err := r.create("abc", "1.1.1.1"); !errors.Is(err, ErrPaymentsOff) || len(alerts) != 1 || !strings.Contains(alerts[0], "payments off") {
+				t.Fatalf("%v, alerts %v", err, alerts)
+			}
+			if r.wallet.makes > 1 {
+				t.Fatalf("retried a permanent failure: %d makes", r.wallet.makes)
+			}
+		})
+	}
+}
+
+// TestAbandonedCheckoutsDoNotLinger (the reviewer's probe): 66 unpaid
+// invoices from 11 networks, past their expiry but in their 2-minute
+// grace, are ordinary abandoned checkouts, not lingering orders: sales go
+// on. Orders past their watch with no answer do count.
+func TestAbandonedCheckoutsDoNotLinger(t *testing.T) {
+	r := newCheckoutRig(t)
+	n := 0
+	for net := 0; net < 11; net++ {
+		for i := 0; i < 6; i++ {
+			r.mustCreate(fmt.Sprintf("%03x", 0x100+n), fmt.Sprintf("10.%d.0.%d", net, 1+i/3))
+			n++
+		}
+	}
+	r.advance(10*time.Minute + time.Minute) // expired, in the grace
+	r.poll()
+	if _, err := r.create("fff", "192.0.2.1"); err != nil {
+		t.Fatalf("66 abandoned checkouts in their grace paused sales: %v (%q)", err, r.co.State())
+	}
+	// Past the watch with no answer: those linger.
+	r2 := newCheckoutRig(t)
+	r2.cfg = func(c *CheckoutConfig) { c.MaxLingering = 2 }
+	r2.open()
+	r2.mustCreate("abc", "10.0.0.1")
+	r2.mustCreate("abd", "10.1.0.1")
+	r2.wallet.rotated = true
+	r2.advance(13 * time.Minute)
+	r2.poll()
+	if _, err := r2.create("abe", "10.2.0.1"); !errors.Is(err, ErrPaused) {
+		t.Fatalf("two orders past their watch with no answer, cap 2: %v", err)
+	}
+}
+
+// TestPauseNeedsTwoBadPasses: a one-off timeout pauses nothing; a pass with
+// a minority of failures is not bad; two bad passes in a row pause; a
+// configuration error pauses at once.
+func TestPauseNeedsTwoBadPasses(t *testing.T) {
+	r := newCheckoutRig(t)
+	var hashes []string
+	for i, region := range []string{"abc", "abd", "abe"} {
+		hashes = append(hashes, r.mustCreate(region, fmt.Sprintf("10.%d.0.1", i)).PaymentHash)
+	}
+	r.wallet.failHashes = map[string]bool{hashes[0]: true} // one of three, every pass
+	for i := 0; i < 5; i++ {
+		r.poll()
+	}
+	if !r.co.Selling() || len(r.alerts) != 0 {
+		t.Fatalf("a minority of failures paused sales: %q %v", r.co.State(), r.alerts)
+	}
+	r.wallet.failHashes = nil
+	r.wallet.lookupErr = errors.New("timeout") // one bad pass
+	r.poll()
+	if !r.co.Selling() {
+		t.Fatal("one bad pass paused sales")
+	}
+	r.wallet.lookupErr = nil
+	r.poll()
+	r.wallet.lookupErr = errors.New("timeout") // bad, good, bad: no pause
+	r.poll()
+	if !r.co.Selling() {
+		t.Fatal("two bad passes that were not in a row paused sales")
+	}
+	r.poll() // the second in a row
+	if r.co.Selling() || len(r.alerts) != 1 {
+		t.Fatalf("two bad passes in a row: selling %v, alerts %v", r.co.Selling(), r.alerts)
+	}
+	r2 := newCheckoutRig(t)
+	r2.mustCreate("abc", "10.0.0.1")
+	r2.wallet.lookupErr = &nwc.Error{Code: "NOT_IMPLEMENTED"}
+	r2.poll()
+	if r2.co.Selling() {
+		t.Fatal("a configuration error did not pause at once")
+	}
+}
+
+// TestResolveOneLedgerLine: resolving a line leaves a later line for the
+// same payment hash with another outcome listed; a line written twice is
+// one item, resolved together.
+func TestResolveOneLedgerLine(t *testing.T) {
+	r := newCheckoutRig(t)
+	o := r.mustCreate("abc", "1.1.1.1")
+	unknown, refund := o, o
+	unknown.Outcome = "unknown: the wallet never answered; check the wallet for payment hash " + o.PaymentHash
+	refund.Outcome = OutcomeAlready
+	r.co.ledger(unknown)
+	r.co.ledger(unknown) // written twice (a crash)
+	r.co.ledger(refund)  // later: it was paid after all, and owed back
+	open, _ := r.co.NeedsOwnerOpen()
+	if len(open) != 2 {
+		t.Fatalf("%d open items, want 2 (the repeated line is one)", len(open))
+	}
+	if _, err := r.co.Resolve(o.PaymentHash, "by hash"); !errors.Is(err, ErrNothingToResolve) {
+		t.Fatalf("resolved by payment hash, not a line id: %v", err)
+	}
+	if _, err := r.co.Resolve(open[0].LineID, "checked the wallet"); err != nil {
+		t.Fatal(err)
+	}
+	open, _ = r.co.NeedsOwnerOpen()
+	if len(open) != 1 || open[0].Outcome != OutcomeAlready {
+		t.Fatalf("after resolving the unknown line: %+v", open)
+	}
+}
+
+// TestSelfCheckBackoff: 30 s, 1 min, 2 min, ... capped at 10 min.
+func TestSelfCheckBackoff(t *testing.T) {
+	w, limit := 30*time.Second, 10*time.Minute
+	var got []time.Duration
+	for i := 0; i < 7; i++ {
+		got = append(got, w)
+		w = nextWait(w, limit)
+	}
+	want := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 10 * time.Minute, 10 * time.Minute}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("%v, want %v", got, want)
 	}
 }

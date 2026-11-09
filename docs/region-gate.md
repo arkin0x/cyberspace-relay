@@ -69,6 +69,7 @@ are independent.
 | `/` | the root relay | the root relay, unchanged |
 | `/C/<region>`, registered | the root relay (grain answers a websocket or NIP-11 request on any path) | that speakeasy |
 | the bare `/<region>`, `/c/<region>`, or another spelling after `/C/` (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11 and the page: 301 to `/C/<region>` (`Vary: Accept`); websocket: 400 naming the `/C/` address |
+| `/C` or `/C/` alone | the root relay | 404 for every request type (it names no region) |
 | another spelling of a registered region (case, `0x`, trailing `/`, escapes) | the root relay | NIP-11: 301 to the one URL; websocket: 400 naming it |
 | any other path | the root relay | websocket, NIP-11, NIP-86: 404 "not a relay" |
 | a browser (GET or HEAD, `Accept` with `text/html`) at `/C/<region>` for any region string | grain's usual handlers | the region dashboard (step 4; the bare `/<region>`, `/c/` and other spellings 301 to `/C/<region>`) |
@@ -152,7 +153,7 @@ NIP-86 at `/` (NIP-98 auth, signer = relay owner):
 | `grain_speakeasy_remove` | `[<id>]` | unregisters it at once (open connections included); its database stays on disk, and adding it again serves it again |
 | `grain_speakeasy_deleteevent` | `[<id>, <event id>]` | deletes one event from that speakeasy (ruling D5) |
 | `grain_speakeasy_payments` | none | what the owner must settle by hand: ledger lines whose payment bought nothing (refund owed, held) or is unknown, and open orders the wallet cannot be asked about (`docs/speakeasies.md`, step 5) |
-| `grain_speakeasy_payment_resolve` | `[<payment hash>, <note>]` | marks one listed payment settled by hand; the ledger keeps its history |
+| `grain_speakeasy_payment_resolve` | `[<line id>, <note>]` | marks one listed ledger line settled by hand; the ledger keeps its history |
 
 They exist (and `supportedmethods` lists them) only while speakeasies are on.
 Paths are read by `regiongate.ParseRegionPath` (arkin0x/cyberspace-relay #18,
