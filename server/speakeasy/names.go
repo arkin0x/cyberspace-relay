@@ -15,6 +15,8 @@ var reservedNames = map[string]bool{
 	"setup": true, "settings": true, "login": true, "logout": true, "views": true, "style": true,
 	"style-test": true, "docs": true, "swagger": true, "manifest": true, "relay": true, "speakeasy": true,
 	"speakeasies": true, "dashboard": true, "www": true,
+	// /C/<hex> is a speakeasy's region path (too short for a name anyway).
+	"c": true,
 }
 
 // CheckName says why name cannot be a speakeasy name, or nil (ruling D3):

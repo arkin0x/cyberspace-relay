@@ -100,7 +100,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 			t.Fatalf("register %s: %s", id, msg)
 		}
 	}
-	urlA, urlB := wsBase+"/"+idA, wsBase+"/"+idB
+	urlA, urlB := wsBase+"/C/"+idA, wsBase+"/C/"+idB
 	t.Logf("REGIONS A /%s, B /%s (registered by path alone; the parser names the region)", idA, idB)
 
 	t.Run("admission", func(t *testing.T) {
@@ -210,7 +210,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		json.Unmarshal(ab, &reqs)
 		challenge, relay := "none-held", urlB
 		for _, r := range reqs {
-			if strings.HasSuffix(strings.TrimRight(r.Relay, "/"), "/"+idB) {
+			if strings.HasSuffix(strings.TrimRight(r.Relay, "/"), "/C/"+idB) {
 				// Go on with it, as the member would, to show what it leaks.
 				t.Errorf("the web client holds a challenge from the speakeasy %s: it dialed it", r.Relay)
 				challenge, relay = r.Challenge, r.Relay
@@ -298,7 +298,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		}
 		for _, sp := range []string{strings.ToUpper(idB), "0X" + strings.ToUpper(idB) + "/", "%" + fmt.Sprintf("%02X", idB[0]) + idB[1:]} {
 			code, _, h := nip11(t, base+"/"+sp)
-			if code != http.StatusMovedPermanently || h.Get("Location") != "/"+idB {
+			if code != http.StatusMovedPermanently || h.Get("Location") != "/C/"+idB {
 				t.Fatalf("/%s: want 301 to /%s, got %d", sp, idB, code)
 			}
 			if _, err := dial(t, wsBase+"/"+sp); err == nil {
@@ -340,7 +340,7 @@ func TestSpeakeasiesE2E(t *testing.T) {
 		busy := 0
 		for round := 0; round < 4; round++ {
 			for _, id := range active {
-				url := wsBase + "/" + id
+				url := wsBase + "/C/" + id
 				c := mustDial(t, url)
 				c.auth(kAB, url, c.challenge)
 				for i := 0; i < 5; i++ {

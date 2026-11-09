@@ -31,10 +31,10 @@ func TestNamesRouteAndPersist(t *testing.T) {
 	if sp == nil || sp.ID != "abc" || canonical != "/fiatjafs-speakeasy" {
 		t.Fatalf("name lookup: %v %q", sp, canonical)
 	}
-	if sp, c := r.Lookup("/abc"); sp == nil || c != "/abc" || sp.Names[0] != "fiatjafs-speakeasy" {
+	if sp, c := r.Lookup("/C/abc"); sp == nil || c != "/C/abc" || sp.Names[0] != "fiatjafs-speakeasy" {
 		t.Fatalf("the hex path: %v %q", sp, c)
 	}
-	for _, other := range []string{"/Fiatjafs-Speakeasy", "/fiatjafs-speakeasy/", "/fiatjafs"} {
+	for _, other := range []string{"/Fiatjafs-Speakeasy", "/fiatjafs-speakeasy/", "/fiatjafs", "/C/fiatjafs-speakeasy"} {
 		if sp, _ := r.Lookup(other); sp != nil {
 			t.Errorf("%s leads to the speakeasy", other)
 		}

@@ -142,10 +142,10 @@ func TestRegistryUsesTheRegionPathParser(t *testing.T) {
 	if _, err := r.Add(Entry{ID: "0fe6", Region: cube(t, 1, 40)}); err != nil {
 		t.Fatal(err)
 	}
-	for _, spelling := range []string{"/0fe6", "/0FE6", "/0x0fe6", "/0fe6/", "/0fe6//"} {
+	for _, spelling := range []string{"/C/0fe6", "/0fe6", "/0FE6", "/0x0fe6", "/0fe6/", "/0fe6//", "/C/0FE6", "/c/0fe6", "/C/0x0fe6/"} {
 		sp, canonical := r.Lookup(spelling)
-		if sp == nil || sp.ID != "0fe6" || canonical != "/0fe6" {
-			t.Fatalf("%s: want speakeasy 0fe6 at /0fe6, got %v %q", spelling, sp, canonical)
+		if sp == nil || sp.ID != "0fe6" || canonical != "/C/0fe6" {
+			t.Fatalf("%s: want speakeasy 0fe6 at /C/0fe6, got %v %q", spelling, sp, canonical)
 		}
 	}
 
@@ -319,14 +319,16 @@ func TestRegistryWithParseRegionPath(t *testing.T) {
 		"/" + id, "/" + strings.ToUpper(id), "/0x" + id, "/0X" + strings.ToUpper(id), "/" + id + "/", "/" + id + "///",
 		"/0F" + id[2:], pct(id, false),
 	} {
-		got, canonical := r2.Lookup(spelling)
-		if got == nil || got.ID != id || canonical != "/"+id {
-			t.Fatalf("%s: want %s at /%s, got %v %q", spelling, id, id, got, canonical)
+		for _, p := range []string{spelling, "/C" + spelling} {
+			got, canonical := r2.Lookup(p)
+			if got == nil || got.ID != id || canonical != "/C/"+id {
+				t.Fatalf("%s: want %s at /C/%s, got %v %q", p, id, id, got, canonical)
+			}
 		}
 	}
 	// Decoded once, as ONOSENDAI decodes once: a double encoding is not the
 	// region, and neither are the paths ServeMux would clean into it.
-	for _, notIt := range []string{pct(id, true), "//" + id, "/x/../" + id, "/" + id + "/.", "/" + id + "0"} {
+	for _, notIt := range []string{pct(id, true), "//" + id, "/x/../" + id, "/" + id + "/.", "/" + id + "0", "/C" + pct(id, true), "/C/" + id + "/.", "/C/", "/C"} {
 		if got, _ := r2.Lookup(notIt); got != nil {
 			t.Fatalf("%s led to the speakeasy", notIt)
 		}
