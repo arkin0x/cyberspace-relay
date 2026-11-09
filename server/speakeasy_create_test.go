@@ -152,7 +152,7 @@ func TestCreateSpeakeasy(t *testing.T) {
 	got, _ := co.Get(id)
 	w.pay(got.PaymentHash)
 	co.Poll(context.Background())
-	if code, st := getJSON(t, orders+"/"+id); code != 200 || st["applied"] != true || st["url"] != r.wsRoot+"/abc" || st["outcome"] != speakeasy.OutcomeRegistered {
+	if code, st := getJSON(t, orders+"/"+id); code != 200 || st["applied"] != true || st["url"] != r.wsRoot+"/abc" || st["outcome"] != speakeasy.OutcomeRegistered || st["qr_svg"] != nil {
 		t.Fatalf("after paying: %d %v", code, st)
 	}
 	if code, doc, _ := nip11(t, r.root+"/abc"); code != 200 || doc["name"] != "Speakeasy abc" {

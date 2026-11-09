@@ -20,13 +20,14 @@ import (
 
 // fakeWallet is a wallet in memory: invoices by payment hash.
 type fakeWallet struct {
-	mu       sync.Mutex
-	invoices map[string]*nwc.Invoice
-	makes    int
-	makeErr  error
-	bolt11   string // when set, what make_invoice answers as the invoice
-	answer   func(nwc.Invoice) nwc.Invoice
-	delay    time.Duration
+	mu        sync.Mutex
+	invoices  map[string]*nwc.Invoice
+	makes     int
+	makeErr   error
+	bolt11    string // when set, what make_invoice answers as the invoice
+	answer    func(nwc.Invoice) nwc.Invoice
+	delay     time.Duration
+	lookupErr error
 }
 
 func newFakeWallet() *fakeWallet { return &fakeWallet{invoices: map[string]*nwc.Invoice{}} }
@@ -52,6 +53,9 @@ func (w *fakeWallet) MakeInvoice(ctx context.Context, msat int64, desc string, e
 func (w *fakeWallet) LookupInvoice(ctx context.Context, hash string) (nwc.Invoice, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.lookupErr != nil {
+		return nwc.Invoice{}, w.lookupErr
+	}
 	inv, ok := w.invoices[hash]
 	if !ok {
 		return nwc.Invoice{}, &nwc.Error{Code: "NOT_FOUND", Message: "no"}
@@ -262,15 +266,19 @@ func TestCheckoutBindsThePaymentToItsRegion(t *testing.T) {
 				t.Fatalf("%+v, alerts %v", got, r.alerts)
 			}
 			r.co.Poll(context.Background())
-			if len(r.alerts) != 1 || len(r.ledger()) != 0 {
+			if len(r.alerts) != 1 {
 				t.Fatal("a held order was looked at again")
+			}
+			if l := r.ledger(); len(l) != 1 || !strings.HasPrefix(l[0].Outcome, "held for the relay owner") {
+				t.Fatalf("a held payment is not in the ledger: %+v", l)
 			}
 		})
 	}
 }
 
 // TestCheckoutSecondPaymentForARegion: two requesters pay for one region;
-// the first makes it a speakeasy, the second has what it paid for.
+// the first makes it a speakeasy; the second bought nothing, so a refund is
+// owed and the owner is alerted.
 func TestCheckoutSecondPaymentForARegion(t *testing.T) {
 	r := newCheckoutRig(t)
 	a := r.mustCreate("abc", "1.1.1.1")
@@ -281,8 +289,8 @@ func TestCheckoutSecondPaymentForARegion(t *testing.T) {
 	r.co.Poll(context.Background())
 	ga, _ := r.co.Get(a.ID)
 	gb, _ := r.co.Get(b.ID)
-	if ga.Outcome != OutcomeRegistered || gb.Outcome != OutcomeAlready || len(r.ledger()) != 2 {
-		t.Fatalf("%q %q, %d ledger lines", ga.Outcome, gb.Outcome, len(r.ledger()))
+	if ga.Outcome != OutcomeRegistered || gb.Outcome != OutcomeAlready || !strings.HasPrefix(gb.Outcome, "refund owed") || len(r.ledger()) != 2 || len(r.alerts) != 1 {
+		t.Fatalf("%q %q, %d ledger lines, alerts %v", ga.Outcome, gb.Outcome, len(r.ledger()), r.alerts)
 	}
 }
 
@@ -332,10 +340,51 @@ func TestCheckoutRetriesARegistryWrite(t *testing.T) {
 	if got, _ := r.co.Get(o.ID); got.Status != StatusPaid || got.Applied || len(r.alerts) == 0 {
 		t.Fatalf("%+v %v", got, r.alerts)
 	}
+	// Sold, though not written yet: nobody else gets an invoice for it.
+	if _, err := r.create("abc", "9.9.9.9"); !errors.Is(err, ErrAlreadySpeakeasy) {
+		t.Fatalf("a region being applied was offered again: %v", err)
+	}
 	r.failSave = false
 	r.co.Poll(context.Background())
 	if got, _ := r.co.Get(o.ID); !got.Applied || r.reg.Get("abc") == nil {
 		t.Fatalf("not applied on the retry: %+v", got)
+	}
+}
+
+// TestCheckoutNeverExpiresOnAFailedLookup: past its expiry, an order whose
+// lookup fails stays open (it may have been paid), the owner is told once,
+// and a payment found later is applied.
+func TestCheckoutNeverExpiresOnAFailedLookup(t *testing.T) {
+	r := newCheckoutRig(t)
+	o := r.mustCreate("abc", "1.1.1.1")
+	r.wallet.pay(o.PaymentHash)
+	r.wallet.lookupErr = errors.New("relay down")
+	r.now = r.now.Add(time.Hour)
+	r.co.Poll(context.Background())
+	r.co.Poll(context.Background())
+	if got, _ := r.co.Get(o.ID); got.Status != StatusPending || len(r.alerts) != 1 {
+		t.Fatalf("after failed lookups: %+v, alerts %v", got, r.alerts)
+	}
+	r.open() // and across a restart
+	r.co.Poll(context.Background())
+	if got, _ := r.co.Get(o.ID); got.Status != StatusPending || len(r.alerts) != 1 {
+		t.Fatalf("after a restart: %+v, alerts %v", got, r.alerts)
+	}
+	r.wallet.lookupErr = nil
+	r.co.Poll(context.Background())
+	if got, _ := r.co.Get(o.ID); !got.Applied || r.reg.Get("abc") == nil {
+		t.Fatalf("the late answer was not applied: %+v", got)
+	}
+}
+
+// TestRequesterKeysIPv6ByItsSlash64: addresses inside one /64 are one
+// requester; IPv4 addresses and other /64s are not.
+func TestRequesterKeysIPv6ByItsSlash64(t *testing.T) {
+	if Requester("2001:db8:1:2::1") != Requester("2001:db8:1:2:ffff::9") {
+		t.Error("two addresses in one /64 are different requesters")
+	}
+	if Requester("2001:db8:1:2::1") == Requester("2001:db8:1:3::1") || Requester("1.2.3.4") == Requester("1.2.3.5") {
+		t.Error("different networks are one requester")
 	}
 }
 

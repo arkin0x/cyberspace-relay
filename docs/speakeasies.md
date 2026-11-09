@@ -146,18 +146,18 @@ Off by default. On only with `payments: {enabled: true, nwc_file: <path>}` in `s
 | Rule | How |
 |---|---|
 | A payment is bound to its region | The order (kept by the relay, keyed by a random id) holds the region; nothing the visitor sends at payment time names one. The invoice description names the region too, and a paid invoice the wallet describes differently is never applied: it is held for the relay owner and logged at error level. |
-| One open invoice per region and requester | Asking again returns the same invoice (also many requests at once: one `make_invoice` at a time). The requester is a hash of the client address; no address is stored. An invoice with under a minute left is not handed out again. |
+| One open invoice per region and requester | Asking again returns the same invoice (also many requests at once: one `make_invoice` at a time). The requester is a hash of the client address (an IPv6 address counts by its /64); no address is stored. An invoice with under a minute left is not handed out again. A region whose paid order is still being applied is not offered again. |
 | Caps | 32 open invoices in all, 3 per requester (each for another region); past them, 429 "try again in a few minutes". |
-| Expiry | 10 minutes; an unpaid invoice is still looked up for 2 minutes after, for a payment that settled at the last moment. |
-| Two payers, one region | The first makes it a speakeasy; the second's outcome is "already a speakeasy" (they have what they paid for). |
-| Restarts | Open orders live in `<data dir>/speakeasies/orders.json` (closed ones are dropped after a day), so a payment made while the relay is down is applied when it is back. Every paid order is appended to `<data dir>/speakeasies/payments.jsonl`, forever. A registry write that fails is retried at the next poll. |
+| Expiry | 10 minutes; an unpaid invoice is still looked up for 2 minutes after, for a payment that settled at the last moment. An order is closed only on the wallet's answer (unpaid, or unknown to it): while the wallet cannot be asked, the order stays open, and past its grace the owner is told once (error log). |
+| Two payments, one region | The first makes it a speakeasy; the second (two payers, or one who paid two invoices) bought nothing: its outcome is `refund owed: already a speakeasy`, alerted and in the ledger. |
+| Restarts | Open orders live in `<data dir>/speakeasies/orders.json` (closed ones are dropped after a day), so a payment made while the relay is down is applied when it is back. Every paid order is appended to `<data dir>/speakeasies/payments.jsonl`, forever (held and refund-owed ones too; written before the order is marked applied, so a crash can repeat a line but never lose one). A registry write that fails is retried at the next poll. |
 
 | Endpoint | Answers |
 |---|---|
 | `POST /api/speakeasies/orders` | `200` `{"id","kind","region","amount_sats","invoice","qr_svg","expires_at","status":"pending","applied":false}`; `400` not a region; `409` already a speakeasy; `415` not JSON; `429` caps; `502` the wallet made no invoice; `404` payments off |
-| `GET /api/speakeasies/orders/<id>` | the same, with `status` `pending`, `paid` or `expired`, `applied`, `outcome`, and `url` once it is a speakeasy |
+| `GET /api/speakeasies/orders/<id>` | the same, with `status` `pending`, `paid` or `expired`, `applied`, `outcome`, and `url` once it is a speakeasy; `qr_svg` only while pending |
 
-**NWC (ruling D2).** `server/nwc` is a NIP-47 client with two methods only, `make_invoice` and `lookup_invoice`: it can never pay. It reads the wallet's info event (kind 13194) and uses `nip44_v2` when listed, otherwise `nip04`, as NIP-47 says. Requests carry an `expiration` tag; answers must be signed by the wallet key and name the request. The connection string never reaches a log or an error (logs name the wallet by an 8-character pubkey prefix and its relay). The file is read again when it changes, so rotating is replacing it. The relay warns if the file is readable by others than its owner.
+**NWC (ruling D2).** `server/nwc` is a NIP-47 client with two methods only, `make_invoice` and `lookup_invoice`: it can never pay. It reads the wallet's info event (kind 13194) and uses `nip44_v2` when listed, otherwise `nip04`, as NIP-47 says (kept only once the info event was seen; a relay that answers without it is asked again next time). Requests carry an `expiration` tag; answers must be signed by the wallet key and name the request. The connection string never reaches a log or an error (logs name the wallet by an 8-character pubkey prefix and its relay). The file is read again when it changes, so rotating is replacing it. The relay warns if the file is readable by others than its owner.
 
 ### Before a real-sats test (the owner)
 

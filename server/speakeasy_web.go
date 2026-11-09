@@ -157,7 +157,7 @@ type orderView struct {
 	Region     string `json:"region"`
 	AmountSats int64  `json:"amount_sats"`
 	Invoice    string `json:"invoice"`
-	QR         string `json:"qr_svg"`
+	QR         string `json:"qr_svg,omitempty"`
 	ExpiresAt  int64  `json:"expires_at"`
 	Status     string `json:"status"`
 	Applied    bool   `json:"applied"`
@@ -169,8 +169,10 @@ type orderView struct {
 func (rt *speakeasyRuntime) view(o speakeasy.Order) orderView {
 	v := orderView{ID: o.ID, Kind: o.Kind, Region: o.Region, AmountSats: o.AmountSats, Invoice: o.Invoice,
 		ExpiresAt: o.ExpiresAt, Status: o.Status, Applied: o.Applied, Outcome: o.Outcome}
-	if qr, err := speakeasy.InvoiceQR(o.Invoice); err == nil {
-		v.QR = qr
+	if o.Status == speakeasy.StatusPending { // only an open invoice is shown
+		if qr, err := speakeasy.InvoiceQR(o.Invoice); err == nil {
+			v.QR = qr
+		}
 	}
 	if o.Applied && (o.Outcome == speakeasy.OutcomeRegistered || o.Outcome == speakeasy.OutcomeAlready) {
 		v.URL = rt.url(o.Region)

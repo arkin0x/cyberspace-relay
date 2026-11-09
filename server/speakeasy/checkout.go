@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,14 +68,18 @@ type Order struct {
 	// could not, and says why in Outcome); until then each poll retries.
 	Applied bool   `json:"applied,omitempty"`
 	Outcome string `json:"outcome,omitempty"`
+	// LookupFailing is set once the owner was told the wallet cannot be
+	// asked about this order past its expiry.
+	LookupFailing bool `json:"lookup_failing,omitempty"`
 }
 
 // Outcomes of a paid order.
 const (
 	OutcomeRegistered = "registered"
-	// OutcomeAlready: someone else's payment made the region a speakeasy
-	// first. The payer has what they paid for.
-	OutcomeAlready = "already a speakeasy"
+	// OutcomeAlready: another payment made the region a speakeasy first
+	// (two payers, or one who paid two invoices). The region is one, but
+	// this payment bought nothing: the relay owner owes a refund.
+	OutcomeAlready = "refund owed: already a speakeasy"
 )
 
 // CheckoutConfig configures a Checkout.
@@ -156,7 +161,12 @@ func NewCheckout(cfg CheckoutConfig) (*Checkout, error) {
 
 // Requester turns a client address into the key orders are kept by, so the
 // orders file holds no addresses.
+// An IPv6 address counts by its /64, which one host usually holds whole,
+// so rotating addresses inside it does not dodge the caps.
 func Requester(addr string) string {
+	if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+		addr = ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
 	sum := sha256.Sum256([]byte("speakeasy-requester:" + addr))
 	return hex.EncodeToString(sum[:12])
 }
@@ -176,7 +186,7 @@ func (c *Checkout) Create(ctx context.Context, req OrderRequest) (Order, error) 
 	if !c.canonicalRegion(req.Region) {
 		return Order{}, ErrNotRegion
 	}
-	if c.cfg.Registry.Get(req.Region) != nil {
+	if c.cfg.Registry.Get(req.Region) != nil || c.paidFor(req.Region) {
 		return Order{}, ErrAlreadySpeakeasy
 	}
 	if o, ok := c.open(req); ok {
@@ -237,6 +247,19 @@ func (c *Checkout) open(req OrderRequest) (Order, bool) {
 		}
 	}
 	return Order{}, false
+}
+
+// paidFor reports whether a paid order for region is still being applied
+// (its registry write is being retried): the region is sold.
+func (c *Checkout) paidFor(region string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, o := range c.orders {
+		if o.Status == StatusPaid && !o.Applied && o.Kind == OrderSpeakeasy && o.Region == region {
+			return true
+		}
+	}
+	return false
 }
 
 // room says whether one more pending order fits.
@@ -326,7 +349,10 @@ func (c *Checkout) lookup(ctx context.Context, o Order) {
 			// Never apply a payment the wallet describes differently: it
 			// is not the invoice this order made.
 			c.cfg.Alert("speakeasy: the wallet's paid invoice does not match the order; not applied", "order", o.ID, "payment_hash", o.PaymentHash, "why", why)
-			c.update(o.ID, func(x *Order) { x.Status, x.Applied, x.Outcome = StatusPaid, true, "held for the relay owner: "+why })
+			held := "held for the relay owner: " + why
+			o.Status, o.Applied, o.Outcome = StatusPaid, true, held
+			c.ledger(o)
+			c.update(o.ID, func(x *Order) { x.Status, x.Applied, x.Outcome = StatusPaid, true, held })
 			return
 		}
 		settled := inv.SettledAt
@@ -338,10 +364,20 @@ func (c *Checkout) lookup(ctx context.Context, o Order) {
 		c.apply(o.ID)
 		return
 	}
+	past := now.Unix() > o.ExpiresAt+int64(lookupGrace/time.Second)
 	if err != nil && !nwc.IsNotFound(err) {
+		// The wallet did not answer: never close an order on that, since
+		// it may have been paid. Past its grace, tell the owner once and
+		// keep asking.
 		c.cfg.Log("speakeasy: invoice lookup failed", "order", o.ID, "error", err.Error())
+		if past && !o.LookupFailing {
+			c.cfg.Alert("speakeasy: cannot ask the wallet about an expired invoice; it stays open until the wallet answers", "order", o.ID, "payment_hash", o.PaymentHash)
+			c.update(o.ID, func(x *Order) { x.LookupFailing = true })
+		}
+		return
 	}
-	if now.Unix() > o.ExpiresAt+int64(lookupGrace/time.Second) {
+	// The wallet answered: unpaid (or unknown to it) and past its grace.
+	if past {
 		c.update(o.ID, func(x *Order) { x.Status = StatusExpired })
 	}
 }
@@ -381,9 +417,15 @@ func (c *Checkout) apply(id string) {
 		c.cfg.Alert("speakeasy: paid but the registry write failed; retrying", "order", o.ID, "region", o.Region, "error", err.Error())
 		return
 	}
-	c.update(id, func(x *Order) { x.Applied, x.Outcome = true, outcome })
+	if outcome == OutcomeAlready {
+		c.cfg.Alert("speakeasy: paid for a region that is already a speakeasy; a refund is owed", "order", o.ID, "region", o.Region,
+			"sats", o.AmountSats, "payment_hash", o.PaymentHash)
+	}
+	// The ledger first: after a crash in between, a line twice is better
+	// than none.
 	o.Applied, o.Outcome = true, outcome
 	c.ledger(o)
+	c.update(id, func(x *Order) { x.Applied, x.Outcome = true, outcome })
 	c.cfg.Log("speakeasy: order applied", "order", o.ID, "region", o.Region, "outcome", outcome)
 }
 

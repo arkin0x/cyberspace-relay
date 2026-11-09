@@ -315,7 +315,8 @@ func (e *Error) UnmarshalJSON(b []byte) error {
 
 // encryption is the scheme the wallet asks for: nip44_v2 when its info
 // event (kind 13194) lists it, otherwise nip04, as NIP-47 says for a wallet
-// that names none. It is read once per client.
+// that names none. It is read once per client, or each time while no
+// relay has returned the info event.
 func (c *Client) encryption(ctx context.Context, conn *wsConn) (string, error) {
 	c.mu.Lock()
 	enc := c.enc
@@ -327,6 +328,7 @@ func (c *Client) encryption(ctx context.Context, conn *wsConn) (string, error) {
 		return "", err
 	}
 	enc = "nip04"
+	seen := false
 	for {
 		label, msg, err := conn.next(ctx)
 		if err != nil {
@@ -342,6 +344,7 @@ func (c *Client) encryption(ctx context.Context, conn *wsConn) (string, error) {
 		if json.Unmarshal(msg[2], &ev) != nil || ev.Kind != KindInfo || ev.PubKey != c.uri.WalletPubkey || !validation.CheckSignature(ev) {
 			continue
 		}
+		seen = true
 		for _, t := range ev.Tags {
 			if len(t) >= 2 && t[0] == "encryption" && slicesContains(strings.Fields(t[1]), "nip44_v2") {
 				enc = "nip44_v2"
@@ -349,9 +352,13 @@ func (c *Client) encryption(ctx context.Context, conn *wsConn) (string, error) {
 		}
 	}
 	conn.send("CLOSE", "nwc-info")
-	c.mu.Lock()
-	c.enc = enc
-	c.mu.Unlock()
+	// Kept only from a real info event: a relay that answered without one
+	// (it may not hold it) is asked again next time.
+	if seen {
+		c.mu.Lock()
+		c.enc = enc
+		c.mu.Unlock()
+	}
 	return enc, nil
 }
 

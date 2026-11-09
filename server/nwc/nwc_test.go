@@ -361,6 +361,30 @@ func TestClientRefusesWhatIsNotTheWallets(t *testing.T) {
 	}
 }
 
+// TestEncryptionIsKeptOnlyFromAnInfoEvent: a relay that answers without
+// the wallet's info event leaves the choice open (nip04 for now), so once
+// the event is there, nip44_v2 is used.
+func TestEncryptionIsKeptOnlyFromAnInfoEvent(t *testing.T) {
+	w := newFakeWallet(t)
+	w.noInfo = true
+	cl := newClient(t, w, wsURL(w.serve()))
+	ctx := context.Background()
+	if _, err := cl.MakeInvoice(ctx, 1000, "one", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	w.noInfo, w.nip44 = false, true
+	w.mu.Unlock()
+	if _, err := cl.MakeInvoice(ctx, 1000, "two", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if strings.Join(w.encs, ",") != "nip04,nip44_v2" {
+		t.Fatalf("encryption %v, want nip04 then nip44_v2", w.encs)
+	}
+}
+
 // TestClientTriesTheNextRelay: a relay that cannot be reached is skipped.
 func TestClientTriesTheNextRelay(t *testing.T) {
 	w := newFakeWallet(t)
