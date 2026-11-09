@@ -73,10 +73,30 @@ type AnchorLine struct {
 	// refused holds the deep rivals already reported (fork height and
 	// rival tip), so each is reported once, not at every poll.
 	refused map[[2]uint64]bool
-	// stuckAt is the tip the stuck path last re-read below, so a rival
-	// that stays in pending at the tip is not re-read at every poll.
-	stuckAt uint64
+	// The stuck path (blocks at the tip that do not link) re-reads below
+	// the tip when what sits at the tip changed (stuckSig), when the store
+	// holds anchors signed after the newest one read (newest), or at least
+	// every stuckEvery polls (stuckPolls): never at every poll for nothing,
+	// never missing a reorganization for good. Touched under update.
+	stuckSig   string
+	stuckPolls int
+	newest     int64
+	// fillFailed holds when each block above a gap last failed to lead
+	// down to the tip through the fallback, for the tip in fillTip: it is
+	// asked again only after fillRetry, not at every poll (a rival's block
+	// never will; a fallback that was down may next time).
+	fillFailed map[[32]byte]time.Time
+	fillTip    uint64
 }
+
+// stuckEvery is the most polls the stuck path waits between re-reads when
+// nothing it can see has changed: anchors below the tip signed before the
+// newest one read are only found this way.
+const stuckEvery = 10
+
+// fillRetry is how long a block that failed to fill a gap waits before the
+// fallback is asked about it again.
+const fillRetry = 5 * time.Minute
 
 // AnchorLineConfig configures an AnchorLine.
 type AnchorLineConfig struct {
@@ -375,6 +395,9 @@ func (l *AnchorLine) readHeights(from, to uint64) ([]nostr.Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, e := range evs {
+		l.newest = max(l.newest, e.CreatedAt)
+	}
 	if len(evs) >= limit {
 		if from == to {
 			return nil, fmt.Errorf("line: more than %d anchors for height %d", limit, from)
@@ -465,12 +488,23 @@ func (l *AnchorLine) Update(ctx context.Context) error {
 	}
 	l.add(l.resolveAnchors(evs))
 	l.mu.RLock()
-	stuck := len(l.pending[uint64(len(l.hashes))]) > 0 && l.stuckAt != uint64(len(l.hashes))
+	atTip := l.pending[uint64(len(l.hashes))]
+	sig := fmt.Sprint(uint64(len(l.hashes)), len(atTip))
+	for _, b := range atTip {
+		sig += hex.EncodeToString(b.hash[:4])
+	}
 	l.mu.RUnlock()
+	stuck := len(atTip) > 0
 	if stuck && next > 0 {
-		l.mu.Lock()
-		l.stuckAt = uint64(len(l.hashes))
-		l.mu.Unlock()
+		l.stuckPolls++
+		fresh, err := l.freshAnchors()
+		if err != nil {
+			return err
+		}
+		stuck = sig != l.stuckSig || fresh || l.stuckPolls >= stuckEvery
+	}
+	if stuck && next > 0 {
+		l.stuckSig, l.stuckPolls = sig, 0
 		// A block above the tip names something else as previous: read
 		// the recent blocks again, competing anchors included.
 		from := uint64(0)
@@ -495,6 +529,18 @@ func (l *AnchorLine) Update(ctx context.Context) error {
 			"from_height", next, "blocks", grown, "max_depth", l.cfg.MaxReorgDepth)
 	}
 	return nil
+}
+
+// freshAnchors reports whether the store holds anchors by the publisher
+// signed after the newest one read: one indexed question for one event.
+// Called under update.
+func (l *AnchorLine) freshAnchors() (bool, error) {
+	since := time.Unix(l.newest+1, 0)
+	evs, err := l.cfg.Query([]nostr.Filter{{Authors: []string{l.cfg.Publisher}, Kinds: []int{KindBlockAnchor}, Since: &since}}, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(evs) > 0, nil
 }
 
 // Run loads the line, then updates it every interval until ctx ends.
@@ -765,16 +811,23 @@ func (l *AnchorLine) fill(ctx context.Context) {
 				above, ok = h, true
 			}
 		}
+		if l.fillTip != tip || l.fillFailed == nil {
+			l.fillTip, l.fillFailed = tip, map[[32]byte]time.Time{}
+		}
 		var tops []anchorBlock
 		if ok {
-			tops = slices.Clone(l.pending[above])
+			for _, b := range l.pending[above] {
+				if failed, seen := l.fillFailed[b.hash]; !seen || time.Since(failed) >= fillRetry {
+					tops = append(tops, b)
+				}
+			}
 		}
 		// Only a block at the tip that links to it closes the gap; a rival
 		// sitting there (named another previous) must not stop the fill.
 		atTip := slices.ContainsFunc(l.pending[tip], func(b anchorBlock) bool { return b.prev == tipHash })
 		l.mu.RUnlock()
-		if !ok || atTip {
-			return
+		if !ok || atTip || len(tops) == 0 {
+			return // nothing above, the tip linked, or every candidate failed for this tip
 		}
 		if l.cfg.Fallback == nil || above-tip > uint64(l.cfg.MaxFallbackGap) {
 			if l.gapLog != tip {
@@ -790,6 +843,9 @@ func (l *AnchorLine) fill(ctx context.Context) {
 		for _, top := range tops {
 			if blocks, err = l.headersDown(ctx, top.prev, above-1, tip, tipHash); err == nil {
 				break
+			}
+			if ctx.Err() == nil {
+				l.fillFailed[top.hash] = time.Now() // not again for a while
 			}
 		}
 		if err != nil {
