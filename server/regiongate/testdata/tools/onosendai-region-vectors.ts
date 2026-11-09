@@ -39,8 +39,8 @@ const inputs: Input[] = [
   { name: 'owner-example', input: OWNER, note: 'The owner\'s example, relay.onosendai.tech/' + OWNER + ' and www.onosendai.tech/C/' + OWNER + '.' },
   { name: 'longest-62', input: FULL1.slice(0, 62), note: '62 characters: 248 bits fixed.' },
   { name: 'longest-63', input: FULL1.slice(0, 63), note: '63 characters, the longest prefix: one bit free per axis and the plane bit open.' },
-  { name: 'full-plane-1', input: FULL1, note: '64 characters: one gibson, the plane fixed by the last bit (1, ideaspace).' },
-  { name: 'full-plane-0', input: FULL0, note: '64 characters: one gibson, plane 0 (dataspace).' },
+  { name: 'full-plane-1', input: FULL1, note: '64 characters: one Gibson, the plane fixed by the last bit (1, ideaspace).' },
+  { name: 'full-plane-0', input: FULL0, note: '64 characters: one Gibson, plane 0 (dataspace).' },
   { name: 'full-all-zero', input: '0'.repeat(64), note: 'The origin of dataspace.' },
   { name: 'full-all-f', input: 'f'.repeat(64), note: 'The far corner of ideaspace.' },
   { name: 'upper-case', input: 'ABC', note: 'Case does not matter: the same region as abc.' },
@@ -49,11 +49,12 @@ const inputs: Input[] = [
   { name: 'full-upper-case', input: FULL1.toUpperCase(), note: '64 characters in upper case.' },
   { name: '0x-prefix', input: '0xabc', note: 'A leading 0x is dropped.' },
   { name: '0X-prefix', input: '0XABC', note: 'A leading 0X is dropped too.' },
-  { name: 'full-0x-prefix', input: '0x' + FULL1, note: '0x and 64 characters: one gibson.' },
+  { name: 'full-0x-prefix', input: '0x' + FULL1, note: '0x and 64 characters: one Gibson.' },
   { name: 'trailing-slash', input: 'abc/', note: 'Trailing slashes are dropped.' },
   { name: 'trailing-slashes', input: 'abc///', note: 'Every trailing slash is dropped.' },
   { name: 'percent-encoded', input: '%61%62%63', note: 'The path is percent-decoded once, then read: abc.' },
   { name: 'encoded-slash', input: 'abc%2F', note: 'An encoded trailing slash decodes to a slash, which is then dropped.' },
+  { name: 'encoded-slash-lower', input: 'abc%2f', note: 'An escape takes its two hex digits in either case: %2f is %2F, a slash, which is then dropped.' },
   { name: 'encoded-spaces', input: '%20abc%20', note: 'Whitespace around the decoded text is trimmed (JavaScript String.prototype.trim).' },
   { name: 'encoded-nbsp', input: '%C2%A0abc', note: 'U+00A0 is whitespace to trim.' },
   { name: 'encoded-bom', input: '%EF%BB%BFabc', note: 'U+FEFF is whitespace to trim (JavaScript trim strips it; Go unicode.IsSpace does not).' },
@@ -89,6 +90,9 @@ const inputs: Input[] = [
   { name: 'invalid-encoded-space-only', input: '%20', note: 'Only whitespace.' },
   { name: 'invalid-double-encoded', input: '%2561bc', note: 'Decoded once only: %2561 becomes %61, which is not hex.' },
   { name: 'invalid-bad-escape', input: '%zzabc', note: 'A malformed escape: the text is read undecoded, and % is not hex.' },
+  { name: 'invalid-truncated-escape', input: 'abc%2', note: 'A % followed by only one hex digit is a malformed escape: the text is read undecoded, and % is not hex.' },
+  { name: 'invalid-utf8-lone-lead', input: '%C2abc', note: 'C2 is a UTF-8 lead byte with no continuation byte after it, so the decoded bytes are not valid UTF-8: the text is read undecoded, and % is not hex.' },
+  { name: 'invalid-utf8-ff', input: '%FFabc', note: 'The byte FF never occurs in UTF-8, so the decoded bytes are not valid UTF-8: the text is read undecoded, and % is not hex.' },
   { name: 'invalid-nel', input: '%C2%85abc', note: 'U+0085 is not whitespace to JavaScript trim (Go unicode.IsSpace says it is).' },
   { name: 'invalid-zwsp', input: '%E2%80%8Babc', note: 'U+200B (zero width space) is not whitespace to JavaScript trim: the range ends at U+200A.' },
   { name: 'invalid-mongolian-vowel-separator', input: '%E1%A0%8Eabc', note: 'U+180E (Mongolian vowel separator) is not whitespace to JavaScript trim (it was before Unicode 6.3).' },
@@ -155,7 +159,7 @@ for (const v of inputs) {
   const hi = { x: BigInt(ax.x.max), y: BigInt(ax.y.max), z: BigInt(ax.z.max) }
   const p0: Plane = plane ?? 0
   const outside: string[] = []
-  // One gibson past each face of the box, where the space goes on.
+  // One Gibson past each face of the box, where the space goes on.
   for (const a of ['x', 'y', 'z'] as const) {
     if (lo[a] > 0n) outside.push(at(a === 'x' ? lo.x - 1n : lo.x, a === 'y' ? lo.y - 1n : lo.y, a === 'z' ? lo.z - 1n : lo.z, p0))
     if (hi[a] < AXIS_MAX) outside.push(at(a === 'x' ? hi.x + 1n : hi.x, a === 'y' ? hi.y + 1n : hi.y, a === 'z' ? hi.z + 1n : hi.z, p0))
@@ -188,15 +192,15 @@ const commit = process.argv[2]
 if (!commit || !/^[0-9a-f]{40}$/.test(commit)) throw new Error('usage: node run.mjs <onosendai commit, 40 hex>')
 
 const file = {
-  description: 'Region strings: what relay.onosendai.tech/<hex> and www.onosendai.tech/C/<hex> name, so a speakeasy URL and an ONOSENDAI link agree on the region (speakeasy ruling D7, 2026-11-04). Written from ONOSENDAI\'s own route code; this file is not normative. CYBERSPACE_V2.md defines the bit layout (section 2.2) and the hint box (section 7.7) but no region string; where a value here disagrees with that text, the text is right and the file is a bug.',
+  description: 'Region strings: what relay.onosendai.tech/<hex> and www.onosendai.tech/C/<hex> name, so a speakeasy URL and an ONOSENDAI link agree on the region (speakeasy ruling D7, 2026-11-04). Written from ONOSENDAI\'s own route code; this file is not normative. CYBERSPACE_V2.md section 2.5 defines the region string (a prefix region) and names this file its conformance test; where a value here disagrees with that text, the text is right and the file is a bug.',
   format: [
     'input: the text after "/C/" in an ONOSENDAI path, or after "/" in a relay path, exactly as it appears in the URL (percent-encoding included).',
-    'Reading an input: percent-decode it once (decodeURIComponent; on a malformed escape keep the text undecoded); trim whitespace as JavaScript String.prototype.trim does; drop every trailing "/"; drop one leading "0x" or "0X"; lowercase. The result must be 1 to 64 hex characters, or the input is invalid (valid: false, and nothing else is given).',
+    'Reading an input: percent-decode it once (decodeURIComponent; on a malformed escape, or bytes that are not valid UTF-8, keep the text undecoded, which then cannot be hex); trim whitespace as JavaScript String.prototype.trim does; drop every trailing "/"; drop one leading "0x" or "0X"; lowercase. The result must be 1 to 64 hex characters, or the input is invalid (valid: false, and nothing else is given).',
     'hex: the result. kind: "prefix" for 1 to 63 characters, "full" for 64.',
     'A prefix of n characters fixes the top 4n bits of the coordinate (CYBERSPACE_V2.md section 2.2: x84 y84 z84 x83 ... z0, then the plane bit), so it names the aligned box of every coordinate whose 64-hex form starts with hex. Each axis keeps its own number of free low bits, its height; the heights are equal (a cube) only when n is a multiple of 3. The plane bit is the coordinate\'s lowest bit, so a prefix never fixes it: plane is null, and the box is the same in both planes.',
-    'A full coordinate is one gibson (every height 0) in the plane its lowest bit names.',
+    'A full coordinate is one Gibson (every height 0) in the plane its lowest bit names.',
     'region: per axis, min and max (inclusive) as decimal integers, height, and size = 2^height = max - min + 1; plane is 0, 1, or null for either plane. A coordinate is inside exactly when its 64-hex form starts with hex: each axis in [min, max], and, when plane is not null, the same plane.',
-    'inside and outside: coordinates as 64 lowercase hex characters with their axes as decimal integers and their plane, each one inside or outside the region. outside always holds one gibson past each face of the box where the space continues, and the box corner with the lowest and with the highest fixed bit flipped; for a full coordinate, also the same gibson in the other plane.',
+    'inside and outside: coordinates as 64 lowercase hex characters with their axes as decimal integers and their plane, each one inside or outside the region. outside always holds one Gibson past each face of the box where the space continues, and the box corner with the lowest and with the highest fixed bit flipped; for a full coordinate, also the same Gibson in the other plane.',
   ],
   provenance: {
     onosendai_commit: commit,
