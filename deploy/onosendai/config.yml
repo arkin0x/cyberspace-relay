@@ -182,6 +182,17 @@ rate_limit:
       max_size: 4096 # 4KB - small structured payload + LN proof
     - kind: 30023 # Long-form content (NIP-23)
       max_size: 262144 # 256KB - articles can be big; tighten if seeing abuse
+    # Seeds (DECK-0008), 2026-11-10. grain measures an event as Go's
+    # json.Marshal writes it, which turns <, > and & into six bytes each
+    # (\u003e), and every SEEDO rule line holds "->". So a text of N bytes
+    # can take up to 6N on the wire. config/deploy_onosendai_test.go builds the
+    # largest valid event of each kind and checks it fits.
+    - kind: 3350 # Seeds DNA
+      max_size: 65536 # 64KB - a written DNA is at most 8,192 bytes (§3.1), up to 49,152 escaped; a mixed DNA's content is empty
+    - kind: 3351 # Seeds seed (normally inside a bag; rarely on its own)
+      max_size: 8192 # 8KB - a caption of at most 280 characters, a title of at most 64, fixed tags
+    - kind: 3352 # Seeds tend
+      max_size: 8192 # 8KB - a fixed-length sealed payload (about 400 B), an address, a block and a short placeholder
 
   # Rate limits for different event categories
   category_limits:

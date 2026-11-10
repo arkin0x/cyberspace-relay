@@ -33,6 +33,10 @@ kind_whitelist:
     - "23334"  # TV watching ping (ephemeral, not stored): without it every set reads 1 WATCHING
     - "33340"  # item listings, the ITEM FEED (DECK-0004 §4)
     - "3367"   # color palettes an SNO object names by nevent (DECK-0003 §1.3b)
+    # Seeds (DECK-0008, cyberspace #91); size caps in config.yml
+    - "3350"   # DNA: SEEDO text (at most 8,192 bytes), or a mixed DNA (empty content, NIP-13 work)
+    - "3351"   # seed: an item inside a bag or a chest; a standalone one carries `-`, so only its AUTHed planter can publish it
+    - "3352"   # tend: work given to a seed, sealed with the bag's key
     # glyphbyte (owner, 2026-11-08: "make sure the onosendai relay accepts glyphbyte event kinds")
     - "1738"   # cairns: one URL, found by event-id prefix (glyphbyte spec/CAIRN.md)
     - "35129"  # the glyphbyte napplet (its HTML lives on Blossom; the event points to it)

@@ -3,7 +3,7 @@
   "_comment_version": "version is overlaid at NIP-11 response time from the running build; the placeholder below is fine to leave as-is.",
   "_comment_ui": "Most string fields default to empty: name / description / banner / icon / contact / policy URLs are best edited via the /admin dashboard once the relay is running. The dashboard's Ops section fires the corresponding NIP-86 changerelay* methods.",
   "name": "ONOSENDAI",
-  "description": "The default relay for ONOSENDAI and Cyberspace v2: movement chains, hidden bags and their sealed entries, objects, avatars, and the Nostr plumbing they use. Anyone may publish those kinds; nothing else is accepted. Reading is open.",
+  "description": "The default relay for ONOSENDAI and Cyberspace v2: movement chains, hidden bags and their sealed entries, objects, avatars, seeds, and the Nostr plumbing they use. Anyone may publish those kinds; nothing else is accepted. Reading is open.",
   "banner": "",
   "icon": "",
   "pubkey": "",
