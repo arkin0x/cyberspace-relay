@@ -101,7 +101,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		1738:  "glyphbyte cairns",
 		35129: "glyphbyte napplet",
 		3350:  "Seeds DNA",
-		3351:  "Seeds seed (inside bags; a standalone one may appear)",
+		3351:  "Seeds seed (an item inside bags; the DECK forbids one alone, accepted in case a client sends one)",
 		3352:  "Seeds tend",
 	}
 	for k, what := range published {
@@ -211,10 +211,12 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 	return len(out)
 }
 
-// TestOnosendaiSeedsCapsFitTheLargestValidEvents builds the largest event of
-// each Seeds kind (DECK-0008 §8) that a client may validly send, and checks
-// that the profile's caps let it through and still bind.
-func TestOnosendaiSeedsCapsFitTheLargestValidEvents(t *testing.T) {
+// TestOnosendaiSeedsCapsFitAnUpperBound builds an upper bound for each Seeds
+// kind (DECK-0008 §8): every tag the DECK allows at once, even combinations it
+// forbids together (written content with mixed-only tags, `-` with `p`), every
+// bounded field at its longest, and long relay hints. It checks that the
+// profile's caps let it through and still bind.
+func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
 	cfg := onosendaiConfig(t)
 	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
 	limiter.maxContentLength = cfg.RateLimit.MaxContentLength
@@ -247,6 +249,7 @@ func TestOnosendaiSeedsCapsFitTheLargestValidEvents(t *testing.T) {
 		// ONOSENDAI's alt names the DNA (lib/seeds/plant.ts dnaTemplate).
 		{"alt", "Seeds DNA: " + name64 + " (DECK-0008). Plant it in cyberspace with ONOSENDAI."},
 		{"-"},
+		{"client", "ONOSENDAI"},
 	}
 
 	// Seed (§8.2): a caption of at most 280 characters, a title of at most 64.
@@ -259,6 +262,7 @@ func TestOnosendaiSeedsCapsFitTheLargestValidEvents(t *testing.T) {
 		{"nonce", "18446744073709551615", "255"},
 		{"-"},
 		{"d", hex64},
+		{"client", "ONOSENDAI"},
 	}
 
 	// Tend (§8.3): the sealed payload has a fixed length; AES-256-GCM adds a
@@ -270,6 +274,7 @@ func TestOnosendaiSeedsCapsFitTheLargestValidEvents(t *testing.T) {
 		{"A", "33330:" + hex64 + ":" + hex64},
 		{"block", "999999999", hex64},
 		{"encrypted", "aes-256-gcm", sealed, "cyberspace:region"},
+		{"client", "ONOSENDAI"},
 	}
 	placeholder := "This garden is hidden at a place in cyberspace. Find it with ONOSENDAI: https://onosendai.tech"
 
@@ -293,16 +298,16 @@ func TestOnosendaiSeedsCapsFitTheLargestValidEvents(t *testing.T) {
 		}
 		size := grainEventSize(t, c.kind, c.content, c.tags)
 		if ok, msg := limiter.AllowSize(c.kind, size); !ok {
-			t.Errorf("the largest valid %s (kind %d, %d B) is refused: %s (cap %d B)", c.what, c.kind, size, msg, limit)
+			t.Errorf("the upper bound for a %s (kind %d, %d B) is refused: %s (cap %d B)", c.what, c.kind, size, msg, limit)
 		}
 		if ok, msg := limiter.AllowContentLength(len([]rune(c.content))); !ok {
-			t.Errorf("the largest valid %s (kind %d) is refused: %s", c.what, c.kind, msg)
+			t.Errorf("the upper bound for a %s (kind %d) is refused: %s", c.what, c.kind, msg)
 		}
 		// The kind's own cap is what refuses one byte past it.
 		if ok, msg := limiter.AllowSize(c.kind, limit+1); ok || msg != "Event size limit exceeded for kind" {
 			t.Errorf("kind %d (%s): an event of %d B is not refused by the kind cap (got %v, %q)", c.kind, c.what, limit+1, ok, msg)
 		}
-		t.Logf("kind %d (%s): largest valid event %d B, cap %d B", c.kind, c.what, size, limit)
+		t.Logf("kind %d (%s): upper bound %d B, cap %d B", c.kind, c.what, size, limit)
 	}
 }
 

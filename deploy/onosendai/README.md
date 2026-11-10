@@ -16,7 +16,7 @@ region.)
 | 23330 | ephemeral chat envelope (relayed, never stored); its 23333 line rides inside it, never bare | anyone |
 | 23334 | TV watching ping (ephemeral, never stored); without it every TV set reads 1 WATCHING | anyone |
 | 33340, 3367 | item listings (the ITEM FEED, DECK-0004 §4), color palettes objects name by nevent (DECK-0003 §1.3b) | anyone |
-| 3350, 3351, 3352 | Seeds (DECK-0008): DNA, seeds (inside bags; a standalone one is protected, so only its AUTHed planter can publish it), tends | anyone |
+| 3350, 3351, 3352 | Seeds (DECK-0008): DNA, seeds (items inside bags; never meant to be published alone), tends | anyone |
 | 1738, 35129 | glyphbyte: cairns (one URL, found by event-id prefix) and the glyphbyte napplet | anyone |
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
@@ -52,19 +52,27 @@ kind 5 deletions, which ONOSENDAI paces under the relay's rate limits.
 3350, 3351 and 3352 were added on 2026-11-10 for Seeds (DECK-0008 §8,
 cyberspace #91): the DNA, the seed and the tend. ONOSENDAI publishes a DNA
 here before it plants it, and the relay refused it (`event kind is not
-whitelisted`). A seed is an item inside a bag or a chest and is normally
-never published on its own; one that is carries `-` (NIP-70), so only its
-planter, signed in with NIP-42, can publish it. Each kind has a size cap in
-`config.yml` (`kind_size_limits`), well under `max_event_size`:
+whitelisted`). A seed is an item inside a bag or a chest, and DECK-0008 §8.2
+says it MUST NOT be published on its own, because its `C` is the place the bag
+protects; ONOSENDAI never does. It is accepted anyway under the 2026-11-05
+ruling, in case a client sends one. A seed that follows the DECK carries `-`
+(NIP-70), so grain takes it only from its planter, signed in with NIP-42; the
+relay does not require `-`, so a seed without it would be taken from anyone.
+Each kind has a size cap in `config.yml` (`kind_size_limits`), well under
+`max_event_size`:
 
 | Kind | Cap | Why |
 |---|---|---|
-| 3350 DNA | 64 KB | A written DNA's text is at most 8,192 bytes (DECK-0008 §3.1). grain measures the event as Go's `json.Marshal` writes it, which turns `<`, `>` and `&` into six bytes each, and every rule line holds `->`; comments may hold any character, control characters included, which also take six. So the content takes at most 49,152 bytes, and the rest leaves room for long relay hints. A mixed DNA's content is empty: its child's text, which may pass 8,192 bytes (§6.6), is computed by readers and never sent. A copy of it published as a written DNA is held to 8,192 bytes again. |
+| 3350 DNA | 64 KB | A written DNA's text is at most 8,192 bytes (DECK-0008 §3.1). grain measures the event as Go's `json.Marshal` writes it, which turns `<`, `>` and `&` into six bytes each, and every rule line holds `->`; comments may hold any character, and most control characters also take six. So the content takes at most 49,152 bytes, and the rest leaves room for long relay hints. A mixed DNA's content is empty: its child's text, which may pass 8,192 bytes (§6.6), is computed by readers and never sent. A copy of it published as a written DNA is held to 8,192 bytes again. |
 | 3351 seed | 8 KB | A caption of at most 280 characters and a title of at most 64 (§8.2), at most 6 bytes each escaped, and fixed tags: about 3 KB at the most. |
 | 3352 tend | 8 KB | A sealed payload of fixed length (about 400 bytes of base64, §8.3), the bag's address, a block and a placeholder: under 2 KB. |
 
-`config/deploy_onosendai_test.go` builds the largest valid event of each kind
-and checks that it fits its cap.
+`config/deploy_onosendai_test.go` builds an upper bound for each kind (every
+tag the DECK allows at once, every bounded field at its longest, long relay
+hints) and checks that it fits its cap. The DECK leaves a few fields unbounded
+(`alt`, the tend's placeholder, relay hints, the `nonce` counter), so the caps
+assume sane lengths: a tend placeholder over about 7 KB, for example, would be
+refused.
 
 ## Rate limits
 
