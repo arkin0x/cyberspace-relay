@@ -78,7 +78,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// Every kind a client publishes to the canonical relay (kind audit,
 	// 2026-11-05: ONOSENDAI, cyberspace-mcp, NTH; cyberspace-cli, snocrash and
 	// HOSAKA publish nothing here; glyphbyte added 2026-11-08; ONOSENDAI sealed
-	// entries, 33335, added 2026-11-09; Seeds, 3350 to 3352, added 2026-11-10).
+	// entries, 33335, added 2026-11-09; Seeds DNA and tends, 3350 and 3352,
+	// added 2026-11-10).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -101,7 +102,6 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		1738:  "glyphbyte cairns",
 		35129: "glyphbyte napplet",
 		3350:  "Seeds DNA",
-		3351:  "Seeds seed (an item inside bags; the DECK forbids one alone, accepted in case a client sends one)",
 		3352:  "Seeds tend",
 	}
 	for k, what := range published {
@@ -124,6 +124,11 @@ func TestOnosendaiWhitelistRefusesWhatTheOwnerRefused(t *testing.T) {
 	// The inner chat line rides inside a 23330 and is never published bare.
 	if kinds[23333] {
 		t.Error("whitelist.yml accepts kind 23333 bare; it only rides inside a 23330")
+	}
+	// A Seeds seed is an item inside a bag and MUST NOT be published on its
+	// own (DECK-0008 §8.2): its C is the place the bag protects.
+	if kinds[3351] {
+		t.Error("whitelist.yml accepts kind 3351; a seed only rides inside a bag")
 	}
 }
 
@@ -211,8 +216,8 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 	return len(out)
 }
 
-// TestOnosendaiSeedsCapsFitAnUpperBound builds an upper bound for each Seeds
-// kind (DECK-0008 §8): every tag the DECK allows at once, even combinations it
+// TestOnosendaiSeedsCapsFitAnUpperBound builds an upper bound for the Seeds
+// DNA and tend (DECK-0008 §8): every tag the DECK allows at once, even ones it
 // forbids together (written content with mixed-only tags, `-` with `p`), every
 // bounded field at its longest, and long relay hints. It checks that the
 // profile's caps let it through and still bind.
@@ -252,19 +257,6 @@ func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
 		{"client", "ONOSENDAI"},
 	}
 
-	// Seed (§8.2): a caption of at most 280 characters, a title of at most 64.
-	seedTags := [][]string{
-		{"dna", hex64, hint},
-		{"planted", "999999999"},
-		{"scale", "84"},
-		{"C", hex64},
-		{"title", name64},
-		{"nonce", "18446744073709551615", "255"},
-		{"-"},
-		{"d", hex64},
-		{"client", "ONOSENDAI"},
-	}
-
 	// Tend (§8.3): the sealed payload has a fixed length; AES-256-GCM adds a
 	// 12-byte nonce and a 16-byte tag, then base64.
 	plain := `{"seed":"` + hex64 + `","target":"` + strings.Repeat("9", 20) + `","nonces":[` +
@@ -285,7 +277,6 @@ func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
 		tags    [][]string
 	}{
 		{3350, "DNA", dnaText, dnaTags},
-		{3351, "seed", strings.Repeat("<", 280), seedTags},
 		{3352, "tend", placeholder, tendTags},
 	} {
 		limit, ok := caps[c.kind]
