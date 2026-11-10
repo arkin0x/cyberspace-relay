@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -77,7 +78,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// Every kind a client publishes to the canonical relay (kind audit,
 	// 2026-11-05: ONOSENDAI, cyberspace-mcp, NTH; cyberspace-cli, snocrash and
 	// HOSAKA publish nothing here; glyphbyte added 2026-11-08; ONOSENDAI sealed
-	// entries, 33335, added 2026-11-09).
+	// entries, 33335, added 2026-11-09; Seeds DNA and tends, 3350 and 3352,
+	// added 2026-11-10).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -99,6 +101,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		10063: "Blossom server lists",
 		1738:  "glyphbyte cairns",
 		35129: "glyphbyte napplet",
+		3350:  "Seeds DNA",
+		3352:  "Seeds tend",
 	}
 	for k, what := range published {
 		if !kinds[k] {
@@ -120,6 +124,11 @@ func TestOnosendaiWhitelistRefusesWhatTheOwnerRefused(t *testing.T) {
 	// The inner chat line rides inside a 23330 and is never published bare.
 	if kinds[23333] {
 		t.Error("whitelist.yml accepts kind 23333 bare; it only rides inside a 23330")
+	}
+	// A Seeds seed is an item inside a bag and MUST NOT be published on its
+	// own (DECK-0008 §8.2): its C is the place the bag protects.
+	if kinds[3351] {
+		t.Error("whitelist.yml accepts kind 3351; a seed only rides inside a bag")
 	}
 }
 
@@ -179,6 +188,117 @@ func TestOnosendaiSizeCapsFitWhatClientsSend(t *testing.T) {
 	}
 	if cfg.RateLimit.MaxEventSize < 262144 {
 		t.Errorf("max_event_size %d is under 256 KB; bags of 158 KB are already on the relay", cfg.RateLimit.MaxEventSize)
+	}
+}
+
+// grainEventSize is the size grain checks against max_event_size and
+// kind_size_limits: HandleEvent decodes the EVENT into a map and measures
+// json.Marshal of it, which escapes <, > and & as <, > and &
+// (six bytes each), and control characters as \u00XX.
+func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int {
+	t.Helper()
+	hex64 := strings.Repeat("f", 64)
+	raw, err := json.Marshal(map[string]any{
+		"id": hex64, "pubkey": hex64, "created_at": 1_800_000_000, "kind": kind,
+		"tags": tags, "content": content, "sig": strings.Repeat("f", 128),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(out)
+}
+
+// TestOnosendaiSeedsCapsFitAnUpperBound builds an upper bound for the Seeds
+// DNA and tend (DECK-0008 §8): every tag the DECK allows at once, even ones it
+// forbids together (written content with mixed-only tags, `-` with `p`), every
+// bounded field at its longest, and long relay hints. It checks that the
+// profile's caps let it through and still bind.
+func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
+	cfg := onosendaiConfig(t)
+	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
+	limiter.maxContentLength = cfg.RateLimit.MaxContentLength
+	caps := map[int]int{}
+	for _, l := range cfg.RateLimit.KindSizeLimits {
+		limiter.AddKindSizeLimit(l.Kind, l.MaxSize)
+		caps[l.Kind] = l.MaxSize
+	}
+	hex64 := strings.Repeat("a", 64)
+	// A relay hint far longer than any real one.
+	hint := "wss://" + strings.Repeat("r", 250) + "/"
+	// A name or title of 64 code points, each six bytes once escaped.
+	name64 := strings.Repeat("<", 64)
+
+	// DNA (§8.1): every tag a written DNA, a mixed DNA or a copy may carry, at
+	// once. A written DNA's text is at most 8,192 bytes (§3.1); comments may
+	// hold any character, so all of it may be ones json.Marshal escapes.
+	dnaText := "dna x\naxiom F\nF -> F F\n#"
+	dnaText += strings.Repeat(">", 8192-len(dnaText))
+	dnaTags := [][]string{
+		{"nonce", "18446744073709551615", "255"},
+		{"caps", "65536", "16384", "256"},
+		{"e", hex64, hint, "mother"},
+		{"e", hex64, hint, "father"},
+		{"block", "999999999", hex64},
+		{"hybrid"},
+		{"name", name64},
+		{"q", hex64, hint},
+		{"p", hex64},
+		// ONOSENDAI's alt names the DNA (lib/seeds/plant.ts dnaTemplate).
+		{"alt", "Seeds DNA: " + name64 + " (DECK-0008). Plant it in cyberspace with ONOSENDAI."},
+		{"-"},
+		{"client", "ONOSENDAI"},
+	}
+
+	// Tend (§8.3): the sealed payload has a fixed length; AES-256-GCM adds a
+	// 12-byte nonce and a 16-byte tag, then base64.
+	plain := `{"seed":"` + hex64 + `","target":"` + strings.Repeat("9", 20) + `","nonces":[` +
+		strings.TrimSuffix(strings.Repeat(`"`+strings.Repeat("0", 16)+`",`, 8), ",") + `]}`
+	sealed := base64.StdEncoding.EncodeToString(make([]byte, 12+len(plain)+16))
+	tendTags := [][]string{
+		{"A", "33330:" + hex64 + ":" + hex64},
+		{"block", "999999999", hex64},
+		{"encrypted", "aes-256-gcm", sealed, "cyberspace:region"},
+		{"client", "ONOSENDAI"},
+	}
+	placeholder := "This garden is hidden at a place in cyberspace. Find it with ONOSENDAI: https://onosendai.tech"
+
+	for _, c := range []struct {
+		kind    int
+		what    string
+		content string
+		tags    [][]string
+	}{
+		{3350, "DNA", dnaText, dnaTags},
+		{3352, "tend", placeholder, tendTags},
+	} {
+		limit, ok := caps[c.kind]
+		if !ok {
+			t.Errorf("kind %d (%s) has no kind_size_limits entry", c.kind, c.what)
+			continue
+		}
+		if limit > cfg.RateLimit.MaxEventSize {
+			t.Errorf("kind %d (%s) is capped at %d B, over max_event_size %d, so the cap does nothing", c.kind, c.what, limit, cfg.RateLimit.MaxEventSize)
+		}
+		size := grainEventSize(t, c.kind, c.content, c.tags)
+		if ok, msg := limiter.AllowSize(c.kind, size); !ok {
+			t.Errorf("the upper bound for a %s (kind %d, %d B) is refused: %s (cap %d B)", c.what, c.kind, size, msg, limit)
+		}
+		if ok, msg := limiter.AllowContentLength(len([]rune(c.content))); !ok {
+			t.Errorf("the upper bound for a %s (kind %d) is refused: %s", c.what, c.kind, msg)
+		}
+		// The kind's own cap is what refuses one byte past it.
+		if ok, msg := limiter.AllowSize(c.kind, limit+1); ok || msg != "Event size limit exceeded for kind" {
+			t.Errorf("kind %d (%s): an event of %d B is not refused by the kind cap (got %v, %q)", c.kind, c.what, limit+1, ok, msg)
+		}
+		t.Logf("kind %d (%s): upper bound %d B, cap %d B", c.kind, c.what, size, limit)
 	}
 }
 

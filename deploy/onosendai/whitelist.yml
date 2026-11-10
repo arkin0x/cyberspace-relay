@@ -5,7 +5,9 @@
 # when it is written in place (README.md, "Changing the config on the droplet").
 # Refused on purpose: 1 (never, see the ruling below), 4, 1059, 9735, 30023
 # (DMs go to inbox relays). glyphbyte's link-less notes are kind 1, so they
-# are refused here too; its cairns (1738) are accepted.
+# are refused here too; its cairns (1738) are accepted. 3351 (a Seeds seed)
+# is refused: it is an item inside a bag, never published on its own (DECK-0008
+# §8.2), like the other bag items (3330, 3340, 3341, 1063).
 # config/deploy_onosendai_test.go checks this file.
 
 pubkey_whitelist:
@@ -33,6 +35,9 @@ kind_whitelist:
     - "23334"  # TV watching ping (ephemeral, not stored): without it every set reads 1 WATCHING
     - "33340"  # item listings, the ITEM FEED (DECK-0004 §4)
     - "3367"   # color palettes an SNO object names by nevent (DECK-0003 §1.3b)
+    # Seeds (DECK-0008, cyberspace #91); size caps in config.yml
+    - "3350"   # DNA: SEEDO text (at most 8,192 bytes), or a mixed DNA (empty content, NIP-13 work)
+    - "3352"   # tend: work given to a seed, sealed with the bag's key
     # glyphbyte (owner, 2026-11-08: "make sure the onosendai relay accepts glyphbyte event kinds")
     - "1738"   # cairns: one URL, found by event-id prefix (glyphbyte spec/CAIRN.md)
     - "35129"  # the glyphbyte napplet (its HTML lives on Blossom; the event points to it)
