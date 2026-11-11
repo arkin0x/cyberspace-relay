@@ -51,6 +51,17 @@ func TestPageDescribesTheRegion(t *testing.T) {
 			t.Errorf("speakeasy page lacks %q", want)
 		}
 	}
+	if !strings.Contains(buf.String(), `href="/favicon.ico"`) {
+		t.Error("no relay icon: the page keeps grain's favicon")
+	}
+	p.Favicon = "https://relay.example/icon.png"
+	buf.Reset()
+	if err := RenderPage(&buf, p); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `<link rel="icon" href="https://relay.example/icon.png">`) || strings.Contains(buf.String(), "/favicon.ico") {
+		t.Error("with a relay icon, the page's favicon is that icon")
+	}
 }
 
 // TestContainingByPrefix: with the region parser, the speakeasies holding a

@@ -134,6 +134,7 @@ func (rt *speakeasyRuntime) servePage(w http.ResponseWriter, r *http.Request) bo
 		url = rt.url(sp.ID)
 	}
 	page := speakeasy.NewPage(region, rt.cfg.Planes, sp, url)
+	page.Favicon = strings.TrimSpace(utils.GetRelayMetadataCopy().Icon)
 	switch {
 	case sp != nil && len(sp.Names) > 0:
 		page.NameURL = rt.url(sp.Names[0])
