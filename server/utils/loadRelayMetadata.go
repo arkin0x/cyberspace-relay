@@ -236,13 +236,24 @@ func SetRelayOwner(pubkey string) error {
 // Accepts lowercased hex only; the env-var parser normalizes first.
 // Holds ownerClaimMu so a /setup POST racing startup can't write a
 // claim that gets overwritten in memory a moment later.
+//
+// The override is remembered (ownerOverride) and re-applied by every
+// LoadRelayMetadata, so it survives the in-memory reload that each
+// NIP-86 changerelay* write and /setup claim does. Without that, the
+// first metadata write reloads the on-disk (empty) pubkey and locks the
+// env-declared owner out of every admin call until a restart.
 func OverrideRelayOwnerInMemory(pubkey string) {
 	ownerClaimMu.Lock()
 	defer ownerClaimMu.Unlock()
 	metadataMu.Lock()
+	ownerOverride = pubkey
 	relayMetadata.Pubkey = pubkey
 	metadataMu.Unlock()
 }
+
+// ownerOverride is the GRAIN_OWNER_PUBKEY owner, kept so LoadRelayMetadata
+// can re-apply it over the on-disk pubkey. Guarded by metadataMu.
+var ownerOverride string
 
 // SetRelayMetadataField writes a single top-level field to
 // relay_metadata.json and reloads the in-memory copy. Used by the
@@ -464,6 +475,9 @@ func LoadRelayMetadata(filename string) error {
 	}
 
 	metadataMu.Lock()
+	if ownerOverride != "" {
+		parsed.Pubkey = ownerOverride
+	}
 	relayMetadata = parsed
 	metadataMu.Unlock()
 
