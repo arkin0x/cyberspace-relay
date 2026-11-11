@@ -18,7 +18,7 @@ type PageData struct {
 // defaultBrandName is grain's own name, shown in the browser tab and the
 // header logo when the relay operator has not configured a custom relay
 // icon. Profile-scoped branding (e.g. the ONOSENDAI default relay) rides
-// in through relay_metadata.json — see SetRelayBranding — and is left to
+// in through relay_metadata.json (see SetRelayBranding) and is left to
 // each deployment's own metadata rather than baked in here.
 const defaultBrandName = "🌾 grain"
 

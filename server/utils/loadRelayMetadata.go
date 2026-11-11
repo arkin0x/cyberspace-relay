@@ -59,6 +59,16 @@ type RelayLimitation struct {
 
 var relayMetadata RelayMetadata
 
+// metadataMu guards the in-memory relayMetadata struct. Readers take an
+// RLock; the full-struct reload in LoadRelayMetadata and the in-memory
+// owner override take a write lock. NIP-86 changerelay* writes reload the
+// struct concurrently with page renders (the header/title branding reader)
+// and NIP-11 reads that copy it out, so the shared global needs a guard.
+// Distinct from ownerClaimMu, which serializes the first-run claim's
+// check-then-write: the two are always taken ownerClaimMu -> metadataMu,
+// never the reverse, so they cannot deadlock.
+var metadataMu sync.RWMutex
+
 // Version is set at startup from the main package's build-time ldflags
 // (via server.SetVersionInfo -> utils.SetVersion). When non-empty, it
 // overrides whatever `version` field is in relay_metadata.json so the
@@ -84,6 +94,8 @@ func LoadRelayMetadataJSON() error {
 // sentinel from the example metadata. Use IsRelayUnowned() when
 // you want to know whether ownership has been claimed.
 func GetRelayOwnerPubkey() string {
+	metadataMu.RLock()
+	defer metadataMu.RUnlock()
 	return relayMetadata.Pubkey
 }
 
@@ -93,6 +105,8 @@ func GetRelayOwnerPubkey() string {
 // dashboard's ops section uses this to pre-fill the relay-identity
 // edit form; tests use it to assert post-update state.
 func GetRelayMetadataCopy() RelayMetadata {
+	metadataMu.RLock()
+	defer metadataMu.RUnlock()
 	return relayMetadata
 }
 
@@ -112,10 +126,15 @@ func IsRelayUnowned() bool {
 }
 
 // isRelayUnownedLocked is the same predicate without taking
-// ownerClaimMu. SetRelayOwner already holds the mutex and would
-// deadlock if it re-entered through the exported helper.
+// ownerClaimMu. SetRelayOwner already holds that mutex and would
+// deadlock if it re-entered through the exported helper. It still takes
+// the metadataMu RLock to read the pubkey (a different lock), which is
+// safe: the only caller holding ownerClaimMu takes them in the
+// ownerClaimMu -> metadataMu order the write paths use.
 func isRelayUnownedLocked() bool {
+	metadataMu.RLock()
 	p := relayMetadata.Pubkey
+	metadataMu.RUnlock()
 	return p == "" || p == allZerosPubkey
 }
 
@@ -211,7 +230,9 @@ func SetRelayOwner(pubkey string) error {
 func OverrideRelayOwnerInMemory(pubkey string) {
 	ownerClaimMu.Lock()
 	defer ownerClaimMu.Unlock()
+	metadataMu.Lock()
 	relayMetadata.Pubkey = pubkey
+	metadataMu.Unlock()
 }
 
 // SetRelayMetadataField writes a single top-level field to
@@ -299,10 +320,13 @@ func SetRelayMetadataArrayField(field string, values []string) error {
 // args so the dispatcher can express "don't touch this field" by
 // passing nil.
 //
-// Atomic write + watcher suppression are handled here so callers
-// don't have to remember. The function is safe for concurrent use:
-// it holds the same package-internal mutex used by the
-// suppression machinery on the config side.
+// Atomic write + watcher suppression are handled here so callers don't
+// have to remember. The in-memory reload at the end goes through
+// LoadRelayMetadata, which swaps relayMetadata under metadataMu, so
+// readers never observe a torn struct. The read-modify-write of the
+// on-disk file itself is not serialized against a concurrent
+// UpdateRelayMetadata; today every caller is a single NIP-86 owner
+// request, so concurrent writes are not a path we hit.
 func UpdateRelayMetadata(name, description, icon, banner *string) error {
 	raw, err := os.ReadFile(relayMetadataWritePath)
 	if err != nil {
@@ -418,7 +442,11 @@ func LoadRelayMetadata(filename string) error {
 		return err
 	}
 
-	err = json.Unmarshal(data, &relayMetadata)
+	// Unmarshal into a local first, then swap under the write lock, so a
+	// concurrent reader (NIP-11 serve, admin pre-fill, header branding)
+	// never sees a half-populated struct mid-decode.
+	var parsed RelayMetadata
+	err = json.Unmarshal(data, &parsed)
 	if err != nil {
 		log.Util().Error("Failed to parse relay metadata JSON",
 			"file", filename,
@@ -426,14 +454,18 @@ func LoadRelayMetadata(filename string) error {
 		return err
 	}
 
+	metadataMu.Lock()
+	relayMetadata = parsed
+	metadataMu.Unlock()
+
 	log.Util().Info("Relay metadata loaded successfully",
-		"relay_name", relayMetadata.Name,
-		"version", relayMetadata.Version,
-		"nips_count", len(relayMetadata.SupportedNIPs))
+		"relay_name", parsed.Name,
+		"version", parsed.Version,
+		"nips_count", len(parsed.SupportedNIPs))
 
 	// Log supported NIPs for debugging
-	if len(relayMetadata.SupportedNIPs) > 0 {
-		log.Util().Debug("Supported NIPs", "nips", relayMetadata.SupportedNIPs)
+	if len(parsed.SupportedNIPs) > 0 {
+		log.Util().Debug("Supported NIPs", "nips", parsed.SupportedNIPs)
 	}
 
 	return nil

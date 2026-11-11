@@ -40,21 +40,19 @@
        and read live NIP-11 metadata, so a NIP-86 icon/name change shows on
        the next render. -->
   <h1
-    class="flex items-center gap-2 text-2xl font-bold cursor-pointer shrink-0"
+    class="text-2xl font-bold cursor-pointer shrink-0"
     hx-get="/views/home.html"
     hx-target="#main-content"
     hx-push-url="/"
   >
-    {{if relayIcon}}
-    <img
-      src="{{relayIcon}}"
-      alt="{{if relayName}}{{relayName}}{{else}}Relay{{end}} logo"
-      class="w-8 h-8 rounded shrink-0"
-    />
-    <span>{{if relayName}}{{relayName}}{{else}}grain{{end}}</span>
-    {{else}}
-    🌾 grain
-    {{end}}
+    {{if relayIcon}}<span class="flex items-center gap-2">
+      <img
+        src="{{relayIcon}}"
+        alt="{{if relayName}}{{relayName}}{{else}}Relay{{end}} logo"
+        class="w-8 h-8 rounded shrink-0"
+      />
+      <span>{{if relayName}}{{relayName}}{{else}}grain{{end}}</span>
+    </span>{{else}}🌾 grain{{end}}
   </h1>
 
   <!-- Search bar. Visible inline on md+; on mobile it's hidden by
