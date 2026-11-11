@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/0ceanslim/grain/server/utils/log"
@@ -20,6 +21,13 @@ import (
 // and leaving anything not config-derived (e.g. created_at bounds set in
 // relay_metadata.json) untouched.
 var LimitationProvider func(*RelayLimitation)
+
+// PublicBaseProvider, set by server startup, returns the relay's public web
+// origin for a request ("https://relay.example"). The NIP-11 handler uses it
+// to make a relay-relative icon / banner (grain's own stored copies, kept as
+// "/branding/<file>") absolute, since clients load them from another origin.
+// Nil: relative values are served as they are.
+var PublicBaseProvider func(*http.Request) string
 
 type RelayMetadata struct {
 	Name           string          `json:"name"`
@@ -168,6 +176,13 @@ func SetRelayMetadataWritePath(p string) { relayMetadataWritePath = p }
 // under this same lock so the check + write is single-winner.
 var ownerClaimMu sync.Mutex
 
+// metadataWriteMu serializes every read-modify-write of relay_metadata.json
+// (the changerelay* field writes, UpdateRelayMetadata, the owner claim, and
+// grain's branding-image stores and startup import), so two writers cannot
+// each read the old file and drop the other's change. Lock order:
+// ownerClaimMu -> metadataWriteMu -> metadataMu.
+var metadataWriteMu sync.Mutex
+
 // ErrOwnerAlreadySet is returned by SetRelayOwner when the on-disk
 // metadata already names an owner. Callers (the /setup POST handler)
 // translate this to a 409 so the page can show the "already claimed"
@@ -198,6 +213,8 @@ func SetRelayOwner(pubkey string) error {
 	if !isRelayUnownedLocked() {
 		return ErrOwnerAlreadySet
 	}
+	metadataWriteMu.Lock()
+	defer metadataWriteMu.Unlock()
 
 	raw, err := os.ReadFile(relayMetadataWritePath)
 	if err != nil {
@@ -267,6 +284,8 @@ var ownerOverride string
 // responsible for validation (empty / URL / etc.) — this helper
 // just persists.
 func SetRelayMetadataField(field, value string) error {
+	metadataWriteMu.Lock()
+	defer metadataWriteMu.Unlock()
 	raw, err := os.ReadFile(relayMetadataWritePath)
 	if err != nil {
 		return fmt.Errorf("read relay metadata: %w", err)
@@ -298,6 +317,8 @@ func SetRelayMetadataField(field, value string) error {
 // language_tags / tags from the admin dashboard. A nil/empty slice clears the
 // field. Same atomic-write + watcher-suppression pipeline; caller validates.
 func SetRelayMetadataArrayField(field string, values []string) error {
+	metadataWriteMu.Lock()
+	defer metadataWriteMu.Unlock()
 	raw, err := os.ReadFile(relayMetadataWritePath)
 	if err != nil {
 		return fmt.Errorf("read relay metadata: %w", err)
@@ -344,10 +365,11 @@ func SetRelayMetadataArrayField(field string, values []string) error {
 // have to remember. The in-memory reload at the end goes through
 // LoadRelayMetadata, which swaps relayMetadata under metadataMu, so
 // readers never observe a torn struct. The read-modify-write of the
-// on-disk file itself is not serialized against a concurrent
-// UpdateRelayMetadata; today every caller is a single NIP-86 owner
-// request, so concurrent writes are not a path we hit.
+// on-disk file is serialized with every other metadata write by
+// metadataWriteMu.
 func UpdateRelayMetadata(name, description, icon, banner *string) error {
+	metadataWriteMu.Lock()
+	defer metadataWriteMu.Unlock()
 	raw, err := os.ReadFile(relayMetadataWritePath)
 	if err != nil {
 		return fmt.Errorf("read relay metadata: %w", err)
@@ -532,7 +554,7 @@ func RelayInfoHandlerFor(w http.ResponseWriter, r *http.Request, edit func(*Rela
 	// Override the version field with the build-time version so the NIP-11
 	// info document always matches the running binary, regardless of what
 	// the on-disk relay_metadata.json says.
-	response := relayMetadata
+	response := GetRelayMetadataCopy()
 	if buildVersion != "" {
 		response.Version = buildVersion
 	}
@@ -549,6 +571,15 @@ func RelayInfoHandlerFor(w http.ResponseWriter, r *http.Request, edit func(*Rela
 	// them off the wire.
 	response.Logo = ""
 	response.LogoLight = ""
+	// A relay-relative icon / banner is made absolute for clients.
+	if PublicBaseProvider != nil {
+		base := strings.TrimRight(PublicBaseProvider(r), "/")
+		for _, f := range []*string{&response.Icon, &response.Banner} {
+			if base != "" && strings.HasPrefix(*f, "/") && !strings.HasPrefix(*f, "//") {
+				*f = base + *f
+			}
+		}
+	}
 
 	err := json.NewEncoder(w).Encode(response)
 	if err != nil {

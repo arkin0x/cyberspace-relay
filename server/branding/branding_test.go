@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,9 +62,9 @@ func TestDecodeDataURL(t *testing.T) {
 	}
 }
 
-// Save stores a content-addressed copy, points the field at it on the public
-// origin, drops the slot's older copy only, and the copy is served with
-// headers that keep it inert.
+// Save stores a content-addressed copy, points the field at its relative
+// path, drops the slot's older copy only, and the copy is served with headers
+// that keep it inert.
 func TestSaveServeAndPrune(t *testing.T) {
 	SetDir(t.TempDir())
 	t.Cleanup(func() { SetDir("") })
@@ -72,20 +73,17 @@ func TestSaveServeAndPrune(t *testing.T) {
 
 	a, _ := Check(pngBytes(t, 4, 4))
 	b, _ := Check(pngBytes(t, 5, 5))
-	if _, err := Save("logo", a, "", set); err == nil {
-		t.Fatal("Save without a public base should fail")
-	}
-	u1, err := Save("logo", a, "https://relay.example", set)
+	u1, err := Save("logo", a, set)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Save("icon", b, "https://relay.example", set); err != nil {
+	if _, err := Save("icon", b, set); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(u1, "https://relay.example/branding/logo-") || !strings.HasSuffix(u1, ".png") || fields["logo"] != u1 {
-		t.Fatalf("url %q fields %v", u1, fields)
+	if !strings.HasPrefix(u1, "/branding/logo-") || !strings.HasSuffix(u1, ".png") || fields["logo"] != u1 {
+		t.Fatalf("path %q fields %v", u1, fields)
 	}
-	u2, err := Save("logo", b, "https://relay.example", set)
+	u2, err := Save("logo", b, set)
 	if err != nil || u2 == u1 {
 		t.Fatalf("replace: %q %v", u2, err)
 	}
@@ -94,14 +92,13 @@ func TestSaveServeAndPrune(t *testing.T) {
 		t.Fatalf("files after replace: %v", names)
 	}
 
-	path := strings.TrimPrefix(u2, "https://relay.example")
 	rec := httptest.NewRecorder()
-	ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	ServeHTTP(rec, httptest.NewRequest(http.MethodGet, u2, nil))
 	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/png" || rec.Header().Get("X-Content-Type-Options") != "nosniff" ||
 		!strings.Contains(rec.Header().Get("Content-Security-Policy"), "sandbox") || !bytes.Equal(rec.Body.Bytes(), b.Data) {
 		t.Fatalf("serve: %d %v", rec.Code, rec.Header())
 	}
-	for _, p := range []string{strings.TrimPrefix(u1, "https://relay.example"), "/branding/../relay_metadata.json", "/branding/x.png", "/branding/"} {
+	for _, p := range []string{u1, "/branding/../relay_metadata.json", "/branding/x.png", "/branding/"} {
 		rec := httptest.NewRecorder()
 		ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
 		if rec.Code != http.StatusNotFound {
@@ -109,13 +106,13 @@ func TestSaveServeAndPrune(t *testing.T) {
 		}
 	}
 	rec = httptest.NewRecorder()
-	ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+	ServeHTTP(rec, httptest.NewRequest(http.MethodPost, u2, nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST: HTTP %d", rec.Code)
 	}
 }
 
-func TestPublicBase(t *testing.T) {
+func TestPublicBaseAbsoluteAndOwnURL(t *testing.T) {
 	for in, want := range map[string]string{
 		"wss://relay.example":     "https://relay.example",
 		"ws://localhost:8181/":    "http://localhost:8181",
@@ -134,23 +131,64 @@ func TestPublicBase(t *testing.T) {
 	if got := PublicBase("", nil); got != "" {
 		t.Errorf("nothing known: %q", got)
 	}
+	if got := Absolute("/branding/icon-0123456789abcdef.png", "https://relay.example/"); got != "https://relay.example/branding/icon-0123456789abcdef.png" {
+		t.Errorf("absolute: %q", got)
+	}
+	for _, v := range []string{"https://cdn.example/a.png", "//cdn.example/a.png", ""} {
+		if got := Absolute(v, "https://relay.example"); got != v {
+			t.Errorf("Absolute(%q) changed it to %q", v, got)
+		}
+	}
+	for v, want := range map[string]bool{
+		"/static/icons/x.png":                  true,
+		"https://relay.example/static/x.png":   true,
+		"https://RELAY.example/branding/a.png": true,
+		"https://cdn.example/a.png":            false,
+		"//relay.example/a.png":                true, // same host, scheme-relative
+		"//cdn.example/a.png":                  false,
+	} {
+		if got := IsOwnURL(v, "relay.example"); got != want {
+			t.Errorf("IsOwnURL(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
+func TestPublicOnlyRefusesNonPublicRanges(t *testing.T) {
+	for _, a := range []string{"127.0.0.1", "10.1.2.3", "192.168.1.1", "169.254.169.254", "100.100.100.100", "198.18.0.1",
+		"192.0.0.8", "240.0.0.1", "0.1.2.3", "::1", "fd00::1", "64:ff9b::a00:1", "2002:a00:1::1", "::ffff:127.0.0.1"} {
+		if err := publicOnly("tcp", net.JoinHostPort(a, "443"), nil); err == nil {
+			t.Errorf("%s: allowed", a)
+		}
+	}
+	for _, a := range []string{"93.184.216.34", "2606:4700::6810:84e5"} {
+		if err := publicOnly("tcp", net.JoinHostPort(a, "443"), nil); err != nil {
+			t.Errorf("%s: refused: %v", a, err)
+		}
+	}
 }
 
 // Fetch refuses non-public addresses unless a test allows them; with them
-// allowed, ImportExternal copies an outside image and leaves same-host and
-// non-http values alone.
+// allowed, ImportExternal copies an outside image, leaves the relay's own and
+// non-http values alone, and leaves a field the owner changed mid-fetch.
 func TestFetchAndImport(t *testing.T) {
 	raw := pngBytes(t, 6, 3)
+	fields := map[string]string{}
+	var srvURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/logo.png" {
+		switch r.URL.Path {
+		case "/logo.png":
 			w.Write(raw)
-			return
+		case "/moving.png":
+			fields["logo_light"] = "/branding/set-by-owner.png" // the owner saves meanwhile
+			w.Write(raw)
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 	}))
 	defer srv.Close()
+	srvURL = srv.URL
 
-	if _, err := Fetch(context.Background(), srv.URL+"/logo.png"); err == nil || !strings.Contains(err.Error(), "non-public") {
+	if _, err := Fetch(context.Background(), srvURL+"/logo.png"); err == nil || !strings.Contains(err.Error(), "non-public") {
 		t.Fatalf("loopback fetch should be refused, got %v", err)
 	}
 	if _, err := Fetch(context.Background(), "file:///etc/passwd"); err == nil {
@@ -161,21 +199,24 @@ func TestFetchAndImport(t *testing.T) {
 	t.Cleanup(func() { allowPrivate = false })
 	SetDir(t.TempDir())
 	t.Cleanup(func() { SetDir("") })
-	fields := map[string]string{}
+	fields["logo"] = srvURL + "/logo.png"
+	fields["icon"] = "https://relay.example/static/icons/icon.png"
+	fields["banner"] = srvURL + "/missing.png"
+	fields["logo_light"] = srvURL + "/moving.png"
 	set := func(f, v string) error { fields[f] = v; return nil }
-	ImportExternal(context.Background(), "https://relay.example", map[string]string{
-		"logo":   srv.URL + "/logo.png",
-		"icon":   "https://relay.example/static/icons/icon.png",
-		"banner": srv.URL + "/missing.png",
-	}, set)
-	if !strings.HasPrefix(fields["logo"], "https://relay.example/branding/logo-") {
+	get := func(f string) string { return fields[f] }
+	ImportExternal(context.Background(), "relay.example", get, set)
+	if !strings.HasPrefix(fields["logo"], "/branding/logo-") {
 		t.Errorf("logo not imported: %v", fields)
 	}
-	if _, ok := fields["icon"]; ok {
+	if fields["icon"] != "https://relay.example/static/icons/icon.png" {
 		t.Error("a same-host icon must be left alone")
 	}
-	if _, ok := fields["banner"]; ok {
+	if fields["banner"] != srvURL+"/missing.png" {
 		t.Error("a failed fetch must leave the field as it is")
+	}
+	if fields["logo_light"] != "/branding/set-by-owner.png" {
+		t.Errorf("an owner change during the fetch was overwritten: %q", fields["logo_light"])
 	}
 	stored, _ := os.ReadDir(Dir())
 	if len(stored) != 1 {

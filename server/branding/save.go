@@ -6,15 +6,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/0ceanslim/grain/server/utils/log"
 )
 
-// PublicBase is the relay's public web origin ("https://relay.example"),
-// which stored image URLs are built on so NIP-11 clients on other origins can
-// load them. It comes from auth.relay_url when set (the operator's declared
-// public URL; ws/wss map to http/https), else from the request that stores
-// the image. "" when neither says.
+// PublicBase is the relay's public web origin ("https://relay.example"). It
+// comes from auth.relay_url when set (the operator's declared public URL;
+// ws/wss map to http/https), else from the request. "" when neither says.
+// Used to make a stored image's relative path absolute where a client on
+// another origin needs it (the NIP-11 icon and banner), at serve time, so a
+// domain move or an admin session on localhost never bakes a wrong origin in.
 func PublicBase(relayURL string, r *http.Request) string {
 	if u, err := url.Parse(strings.TrimSpace(relayURL)); err == nil && u.Host != "" {
 		switch u.Scheme {
@@ -34,44 +36,69 @@ func PublicBase(relayURL string, r *http.Request) string {
 	return ""
 }
 
-// Save stores img for slot, points the slot's relay metadata field at the
-// self-hosted copy through setField (utils.SetRelayMetadataField), then drops
-// the slot's earlier copies. Returns the new URL.
-func Save(slot string, img Image, base string, setField func(field, value string) error) (string, error) {
-	if base == "" {
-		return "", errors.New("cannot tell the relay's public URL: set auth.relay_url in config.yml")
+// Absolute makes a relay-relative path ("/branding/...", "/static/...")
+// absolute on base; anything else (already absolute, empty, or no base) is
+// returned unchanged.
+func Absolute(v, base string) string {
+	if base == "" || !IsLocalPath(v) {
+		return v
 	}
+	return strings.TrimRight(base, "/") + v
+}
+
+// IsLocalPath reports whether v is a path on this relay ("/x", not "//x").
+func IsLocalPath(v string) bool {
+	return strings.HasPrefix(v, "/") && !strings.HasPrefix(v, "//")
+}
+
+// IsOwnURL reports whether v needs no copy: a path on this relay, or an
+// absolute URL on the relay's own host (ownHost, e.g. "relay.example").
+func IsOwnURL(v, ownHost string) bool {
+	if IsLocalPath(v) {
+		return true
+	}
+	u, err := url.Parse(v)
+	return err == nil && ownHost != "" && strings.EqualFold(u.Host, ownHost)
+}
+
+// saveMu serializes Save, so two stores to one slot cannot prune each
+// other's file, and the import cannot interleave with an owner's store.
+var saveMu sync.Mutex
+
+// Save stores img for slot, points the slot's relay metadata field at the
+// self-hosted copy (the relay-relative path /branding/<file>) through
+// setField (utils.SetRelayMetadataField), then drops the slot's earlier
+// copies. Returns the stored path.
+func Save(slot string, img Image, setField func(field, value string) error) (string, error) {
+	saveMu.Lock()
+	defer saveMu.Unlock()
 	name, err := Store(slot, img)
 	if err != nil {
 		return "", err
 	}
-	u := strings.TrimRight(base, "/") + URLPrefix + name
-	if err := setField(slot, u); err != nil {
+	p := URLPrefix + name
+	if err := setField(slot, p); err != nil {
 		return "", err
 	}
 	Prune(slot, name)
-	return u, nil
+	return p, nil
 }
 
 // ImportExternal makes grain's own copy of any branding image still pointing
-// at an outside host (e.g. a profile's seeded relay_metadata.json, or a
-// changerelayicon from a NIP-86 client), so visitors never fetch from it.
-// current maps slot to its field's value. Values that are empty, not
-// http(s), or on the relay's own host (its stored copies, or e.g. its
-// /static/ assets) are left as they are; a fetch that fails is logged and the
-// field kept, to be tried on the next start.
-func ImportExternal(ctx context.Context, base string, current map[string]string, setField func(field, value string) error) {
-	b, err := url.Parse(base)
-	if base == "" || err != nil {
-		return
-	}
+// at an outside host (e.g. a profile's seeded relay_metadata.json), so
+// visitors never fetch from it. get reads a slot's field live. Values that
+// are empty, not http(s), or already the relay's own (IsOwnURL) are left as
+// they are. A value the owner changes while its image is being fetched is
+// left to the owner. A fetch that fails is logged and the field kept, to be
+// tried on the next start.
+func ImportExternal(ctx context.Context, ownHost string, get func(field string) string, setField func(field, value string) error) {
 	for _, slot := range Slots {
-		v := strings.TrimSpace(current[slot])
-		if v == "" {
+		v := strings.TrimSpace(get(slot))
+		if v == "" || IsOwnURL(v, ownHost) {
 			continue
 		}
 		u, err := url.Parse(v)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || strings.EqualFold(u.Host, b.Host) {
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			continue
 		}
 		img, err := Fetch(ctx, v)
@@ -79,11 +106,22 @@ func ImportExternal(ctx context.Context, base string, current map[string]string,
 			log.Util().Warn("Branding image not imported; still served from its source", "slot", slot, "url", v, "error", err)
 			continue
 		}
-		stored, err := Save(slot, img, base, setField)
+		var stored string
+		err = func() error {
+			saveMu.Lock()
+			changed := strings.TrimSpace(get(slot)) != v
+			saveMu.Unlock()
+			if changed {
+				return errors.New("changed by the owner during the fetch; left as set")
+			}
+			var serr error
+			stored, serr = Save(slot, img, setField)
+			return serr
+		}()
 		if err != nil {
 			log.Util().Warn("Branding image not stored", "slot", slot, "url", v, "error", err)
 			continue
 		}
-		log.Util().Info("Branding image stored locally", "slot", slot, "from", v, "url", stored)
+		log.Util().Info("Branding image stored locally", "slot", slot, "from", v, "path", stored)
 	}
 }

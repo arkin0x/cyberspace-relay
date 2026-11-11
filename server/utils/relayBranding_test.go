@@ -70,4 +70,27 @@ func TestRelayLogoStoredButNotServedOverNIP11(t *testing.T) {
 	if GetRelayMetadataCopy().Logo == "" {
 		t.Error("serving NIP-11 cleared the in-memory logo")
 	}
+
+	// grain's stored copies are relay-relative; NIP-11 serves them absolute.
+	if err := SetRelayMetadataField("icon", "/branding/icon-0123456789abcdef.png"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetRelayMetadataField("banner", "https://cdn.example/b.png"); err != nil {
+		t.Fatal(err)
+	}
+	prevBase := PublicBaseProvider
+	PublicBaseProvider = func(*http.Request) string { return "https://relay.example" }
+	t.Cleanup(func() { PublicBaseProvider = prevBase })
+	rec = httptest.NewRecorder()
+	RelayInfoHandler(rec, req)
+	doc = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["icon"] != "https://relay.example/branding/icon-0123456789abcdef.png" || doc["banner"] != "https://cdn.example/b.png" {
+		t.Errorf("NIP-11 icon/banner: %v %v", doc["icon"], doc["banner"])
+	}
+	if GetRelayMetadataCopy().Icon != "/branding/icon-0123456789abcdef.png" {
+		t.Error("serving NIP-11 rewrote the stored icon")
+	}
 }

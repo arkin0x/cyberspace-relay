@@ -74,7 +74,9 @@ func manifestHandler(w http.ResponseWriter, r *http.Request) {
 	applyRelayBranding(&manifest, currentBranding())
 
 	w.Header().Set("Content-Type", "application/manifest+json")
-	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 24 hours
+	// One hour: the manifest follows the relay's icon and name, so a change
+	// made in /admin reaches installs within the hour.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 
 	if err := json.NewEncoder(w).Encode(manifest); err != nil {
 		log.ClientMain().Error("Failed to encode PWA manifest", "error", err)

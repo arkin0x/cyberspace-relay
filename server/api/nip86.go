@@ -22,11 +22,11 @@ package api
 
 import (
 	"encoding/json"
-	"github.com/0ceanslim/grain/server/branding"
 	"net/http"
 	"strconv"
 
 	"github.com/0ceanslim/grain/config"
+	"github.com/0ceanslim/grain/server/branding"
 	"github.com/0ceanslim/grain/server/utils"
 	"github.com/0ceanslim/grain/server/utils/log"
 )
@@ -43,8 +43,8 @@ type nip86Request struct {
 	Method string `json:"method"`
 	Params []any  `json:"params"`
 	// baseURL is the request's own origin, set by HandleNIP86 (never from
-	// the body): the fallback public URL for grain_storebrandingimage when
-	// auth.relay_url is unset.
+	// the body): tells the image-field writes which host is the relay's own
+	// when auth.relay_url is unset.
 	baseURL string
 }
 
@@ -187,10 +187,12 @@ func dispatchNIP86(req nip86Request, signer string) (any, string) {
 		return runChangeRelayMetadata(req.Params, signer, "name")
 	case "changerelaydescription":
 		return runChangeRelayMetadata(req.Params, signer, "description")
+	// The image fields: an outside URL or upload is stored by grain first
+	// (see nip86_branding.go), so visitors never load it from elsewhere.
 	case "changerelayicon":
-		return runChangeRelayMetadata(req.Params, signer, "icon")
+		return runChangeRelayImage(req.Params, signer, "icon", req.baseURL)
 	case "changerelaybanner":
-		return runChangeRelayMetadata(req.Params, signer, "banner")
+		return runChangeRelayImage(req.Params, signer, "banner", req.baseURL)
 	case "changerelaycontact":
 		return runChangeRelayMetadata(req.Params, signer, "contact")
 	case "changerelayprivacypolicy":
@@ -208,13 +210,13 @@ func dispatchNIP86(req nip86Request, signer string) (any, string) {
 	// grain extension: the header logo on grain's own web pages. Stored in
 	// relay_metadata.json but not a NIP-11 field (never served there).
 	case "grain_changerelaylogo":
-		return runChangeRelayMetadata(req.Params, signer, "logo")
+		return runChangeRelayImage(req.Params, signer, "logo", req.baseURL)
 	case "grain_changerelaylogolight":
-		return runChangeRelayMetadata(req.Params, signer, "logo_light")
+		return runChangeRelayImage(req.Params, signer, "logo_light", req.baseURL)
 	// grain extension: keep grain's own copy of a branding image (upload or
 	// fetch-once URL) and point its field at it. See nip86_branding.go.
 	case "grain_storebrandingimage":
-		return runStoreBrandingImage(req.Params, signer, req.baseURL)
+		return runStoreBrandingImage(req.Params, signer)
 
 	// ─── grain_* phase 2: config section updates ─────────────
 	// Each takes the full section blob as params[0] and stages
