@@ -859,6 +859,20 @@ GRAIN provides a NIP-11 compliant template constructed from default example conf
 
 For detailed NIP-11 configuration options and field specifications, refer to [NIP-11 documentation](https://github.com/nostr-protocol/nips/blob/master/11.md) and adjust the configuration to your relay's specific requirements.
 
+### Branding grain's own web pages
+
+The relay's web pages follow the same file, read live (an `/admin` change shows on the next page load):
+
+| Setting (admin "Relay information") | Key | Used for |
+| --- | --- | --- |
+| Name | `name` (NIP-11) | Browser tab title; the header text when no logo is set (else "🌾 grain") |
+| Favicon | `icon` (NIP-11) | Browser tab icon on every page, the installed-app (PWA) icon and name, and what nostr clients show. Square, 512px or larger. Unset: grain's icons |
+| Logo | `logo` (grain only) | The header image, shown alone at the header's text height. Unset: the name |
+| Logo for light themes | `logo_light` (grain only) | Optional: replaces the Logo while a light theme is active; needs a Logo |
+| Banner | `banner` (NIP-11) | Shown whole above the relay description on the home page |
+
+`logo` and `logo_light` are not NIP-11 fields: they are stored here but never served in the NIP-11 document. They are written with the grain NIP-86 methods `grain_changerelaylogo` and `grain_changerelaylogolight` (owner-only, like `changerelayicon`).
+
 ---
 
 ## Configuration Validation

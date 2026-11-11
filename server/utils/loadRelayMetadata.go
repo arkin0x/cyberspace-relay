@@ -38,6 +38,15 @@ type RelayMetadata struct {
 	LanguageTags   []string        `json:"language_tags"`
 	Tags           []string        `json:"tags"`
 	PostingPolicy  string          `json:"posting_policy"`
+	// Logo is grain's own header image for its web pages (e.g. a wordmark),
+	// set via the grain_changerelaylogo NIP-86 method. Not a NIP-11 field:
+	// it lives in relay_metadata.json beside the identity fields the /admin
+	// form edits, but RelayInfoHandlerFor never emits it.
+	Logo string `json:"logo,omitempty"`
+	// LogoLight is the optional Logo variant for light themes (set via
+	// grain_changerelaylogolight). Same rules: grain web pages only, never
+	// in the NIP-11 document.
+	LogoLight string `json:"logo_light,omitempty"`
 }
 
 // RelayLimitation is the NIP-11 limitation block. As of the config-derived
@@ -522,6 +531,10 @@ func RelayInfoHandlerFor(w http.ResponseWriter, r *http.Request, edit func(*Rela
 	if edit != nil {
 		edit(&response)
 	}
+	// logo / logo_light are grain's web-page settings, not NIP-11: keep
+	// them off the wire.
+	response.Logo = ""
+	response.LogoLight = ""
 
 	err := json.NewEncoder(w).Encode(response)
 	if err != nil {

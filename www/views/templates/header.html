@@ -33,26 +33,37 @@
   class="sticky top-0 z-40 flex items-center gap-3 px-4 py-4 bg-surface-base border-b border-border"
   hx-boost="true"
 >
-  <!-- Logo. Click to home. Profile-scoped: when the operator has set a
-       relay icon in relay_metadata.json (e.g. the ONOSENDAI default relay),
-       show that icon + the relay's name; otherwise fall back to grain's own
-       wheat logo. relayName / relayIcon are registered in templateEngine.go
-       and read live NIP-11 metadata, so a NIP-86 icon/name change shows on
-       the next render. -->
+  <!-- Logo. Click to home. Follows the relay's metadata
+       (relay_metadata.json, editable from /admin), read live, so a change
+       shows on the next render:
+         logo set  -> the logo image alone (grain-only `logo` setting, e.g. a
+                      wordmark) at the header's text height, width auto,
+                      never stretched; alt = the relay name. With a
+                      `logo_light` ("Logo for light themes") too, both render
+                      and the active theme's scheme shows one (see the
+                      data-logo-scheme rule in layout.html), switching live;
+         else name -> the relay name (NIP-11 `name`) as text;
+         else      -> grain's own wheat logo, unchanged.
+       On a narrow screen the logo scales down and a long name truncates, so
+       the nav never overflows. -->
+  {{$name := relayName}}{{$logo := relayLogo}}{{$logoLight := relayLogoLight}}
   <h1
-    class="text-2xl font-bold cursor-pointer shrink-0"
+    class="text-2xl font-bold cursor-pointer {{if or $logo $name}}min-w-0{{else}}shrink-0{{end}}"
     hx-get="/views/home.html"
     hx-target="#main-content"
     hx-push-url="/"
   >
-    {{if relayIcon}}<span class="flex items-center gap-2">
-      <img
-        src="{{relayIcon}}"
-        alt="{{if relayName}}{{relayName}}{{else}}Relay{{end}} logo"
-        class="w-8 h-8 rounded shrink-0"
-      />
-      <span>{{if relayName}}{{relayName}}{{else}}grain{{end}}</span>
-    </span>{{else}}🌾 grain{{end}}
+    {{if $logo}}<img
+      src="{{$logo}}"
+      alt="{{if $name}}{{$name}}{{else}}Relay logo{{end}}"
+      {{if $logoLight}}data-logo-scheme="dark"{{end}}
+      class="block w-auto h-7 max-w-full min-w-0 object-contain object-left sm:h-8"
+    />{{if $logoLight}}<img
+      src="{{$logoLight}}"
+      alt="{{if $name}}{{$name}}{{else}}Relay logo{{end}}"
+      data-logo-scheme="light"
+      class="block w-auto h-7 max-w-full min-w-0 object-contain object-left sm:h-8"
+    />{{end}}{{else if $name}}<span class="block truncate">{{$name}}</span>{{else}}🌾 grain{{end}}
   </h1>
 
   <!-- Search bar. Visible inline on md+; on mobile it's hidden by

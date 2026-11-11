@@ -332,14 +332,15 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 		log.Startup().Error("Failed to load relay metadata", "error", err, "file", "relay_metadata.json")
 	}
 
-	// Wire profile-scoped branding (header logo + browser-tab title) to the
-	// live NIP-11 metadata. Reading through GetRelayMetadataCopy on each call
-	// means a NIP-86 changerelayname / changerelayicon shows up on the next
-	// page render without a restart. No custom icon configured => the shared
-	// layout keeps grain's own "🌾 grain" logo (see client.RelayPageTitle).
-	client.SetRelayBranding(func() (string, string) {
+	// Wire the relay's own web pages (header logo, favicon, browser-tab
+	// title, PWA manifest) to the live relay metadata. Reading through
+	// GetRelayMetadataCopy on each call means a NIP-86 changerelayname /
+	// changerelayicon / grain_changerelaylogo[light] (the /admin relay-information
+	// form) shows up on the next page render without a restart. Nothing set
+	// => grain's own "🌾 grain" logo, title and icons.
+	client.SetRelayBranding(func() client.RelayBranding {
 		m := utils.GetRelayMetadataCopy()
-		return m.Name, m.Icon
+		return client.RelayBranding{Name: m.Name, Icon: m.Icon, Logo: m.Logo, LogoLight: m.LogoLight}
 	})
 
 	// First-run owner provisioning. GRAIN_OWNER_PUBKEY is the

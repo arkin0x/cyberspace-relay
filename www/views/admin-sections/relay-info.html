@@ -9,7 +9,7 @@
     <legend class="px-2 text-sm font-medium text-text">Relay identity</legend>
     <p class="mt-1 mb-3 text-xs text-text-secondary">
       These fields are written to <span class="font-mono">relay_metadata.json</span>
-      and surfaced over NIP-11.
+      and surfaced over NIP-11 (all but the two Logos, which only these pages use).
     </p>
 
     <div class="grid gap-3 sm:grid-cols-2">
@@ -26,11 +26,41 @@
       </label>
 
       <label class="flex flex-col gap-1 text-sm">
-        <span class="font-medium text-text-secondary">Icon URL</span>
+        <span class="font-medium text-text-secondary">Favicon URL</span>
         <input type="text" data-ops-icon data-initial="{{.RelayIcon}}" value="{{.RelayIcon}}"
           placeholder="https://relay.example.com/icon.png"
           class="px-3 py-2 rounded bg-surface border border-border text-text font-mono" />
+        <span class="text-xs text-text-secondary">
+          Square, 512px or larger. The browser tab and app icon on these pages,
+          and the icon nostr clients show (NIP-11 <span class="font-mono">icon</span>).
+        </span>
         <button type="button" data-upload-target="[data-ops-icon]" data-upload-accept="image/*"
+          class="self-start px-3 py-1.5 text-xs rounded bg-surface-elevated text-text border border-border hover:bg-surface-hover">⬆ Upload image</button>
+      </label>
+
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="font-medium text-text-secondary">Logo URL</span>
+        <input type="text" data-ops-logo data-initial="{{.RelayLogo}}" value="{{.RelayLogo}}"
+          placeholder="https://relay.example.com/logo.png"
+          class="px-3 py-2 rounded bg-surface border border-border text-text font-mono" />
+        <span class="text-xs text-text-secondary">
+          Wide, transparent background. Shown alone at the top left of these
+          pages in place of the relay name. Not sent to nostr clients.
+        </span>
+        <button type="button" data-upload-target="[data-ops-logo]" data-upload-accept="image/*"
+          class="self-start px-3 py-1.5 text-xs rounded bg-surface-elevated text-text border border-border hover:bg-surface-hover">⬆ Upload image</button>
+      </label>
+
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="font-medium text-text-secondary">Logo for light themes URL</span>
+        <input type="text" data-ops-logo-light data-initial="{{.RelayLogoLight}}" value="{{.RelayLogoLight}}"
+          placeholder="https://relay.example.com/logo-dark-letters.png"
+          class="px-3 py-2 rounded bg-surface border border-border text-text font-mono" />
+        <span class="text-xs text-text-secondary">
+          Optional. Used in place of the Logo while a light theme is active;
+          empty uses the Logo everywhere. Needs a Logo.
+        </span>
+        <button type="button" data-upload-target="[data-ops-logo-light]" data-upload-accept="image/*"
           class="self-start px-3 py-1.5 text-xs rounded bg-surface-elevated text-text border border-border hover:bg-surface-hover">⬆ Upload image</button>
       </label>
 
@@ -39,6 +69,10 @@
         <input type="text" data-ops-banner data-initial="{{.RelayBanner}}" value="{{.RelayBanner}}"
           placeholder="https://relay.example.com/banner.jpg"
           class="px-3 py-2 rounded bg-surface border border-border text-text font-mono" />
+        <span class="text-xs text-text-secondary">
+          Shown whole above the relay description on the home page (NIP-11
+          <span class="font-mono">banner</span>).
+        </span>
         <button type="button" data-upload-target="[data-ops-banner]" data-upload-accept="image/*"
           class="self-start px-3 py-1.5 text-xs rounded bg-surface-elevated text-text border border-border hover:bg-surface-hover">⬆ Upload image</button>
       </label>
@@ -125,6 +159,8 @@
       { sel: "[data-ops-description]", method: "changerelaydescription" },
       { sel: "[data-ops-icon]", method: "changerelayicon" },
       { sel: "[data-ops-banner]", method: "changerelaybanner" },
+      { sel: "[data-ops-logo]", method: "grain_changerelaylogo" },
+      { sel: "[data-ops-logo-light]", method: "grain_changerelaylogolight" },
       { sel: "[data-ops-contact]", method: "changerelaycontact" },
       { sel: "[data-ops-privacy-policy]", method: "changerelayprivacypolicy" },
       { sel: "[data-ops-terms-of-service]", method: "changerelaytermsofservice" },
