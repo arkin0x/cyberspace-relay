@@ -332,6 +332,16 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 		log.Startup().Error("Failed to load relay metadata", "error", err, "file", "relay_metadata.json")
 	}
 
+	// Wire profile-scoped branding (header logo + browser-tab title) to the
+	// live NIP-11 metadata. Reading through GetRelayMetadataCopy on each call
+	// means a NIP-86 changerelayname / changerelayicon shows up on the next
+	// page render without a restart. No custom icon configured => the shared
+	// layout keeps grain's own "🌾 grain" logo (see client.RelayPageTitle).
+	client.SetRelayBranding(func() (string, string) {
+		m := utils.GetRelayMetadataCopy()
+		return m.Name, m.Icon
+	})
+
 	// First-run owner provisioning. GRAIN_OWNER_PUBKEY is the
 	// declarative path — wins over whatever the JSON says and is
 	// re-applied every startup (never written to disk). If the var
@@ -533,9 +543,10 @@ func initRoot(w http.ResponseWriter, r *http.Request) {
 		// Handle NIP-11 relay information requests
 		utils.RelayInfoHandler(w, r)
 	case r.URL.Path == "/":
-		// Serve the main application template
+		// Serve the main application template. Title follows the operator's
+		// configured relay branding (grain's default when none is set).
 		data := client.PageData{
-			Title: "🌾 grain",
+			Title: client.RelayPageTitle(),
 		}
 		client.RenderTemplate(w, data, "app.html")
 	case strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/login") || strings.HasPrefix(r.URL.Path, "/logout"):
@@ -560,7 +571,7 @@ func initRoot(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 		data := client.PageData{
-			Title: "🌾 grain",
+			Title: client.RelayPageTitle(),
 		}
 		client.RenderTemplate(w, data, "app.html")
 	}

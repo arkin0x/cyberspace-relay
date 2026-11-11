@@ -37,6 +37,11 @@ var adminTemplateFuncs = template.FuncMap{
 	// assetVersion stamps static asset URLs in the shared layout;
 	// admin renders that layout too, so it must register the func.
 	"assetVersion": func() string { return assetVersion },
+	// relayName / relayIcon back the shared header's profile-scoped logo;
+	// admin parses that header, so it must register them too (ParseFS fails
+	// on an unregistered func referenced in header.html).
+	"relayName": brandingName,
+	"relayIcon": brandingIcon,
 	// toJS marshals any value to JSON and returns it as
 	// template.JS so the renderer doesn't HTML-escape the
 	// resulting literal. Safe for inline <script> use because the

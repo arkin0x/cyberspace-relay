@@ -33,14 +33,28 @@
   class="sticky top-0 z-40 flex items-center gap-3 px-4 py-4 bg-surface-base border-b border-border"
   hx-boost="true"
 >
-  <!-- Logo. Click to home. -->
+  <!-- Logo. Click to home. Profile-scoped: when the operator has set a
+       relay icon in relay_metadata.json (e.g. the ONOSENDAI default relay),
+       show that icon + the relay's name; otherwise fall back to grain's own
+       wheat logo. relayName / relayIcon are registered in templateEngine.go
+       and read live NIP-11 metadata, so a NIP-86 icon/name change shows on
+       the next render. -->
   <h1
-    class="text-2xl font-bold cursor-pointer shrink-0"
+    class="flex items-center gap-2 text-2xl font-bold cursor-pointer shrink-0"
     hx-get="/views/home.html"
     hx-target="#main-content"
     hx-push-url="/"
   >
+    {{if relayIcon}}
+    <img
+      src="{{relayIcon}}"
+      alt="{{if relayName}}{{relayName}}{{else}}Relay{{end}} logo"
+      class="w-8 h-8 rounded shrink-0"
+    />
+    <span>{{if relayName}}{{relayName}}{{else}}grain{{end}}</span>
+    {{else}}
     🌾 grain
+    {{end}}
   </h1>
 
   <!-- Search bar. Visible inline on md+; on mobile it's hidden by

@@ -6,12 +6,62 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type PageData struct {
 	Title string
 	Theme string
+}
+
+// defaultBrandName is grain's own name, shown in the browser tab and the
+// header logo when the relay operator has not configured a custom relay
+// icon. Profile-scoped branding (e.g. the ONOSENDAI default relay) rides
+// in through relay_metadata.json — see SetRelayBranding — and is left to
+// each deployment's own metadata rather than baked in here.
+const defaultBrandName = "🌾 grain"
+
+// relayBranding, when wired by startup via SetRelayBranding, returns the
+// relay's configured display name and icon URL from the live NIP-11
+// metadata (relay_metadata.json). Kept as a provider func rather than a
+// snapshot so a NIP-86 changerelayname / changerelayicon that mutates the
+// in-memory metadata is reflected on the very next page render.
+var relayBranding func() (name, icon string)
+
+// SetRelayBranding wires the relay's display name + icon source so the
+// shared layout/header can render profile-scoped branding. Called once at
+// startup after relay metadata is loaded.
+func SetRelayBranding(fn func() (name, icon string)) { relayBranding = fn }
+
+func brandingName() string {
+	if relayBranding == nil {
+		return ""
+	}
+	n, _ := relayBranding()
+	return strings.TrimSpace(n)
+}
+
+func brandingIcon() string {
+	if relayBranding == nil {
+		return ""
+	}
+	_, i := relayBranding()
+	return strings.TrimSpace(i)
+}
+
+// RelayPageTitle is the browser-tab title for the relay's own pages: the
+// configured relay name when the operator has set a custom icon (the signal
+// that this deployment has its own branding), otherwise grain's default.
+// Gating on the icon keeps relays that only carry a NIP-11 name but no icon
+// (the grain default profiles) showing the familiar "🌾 grain" title.
+func RelayPageTitle() string {
+	if brandingIcon() != "" {
+		if n := brandingName(); n != "" {
+			return n
+		}
+	}
+	return defaultBrandName
 }
 
 // assetVersion is stamped onto static asset URLs (?v=<version>) in the
@@ -41,6 +91,11 @@ func SetAssetVersion(v string) {
 // layout.html.
 var baseTemplateFuncs = template.FuncMap{
 	"assetVersion": func() string { return assetVersion },
+	// relayName / relayIcon expose the operator's configured relay branding
+	// (from relay_metadata.json) to the shared header. Empty when unset, so
+	// the header falls back to grain's own logo. See header.html.
+	"relayName": brandingName,
+	"relayIcon": brandingIcon,
 }
 
 // Define the base directories for views and templates within the embedded FS

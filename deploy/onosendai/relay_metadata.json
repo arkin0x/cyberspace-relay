@@ -2,10 +2,10 @@
   "_comment_pubkey": "Leave empty on a fresh deployment \u2014 first run will route operators to /setup to claim ownership via any Nostr signer. Or set GRAIN_OWNER_PUBKEY (hex or npub) in the environment to claim declaratively at startup without the UI step.",
   "_comment_version": "version is overlaid at NIP-11 response time from the running build; the placeholder below is fine to leave as-is.",
   "_comment_ui": "Most string fields default to empty: name / description / banner / icon / contact / policy URLs are best edited via the /admin dashboard once the relay is running. The dashboard's Ops section fires the corresponding NIP-86 changerelay* methods.",
-  "name": "ONOSENDAI",
+  "name": "ONOSENDAI Official Relay",
   "description": "The default relay for ONOSENDAI and Cyberspace v2: movement chains, hidden bags and their sealed entries, objects, avatars, seed DNA and tends, and the Nostr plumbing they use. Anyone may publish those kinds; nothing else is accepted. Reading is open.",
   "banner": "",
-  "icon": "",
+  "icon": "https://relay.onosendai.tech/static/icons/onosendai-logo.png",
   "pubkey": "",
   "contact": "",
   "supported_nips": [
