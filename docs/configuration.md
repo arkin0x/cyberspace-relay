@@ -873,6 +873,8 @@ The relay's web pages follow the same file, read live (an `/admin` change shows 
 
 `logo` and `logo_light` are not NIP-11 fields: they are stored here but never served in the NIP-11 document. They are written with the grain NIP-86 methods `grain_changerelaylogo` and `grain_changerelaylogolight` (owner-only, like `changerelayicon`).
 
+grain keeps its own copy of the four images and serves them itself, so visitors never load them from an outside host and they survive the source going away. In the admin form, upload an image or paste a URL and Save (grain fetches it once). Either way the owner-only NIP-86 method `grain_storebrandingimage` (`[slot, source]`, source a `data:` upload or an http(s) URL) checks it (PNG, JPEG, WebP, GIF or ICO by content, at most 700 KiB and 8192 px a side; SVG is refused because it can carry script), writes it to `<data dir>/branding/<slot>-<hash>.<ext>` on the persistent data volume, and points the field at `https://<relay>/branding/<file>`. The public origin comes from `auth.relay_url`, or from the admin request when that is unset. At startup, any of the four fields still pointing at another host (for example a seeded `relay_metadata.json`) is fetched and stored the same way, in the background; one that fails is kept and tried again on the next start.
+
 ---
 
 ## Configuration Validation

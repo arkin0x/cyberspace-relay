@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/0ceanslim/grain/server/branding"
 	"io/fs"
 	"net/http"
 	"os"
@@ -338,6 +339,19 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 	// changerelayicon / grain_changerelaylogo[light] (the /admin relay-information
 	// form) shows up on the next page render without a restart. Nothing set
 	// => grain's own "🌾 grain" logo, title and icons.
+	// Branding images grain keeps its own copy of live on the data volume
+	// (<data dir>/branding), served at /branding/. Any still pointing at an
+	// outside host (e.g. a profile's seeded relay_metadata.json) are fetched
+	// once and stored, in the background so a slow host never holds up
+	// startup; one that fails is kept as is and tried again next start.
+	branding.SetDir(config.ConfigPath("branding"))
+	if cfg != nil && cfg.Auth.RelayURL != "" {
+		base := branding.PublicBase(cfg.Auth.RelayURL, nil)
+		m := utils.GetRelayMetadataCopy()
+		current := map[string]string{"icon": m.Icon, "logo": m.Logo, "logo_light": m.LogoLight, "banner": m.Banner}
+		go branding.ImportExternal(ctx, base, current, utils.SetRelayMetadataField)
+	}
+
 	client.SetRelayBranding(func() client.RelayBranding {
 		m := utils.GetRelayMetadataCopy()
 		return client.RelayBranding{Name: m.Name, Icon: m.Icon, Logo: m.Logo, LogoLight: m.LogoLight}
@@ -550,6 +564,10 @@ func initRoot(w http.ResponseWriter, r *http.Request) {
 			Title: client.RelayPageTitle(),
 		}
 		client.RenderTemplate(w, data, "app.html")
+	case strings.HasPrefix(r.URL.Path, branding.URLPrefix):
+		// The relay's own copies of its branding images (favicon, logo,
+		// banner); see server/branding.
+		branding.ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/login") || strings.HasPrefix(r.URL.Path, "/logout"):
 		// Let API and auth endpoints fall through to be handled by registered endpoints
 		http.NotFound(w, r)
