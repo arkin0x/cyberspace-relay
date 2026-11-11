@@ -115,3 +115,16 @@ func TestAdminTemplatesParseWithBrandingFuncs(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The setup pages parse with the base func map and use relayName too.
+func TestSetupTemplatesParseWithBrandingFuncs(t *testing.T) {
+	prevFS := wwwFS
+	t.Cleanup(func() { wwwFS = prevFS })
+	SetEmbeddedWWW(os.DirFS(".."))
+	for _, v := range []string{"setup.html", "setup-claimed.html"} {
+		patterns := append(layoutPatterns(), "www/views/"+v)
+		if _, err := template.New("").Funcs(baseTemplateFuncs).ParseFS(wwwFS, patterns...); err != nil {
+			t.Fatalf("%s: %v", v, err)
+		}
+	}
+}
