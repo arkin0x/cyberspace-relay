@@ -6,6 +6,9 @@
   "description": "The default relay for ONOSENDAI and Cyberspace v2: movement chains, hidden bags and their sealed entries, objects, avatars, seed DNA and tends, and the Nostr plumbing they use. Anyone may publish those kinds; nothing else is accepted. Reading is open.",
   "banner": "",
   "icon": "https://relay.onosendai.tech/static/icons/onosendai-logo.png",
+  "_comment_logo": "logo / logo_light are grain web-page settings, never sent over NIP-11. The wordmark below is fetched once at startup and served from relay.onosendai.tech/branding/; logo_light (a dark-letter wordmark for light themes) is left empty for now.",
+  "logo": "https://www.onosendai.tech/logo.png",
+  "logo_light": "",
   "pubkey": "",
   "contact": "",
   "supported_nips": [
