@@ -392,6 +392,9 @@ func (c *Client) encryption(ctx context.Context, conn *wsConn) (string, error) {
 			return "", fmt.Errorf("reading the wallet's info event: %w", err)
 		}
 		if label == "EOSE" || label == "CLOSED" {
+			if len(msg) < 2 {
+				continue
+			}
 			var id string
 			json.Unmarshal(msg[1], &id)
 			if id != "nwc-info" {
@@ -493,7 +496,7 @@ func nip04Decrypt(priv *btcec.PrivateKey, pub *btcec.PublicKey, payload string) 
 type wsConn struct {
 	ws        *websocket.Conn
 	msgs      chan []json.RawMessage
-	errc      chan error
+	err       error // why the reader stopped; set before msgs is closed
 	closeOnce sync.Once
 }
 
@@ -525,7 +528,7 @@ func dial(ctx context.Context, relay, origin string) (*wsConn, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	c := &wsConn{ws: r.ws, msgs: make(chan []json.RawMessage, 16), errc: make(chan error, 1)}
+	c := &wsConn{ws: r.ws, msgs: make(chan []json.RawMessage, 16)}
 	go c.read()
 	return c, nil
 }
@@ -542,15 +545,18 @@ const maxMessageBytes = 1 << 20
 // answer was dropped, leaving the request to time out. Conn.Read streams
 // the frames' payloads in order, so a JSON decoder over it reads whole
 // messages however the relay frames them. A message that is valid JSON but
-// not a non-empty array is skipped; a stream that is not JSON at all ends
-// the connection (the call moves on to the next relay).
+// not a non-empty array is skipped. A stream that is plainly not JSON ends
+// the connection and the call moves on to the next relay; a truncated
+// message cannot be told from one still arriving, so it holds the reader
+// until the connection closes or the call times out (a JSON relay never
+// sends one; the old per-frame reader dropped it instead).
 func (c *wsConn) read() {
 	lim := &messageLimit{r: c.ws, max: maxMessageBytes}
 	dec := json.NewDecoder(lim)
 	for {
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
-			c.errc <- err
+			c.err = err
 			close(c.msgs)
 			return
 		}
@@ -589,7 +595,7 @@ func (c *wsConn) next(ctx context.Context) (string, []json.RawMessage, error) {
 	select {
 	case msg, ok := <-c.msgs:
 		if !ok {
-			return "", nil, <-c.errc
+			return "", nil, c.err // the close happens after err is set
 		}
 		var label string
 		json.Unmarshal(msg[0], &label)

@@ -560,7 +560,7 @@ func TestAnswerSplitAcrossFrames(t *testing.T) {
 		t.Run(fmt.Sprint("nip44=", nip44), func(t *testing.T) {
 			w := newFakeWallet(t)
 			w.nip44 = nip44
-			w.fragment = 100
+			w.fragment = 300 // over 125, so frames use the 16-bit length too
 			cl := newClient(t, w, wsURL(w.serve()))
 			cl.Timeout = 2 * time.Second
 			ctx := context.Background()
@@ -592,8 +592,69 @@ func TestRelayMessageSizeIsBounded(t *testing.T) {
 	big := []byte(`["NOTICE","` + strings.Repeat("x", maxMessageBytes) + `"]`)
 	l := &messageLimit{r: strings.NewReader(string(big)), max: maxMessageBytes}
 	var raw json.RawMessage
-	if err := json.NewDecoder(l).Decode(&raw); err == nil {
-		t.Fatal("a message over the limit was read")
+	if err := json.NewDecoder(l).Decode(&raw); err == nil || !strings.Contains(err.Error(), "over") {
+		t.Fatalf("a message over the limit: %v", err)
+	}
+	// The limit is per message: many small ones adding up to more pass.
+	var many strings.Builder
+	one := `["NOTICE","` + strings.Repeat("y", 1000) + `"]`
+	n := 2*maxMessageBytes/len(one) + 1
+	for range n {
+		many.WriteString(one)
+	}
+	l = &messageLimit{r: strings.NewReader(many.String()), max: maxMessageBytes}
+	dec := json.NewDecoder(l)
+	for i := range n {
+		if err := dec.Decode(&raw); err != nil {
+			t.Fatalf("small message %d of %d: %v", i+1, n, err)
+		}
+		l.n = 0 // as wsConn.read does after each message
+	}
+}
+
+// TestReaderErrorIsSticky: once the reader has stopped (here on a stream
+// that is not JSON), every later next returns its error at once rather than
+// waiting.
+func TestReaderErrorIsSticky(t *testing.T) {
+	srv := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		websocket.Message.Send(ws, "this is not json")
+		var raw string
+		for websocket.Message.Receive(ws, &raw) == nil {
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := dial(ctx, wsURL(srv), "http://localhost/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+	for i := range 2 {
+		if _, _, err := c.next(ctx); err == nil || ctx.Err() != nil {
+			t.Fatalf("next %d after the reader stopped: %v (ctx %v)", i+1, err, ctx.Err())
+		}
+	}
+}
+
+// TestShortEOSEIsIgnored: a relay message with a label and nothing else
+// does not crash the client while it reads the wallet's info event.
+func TestShortEOSEIsIgnored(t *testing.T) {
+	w := newFakeWallet(t)
+	srv := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		websocket.Message.Send(ws, `["EOSE"]`)
+		w.relay(func() (string, bool) {
+			var raw string
+			return raw, websocket.Message.Receive(ws, &raw) == nil
+		}, func(v ...any) {
+			b, _ := json.Marshal(v)
+			websocket.Message.Send(ws, string(b))
+		})
+	}))
+	t.Cleanup(srv.Close)
+	cl := newClient(t, w, wsURL(srv))
+	if _, err := cl.MakeInvoice(context.Background(), 1000, "x", time.Minute); err != nil {
+		t.Fatal(err)
 	}
 }
 
