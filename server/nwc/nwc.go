@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"sync"
@@ -391,6 +392,9 @@ func (c *Client) encryption(ctx context.Context, conn *wsConn) (string, error) {
 			return "", fmt.Errorf("reading the wallet's info event: %w", err)
 		}
 		if label == "EOSE" || label == "CLOSED" {
+			if len(msg) < 2 {
+				continue
+			}
 			var id string
 			json.Unmarshal(msg[1], &id)
 			if id != "nwc-info" {
@@ -492,7 +496,7 @@ func nip04Decrypt(priv *btcec.PrivateKey, pub *btcec.PublicKey, payload string) 
 type wsConn struct {
 	ws        *websocket.Conn
 	msgs      chan []json.RawMessage
-	errc      chan error
+	err       error // why the reader stopped; set before msgs is closed
 	closeOnce sync.Once
 }
 
@@ -524,25 +528,65 @@ func dial(ctx context.Context, relay, origin string) (*wsConn, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	c := &wsConn{ws: r.ws, msgs: make(chan []json.RawMessage, 16), errc: make(chan error, 1)}
+	c := &wsConn{ws: r.ws, msgs: make(chan []json.RawMessage, 16)}
 	go c.read()
 	return c, nil
 }
 
+// maxMessageBytes bounds one relay message. A wallet's answer to
+// make_invoice or lookup_invoice is a few KB.
+const maxMessageBytes = 1 << 20
+
+// read passes each relay message to next. A relay may split one message
+// across several websocket frames: relay.getalby.com sends any message over
+// 1 KiB as a 1024-byte frame and its continuation, and a wallet's answer to
+// make_invoice is larger than that. websocket.Message.Receive returns one
+// frame at a time, so a split message never parsed as JSON and the wallet's
+// answer was dropped, leaving the request to time out. Conn.Read streams
+// the frames' payloads in order, so a JSON decoder over it reads whole
+// messages however the relay frames them. A message that is valid JSON but
+// not a non-empty array is skipped. A stream that is plainly not JSON ends
+// the connection and the call moves on to the next relay; a truncated
+// message cannot be told from one still arriving, so it holds the reader
+// until the connection closes or the call times out (a JSON relay never
+// sends one; the old per-frame reader dropped it instead).
 func (c *wsConn) read() {
+	lim := &messageLimit{r: c.ws, max: maxMessageBytes}
+	dec := json.NewDecoder(lim)
 	for {
-		var raw string
-		if err := websocket.Message.Receive(c.ws, &raw); err != nil {
-			c.errc <- err
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			c.err = err
 			close(c.msgs)
 			return
 		}
+		lim.n = 0
 		var msg []json.RawMessage
-		if json.Unmarshal([]byte(raw), &msg) != nil || len(msg) == 0 {
+		if json.Unmarshal(raw, &msg) != nil || len(msg) == 0 {
 			continue
 		}
 		c.msgs <- msg
 	}
+}
+
+// messageLimit fails a read once max bytes have come in since the last whole
+// message (read resets n), so a relay cannot make the decoder buffer an
+// endless message.
+type messageLimit struct {
+	r      io.Reader
+	n, max int
+}
+
+func (l *messageLimit) Read(p []byte) (int, error) {
+	if l.n >= l.max {
+		return 0, fmt.Errorf("a relay message is over %d bytes", l.max)
+	}
+	if len(p) > l.max-l.n {
+		p = p[:l.max-l.n]
+	}
+	k, err := l.r.Read(p)
+	l.n += k
+	return k, err
 }
 
 // next is the next message: its label ("EVENT", "OK", ...) and the whole
@@ -551,7 +595,7 @@ func (c *wsConn) next(ctx context.Context) (string, []json.RawMessage, error) {
 	select {
 	case msg, ok := <-c.msgs:
 		if !ok {
-			return "", nil, <-c.errc
+			return "", nil, c.err // the close happens after err is set
 		}
 		var label string
 		json.Unmarshal(msg[0], &label)

@@ -2,11 +2,16 @@ package nwc
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -39,6 +44,10 @@ type fakeWallet struct {
 	errCode string
 	// closeOther sends a CLOSED for another subscription before answering.
 	closeOther bool
+	// fragment, when > 0, makes the relay split every message it sends
+	// into websocket frames of this many bytes (a first frame and its
+	// continuations), as relay.getalby.com does with anything over 1 KiB.
+	fragment int
 
 	mu       sync.Mutex
 	invoices map[string]*Invoice
@@ -65,67 +74,145 @@ func (w *fakeWallet) pay(hash string) {
 }
 
 func (w *fakeWallet) serve() *httptest.Server {
-	srv := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
-		w.mu.Lock()
-		w.conns++
-		w.mu.Unlock()
-		subs := map[string]string{} // request id -> subscription
-		send := func(v ...any) {
-			b, _ := json.Marshal(v)
-			websocket.Message.Send(ws, string(b))
-		}
-		for {
-			var raw string
-			if websocket.Message.Receive(ws, &raw) != nil {
-				return
-			}
-			var msg []json.RawMessage
-			json.Unmarshal([]byte(raw), &msg)
-			var label, sub string
-			json.Unmarshal(msg[0], &label)
-			switch label {
-			case "REQ":
-				json.Unmarshal(msg[1], &sub)
-				var f struct {
-					Kinds []int    `json:"kinds"`
-					E     []string `json:"#e"`
-				}
-				json.Unmarshal(msg[2], &f)
-				if len(f.Kinds) == 1 && f.Kinds[0] == KindInfo {
-					if !w.noInfo {
-						enc := "nip04"
-						if w.nip44 {
-							enc = "nip44_v2 nip04"
-						}
-						info := nostr.Event{CreatedAt: time.Now().Unix(), Kind: KindInfo, Content: "make_invoice lookup_invoice", Tags: [][]string{{"encryption", enc}}}
-						w.signer.SignEvent(&info)
-						send("EVENT", sub, info)
-					}
-					send("EOSE", sub)
-					continue
-				}
-				for _, id := range f.E {
-					subs[id] = sub
-				}
-			case "EVENT":
-				var ev nostr.Event
-				json.Unmarshal(msg[1], &ev)
-				if w.refuse {
-					send("OK", ev.ID, false, "blocked: no")
-					continue
-				}
-				send("OK", ev.ID, true, "")
-				if w.closeOther {
-					send("CLOSED", "nwc-someone-else", "error: not yours")
-				}
-				if resp, ok := w.answer(ev); ok {
-					send("EVENT", subs[ev.ID], resp)
-				}
-			}
-		}
-	}))
+	var srv *httptest.Server
+	if w.fragment > 0 {
+		srv = httptest.NewServer(http.HandlerFunc(w.serveFragmenting))
+	} else {
+		srv = httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+			w.relay(func() (string, bool) {
+				var raw string
+				return raw, websocket.Message.Receive(ws, &raw) == nil
+			}, func(v ...any) {
+				b, _ := json.Marshal(v)
+				websocket.Message.Send(ws, string(b))
+			})
+		}))
+	}
 	w.t.Cleanup(srv.Close)
 	return srv
+}
+
+// serveFragmenting is the relay on a hand-made websocket, so it can send one
+// message as several frames, which golang.org/x/net/websocket never does.
+// The client's frames are single, masked text frames.
+func (w *fakeWallet) serveFragmenting(rw http.ResponseWriter, r *http.Request) {
+	accept := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	conn, buf, err := rw.(http.Hijacker).Hijack()
+	if err != nil {
+		w.t.Error(err)
+		return
+	}
+	defer conn.Close()
+	fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(accept[:]))
+	buf.Flush()
+	recv := func() (string, bool) {
+		var h [2]byte
+		if _, err := io.ReadFull(buf, h[:]); err != nil || h[0]&0x0f == 0x8 {
+			return "", false
+		}
+		n := uint64(h[1] & 0x7f)
+		switch n {
+		case 126:
+			var l [2]byte
+			io.ReadFull(buf, l[:])
+			n = uint64(binary.BigEndian.Uint16(l[:]))
+		case 127:
+			var l [8]byte
+			io.ReadFull(buf, l[:])
+			n = binary.BigEndian.Uint64(l[:])
+		}
+		var mask [4]byte
+		io.ReadFull(buf, mask[:])
+		p := make([]byte, n)
+		if _, err := io.ReadFull(buf, p); err != nil {
+			return "", false
+		}
+		for i := range p {
+			p[i] ^= mask[i%4]
+		}
+		return string(p), true
+	}
+	send := func(v ...any) {
+		b, _ := json.Marshal(v)
+		for i := 0; i < len(b); i += w.fragment {
+			end := min(i+w.fragment, len(b))
+			op := byte(0x0) // continuation
+			if i == 0 {
+				op = 0x1 // text
+			}
+			if end == len(b) {
+				op |= 0x80 // FIN
+			}
+			part := b[i:end]
+			switch {
+			case len(part) < 126:
+				buf.Write([]byte{op, byte(len(part))})
+			default:
+				buf.Write([]byte{op, 126, byte(len(part) >> 8), byte(len(part))})
+			}
+			buf.Write(part)
+		}
+		buf.Flush()
+	}
+	w.relay(recv, send)
+}
+
+// relay is the fake relay's side of one connection: the wallet's info event,
+// and an answer to each request, over whichever websocket serve made.
+func (w *fakeWallet) relay(recv func() (string, bool), send func(v ...any)) {
+	w.mu.Lock()
+	w.conns++
+	w.mu.Unlock()
+	subs := map[string]string{} // request id -> subscription
+	for {
+		raw, ok := recv()
+		if !ok {
+			return
+		}
+		var msg []json.RawMessage
+		json.Unmarshal([]byte(raw), &msg)
+		var label, sub string
+		json.Unmarshal(msg[0], &label)
+		switch label {
+		case "REQ":
+			json.Unmarshal(msg[1], &sub)
+			var f struct {
+				Kinds []int    `json:"kinds"`
+				E     []string `json:"#e"`
+			}
+			json.Unmarshal(msg[2], &f)
+			if len(f.Kinds) == 1 && f.Kinds[0] == KindInfo {
+				if !w.noInfo {
+					enc := "nip04"
+					if w.nip44 {
+						enc = "nip44_v2 nip04"
+					}
+					info := nostr.Event{CreatedAt: time.Now().Unix(), Kind: KindInfo, Content: "make_invoice lookup_invoice", Tags: [][]string{{"encryption", enc}}}
+					w.signer.SignEvent(&info)
+					send("EVENT", sub, info)
+				}
+				send("EOSE", sub)
+				continue
+			}
+			for _, id := range f.E {
+				subs[id] = sub
+			}
+		case "EVENT":
+			var ev nostr.Event
+			json.Unmarshal(msg[1], &ev)
+			if w.refuse {
+				send("OK", ev.ID, false, "blocked: no")
+				continue
+			}
+			send("OK", ev.ID, true, "")
+			if w.closeOther {
+				send("CLOSED", "nwc-someone-else", "error: not yours")
+			}
+			if resp, ok := w.answer(ev); ok {
+				send("EVENT", subs[ev.ID], resp)
+			}
+		}
+	}
 }
 
 // answer is the wallet's response to a request event, as NIP-47 has it.
@@ -460,6 +547,114 @@ func TestClosedIsMatchedToItsSubscription(t *testing.T) {
 	cl := newClient(t, w, wsURL(w.serve()))
 	if _, err := cl.MakeInvoice(context.Background(), 1000, "x", time.Minute); err != nil {
 		t.Fatalf("a CLOSED for another subscription ended the request: %v", err)
+	}
+}
+
+// TestAnswerSplitAcrossFrames: a relay that sends one message as several
+// websocket frames (relay.getalby.com sends anything over 1 KiB as a
+// 1024-byte frame and its continuation, and a make_invoice answer is larger)
+// still gets the wallet's answer to the client. Before the fix each frame
+// was parsed on its own, dropped as not JSON, and the request timed out.
+func TestAnswerSplitAcrossFrames(t *testing.T) {
+	for _, nip44 := range []bool{true, false} {
+		t.Run(fmt.Sprint("nip44=", nip44), func(t *testing.T) {
+			w := newFakeWallet(t)
+			w.nip44 = nip44
+			w.fragment = 300 // over 125, so frames use the 16-bit length too
+			cl := newClient(t, w, wsURL(w.serve()))
+			cl.Timeout = 2 * time.Second
+			ctx := context.Background()
+			desc := strings.Repeat("a long description ", 60) // an answer well over 1 KiB
+			inv, err := cl.MakeInvoice(ctx, 1000, desc, time.Minute)
+			if err != nil {
+				t.Fatalf("make_invoice through a fragmenting relay: %v", err)
+			}
+			if inv.Description != desc || len(inv.PaymentHash) != 64 {
+				t.Fatalf("made %+v", inv)
+			}
+			s, err := cl.LookupSession(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			for range 3 { // several split answers on one connection stay in step
+				if got, err := s.LookupInvoice(ctx, inv.PaymentHash); err != nil || got.PaymentHash != inv.PaymentHash {
+					t.Fatalf("lookup_invoice through a fragmenting relay: %+v %v", got, err)
+				}
+			}
+		})
+	}
+}
+
+// TestRelayMessageSizeIsBounded: a message larger than maxMessageBytes ends
+// the connection instead of being buffered without end.
+func TestRelayMessageSizeIsBounded(t *testing.T) {
+	big := []byte(`["NOTICE","` + strings.Repeat("x", maxMessageBytes) + `"]`)
+	l := &messageLimit{r: strings.NewReader(string(big)), max: maxMessageBytes}
+	var raw json.RawMessage
+	if err := json.NewDecoder(l).Decode(&raw); err == nil || !strings.Contains(err.Error(), "over") {
+		t.Fatalf("a message over the limit: %v", err)
+	}
+	// The limit is per message: many small ones adding up to more pass.
+	var many strings.Builder
+	one := `["NOTICE","` + strings.Repeat("y", 1000) + `"]`
+	n := 2*maxMessageBytes/len(one) + 1
+	for range n {
+		many.WriteString(one)
+	}
+	l = &messageLimit{r: strings.NewReader(many.String()), max: maxMessageBytes}
+	dec := json.NewDecoder(l)
+	for i := range n {
+		if err := dec.Decode(&raw); err != nil {
+			t.Fatalf("small message %d of %d: %v", i+1, n, err)
+		}
+		l.n = 0 // as wsConn.read does after each message
+	}
+}
+
+// TestReaderErrorIsSticky: once the reader has stopped (here on a stream
+// that is not JSON), every later next returns its error at once rather than
+// waiting.
+func TestReaderErrorIsSticky(t *testing.T) {
+	srv := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		websocket.Message.Send(ws, "this is not json")
+		var raw string
+		for websocket.Message.Receive(ws, &raw) == nil {
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := dial(ctx, wsURL(srv), "http://localhost/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+	for i := range 2 {
+		if _, _, err := c.next(ctx); err == nil || ctx.Err() != nil {
+			t.Fatalf("next %d after the reader stopped: %v (ctx %v)", i+1, err, ctx.Err())
+		}
+	}
+}
+
+// TestShortEOSEIsIgnored: a relay message with a label and nothing else
+// does not crash the client while it reads the wallet's info event.
+func TestShortEOSEIsIgnored(t *testing.T) {
+	w := newFakeWallet(t)
+	srv := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
+		websocket.Message.Send(ws, `["EOSE"]`)
+		w.relay(func() (string, bool) {
+			var raw string
+			return raw, websocket.Message.Receive(ws, &raw) == nil
+		}, func(v ...any) {
+			b, _ := json.Marshal(v)
+			websocket.Message.Send(ws, string(b))
+		})
+	}))
+	t.Cleanup(srv.Close)
+	cl := newClient(t, w, wsURL(srv))
+	if _, err := cl.MakeInvoice(context.Background(), 1000, "x", time.Minute); err != nil {
+		t.Fatal(err)
 	}
 }
 
