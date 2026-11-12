@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"sync"
@@ -529,20 +530,57 @@ func dial(ctx context.Context, relay, origin string) (*wsConn, error) {
 	return c, nil
 }
 
+// maxMessageBytes bounds one relay message. A wallet's answer to
+// make_invoice or lookup_invoice is a few KB.
+const maxMessageBytes = 1 << 20
+
+// read passes each relay message to next. A relay may split one message
+// across several websocket frames: relay.getalby.com sends any message over
+// 1 KiB as a 1024-byte frame and its continuation, and a wallet's answer to
+// make_invoice is larger than that. websocket.Message.Receive returns one
+// frame at a time, so a split message never parsed as JSON and the wallet's
+// answer was dropped, leaving the request to time out. Conn.Read streams
+// the frames' payloads in order, so a JSON decoder over it reads whole
+// messages however the relay frames them. A message that is valid JSON but
+// not a non-empty array is skipped; a stream that is not JSON at all ends
+// the connection (the call moves on to the next relay).
 func (c *wsConn) read() {
+	lim := &messageLimit{r: c.ws, max: maxMessageBytes}
+	dec := json.NewDecoder(lim)
 	for {
-		var raw string
-		if err := websocket.Message.Receive(c.ws, &raw); err != nil {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
 			c.errc <- err
 			close(c.msgs)
 			return
 		}
+		lim.n = 0
 		var msg []json.RawMessage
-		if json.Unmarshal([]byte(raw), &msg) != nil || len(msg) == 0 {
+		if json.Unmarshal(raw, &msg) != nil || len(msg) == 0 {
 			continue
 		}
 		c.msgs <- msg
 	}
+}
+
+// messageLimit fails a read once max bytes have come in since the last whole
+// message (read resets n), so a relay cannot make the decoder buffer an
+// endless message.
+type messageLimit struct {
+	r      io.Reader
+	n, max int
+}
+
+func (l *messageLimit) Read(p []byte) (int, error) {
+	if l.n >= l.max {
+		return 0, fmt.Errorf("a relay message is over %d bytes", l.max)
+	}
+	if len(p) > l.max-l.n {
+		p = p[:l.max-l.n]
+	}
+	k, err := l.r.Read(p)
+	l.n += k
+	return k, err
 }
 
 // next is the next message: its label ("EVENT", "OK", ...) and the whole
