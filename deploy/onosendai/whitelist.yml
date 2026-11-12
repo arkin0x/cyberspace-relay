@@ -38,6 +38,12 @@ kind_whitelist:
     # Seeds (DECK-0008, cyberspace #91); size caps in config.yml
     - "3350"   # DNA: SEEDO text (at most 8,192 bytes), or a mixed DNA (empty content, NIP-13 work)
     - "3352"   # tend: work given to a seed, sealed with the bag's key
+    # Cyberspace TV's UPGRADE ANNOUNCEMENT (ONOSENDAI, owner rulings 2026-11-12):
+    # one addressable event per version, d = the version (2.1, 2.2, ...),
+    # content = the words (at most 900 characters). Anyone may publish the kind;
+    # TV plays only those signed by the announcer key it pins
+    # (npub1sawgaw2k750pgkpkd2tqderxxtj37h4xvhzlc9vrvzsgjftpvlesmh030p). Size cap in config.yml.
+    - "33338"  # TV upgrade announcements
     # glyphbyte (owner, 2026-11-08: "make sure the onosendai relay accepts glyphbyte event kinds")
     - "1738"   # cairns: one URL, found by event-id prefix (glyphbyte spec/CAIRN.md)
     - "35129"  # the glyphbyte napplet (its HTML lives on Blossom; the event points to it)

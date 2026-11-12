@@ -191,6 +191,10 @@ rate_limit:
       max_size: 65536 # 64KB - a written DNA is at most 8,192 bytes (§3.1), up to 49,152 escaped; a mixed DNA's content is empty
     - kind: 3352 # Seeds tend
       max_size: 8192 # 8KB - a fixed-length sealed payload (about 400 B), an address, a block and a short placeholder
+    # Cyberspace TV upgrade announcements (ONOSENDAI), 2026-11-12: at most 900
+    # characters of words, all of which may be ones json.Marshal escapes to six bytes.
+    - kind: 33338 # TV upgrade announcement
+      max_size: 8192 # 8KB - 900 characters escaped is 5,400 B, four short tags and the envelope under 1 KB
 
   # Rate limits for different event categories
   category_limits:
