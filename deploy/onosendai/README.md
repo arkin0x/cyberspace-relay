@@ -65,7 +65,7 @@ client bug from publishing a hidden place here. Each kind has a size cap in
 |---|---|---|
 | 3350 DNA | 64 KB | A written DNA's text is at most 8,192 bytes (DECK-0008 §3.1). grain measures the event as Go's `json.Marshal` writes it, which turns `<`, `>` and `&` into six bytes each, and every rule line holds `->`; comments may hold any character, and most control characters also take six. So the content takes at most 49,152 bytes, and the rest leaves room for long relay hints. A mixed DNA's content is empty: its child's text, which may pass 8,192 bytes (§6.6), is computed by readers and never sent. A copy of it published as a written DNA is held to 8,192 bytes again. |
 | 3352 tend | 8 KB | A sealed payload of fixed length (about 400 bytes of base64, §8.3), the bag's address, a block and a placeholder: under 2 KB. |
-| 33338 TV upgrade announcement | 8 KB | At most 900 characters of words (the segment shows no more, and the announce script refuses more), up to 5,400 bytes if every one is escaped; `d`, `t`, `published_at` and `alt` are short. |
+| 33338 TV upgrade announcement | 8 KB | At most 900 characters of words in six pages (the segment shows no more; the announce script refuses more, and sends the whitespace-normalized text it counted, pages joined by one blank line), up to 5,400 bytes if every one is escaped; `d`, `t`, `published_at` and `alt` are short. |
 
 33338 was added on 2026-11-12 for Cyberspace TV's UPGRADE ANNOUNCEMENT (owner
 rulings 2026-11-12, ONOSENDAI `src/lib/tv/announceFeed.ts`). After a deploy

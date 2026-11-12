@@ -217,13 +217,17 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 	return len(out)
 }
 
-// TestOnosendaiSeedsCapsFitAnUpperBound builds an upper bound for the Seeds
-// DNA and tend (DECK-0008 §8), and for TV's upgrade announcement (33338):
-// every tag the DECK allows at once, even ones it
+// TestOnosendaiCapsFitAnUpperBound builds an upper bound for the Seeds DNA
+// and tend (DECK-0008 §8) and checks it against their caps: every tag the
+// DECK allows at once, even ones it
 // forbids together (written content with mixed-only tags, `-` with `p`), every
 // bounded field at its longest, and long relay hints. It checks that the
 // profile's caps let it through and still bind.
-func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
+// For TV's upgrade announcement (33338), the bound is what the announce
+// script sends: its four tags, the longest simple version, and six pages
+// joined by one blank line, 900 counted characters in all (the script sends
+// the whitespace-normalized text it counted).
+func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 	cfg := onosendaiConfig(t)
 	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
 	limiter.maxContentLength = cfg.RateLimit.MaxContentLength
@@ -272,10 +276,15 @@ func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
 	}
 	placeholder := "This garden is hidden at a place in cyberspace. Find it with ONOSENDAI: https://onosendai.tech"
 
-	// TV upgrade announcement (ONOSENDAI announceFeed): at most 900 characters
-	// of words in six pages, every one escaped, and the longest simple version.
+	// TV upgrade announcement (ONOSENDAI announceFeed): six pages of 150
+	// characters, every one escaped, joined by one blank line, and the longest
+	// simple version.
 	version := "999999.999999.999999.999999"
-	words := strings.Repeat(strings.Repeat("<", 150)+"\n\n", 6)
+	pages := make([]string, 6)
+	for i := range pages {
+		pages[i] = strings.Repeat("<", 150)
+	}
+	words := strings.Join(pages, "\n\n")
 	announceTags := [][]string{
 		{"d", version},
 		{"t", "onosendai-upgrade"},
