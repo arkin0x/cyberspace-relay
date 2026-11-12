@@ -79,7 +79,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// 2026-11-05: ONOSENDAI, cyberspace-mcp, NTH; cyberspace-cli, snocrash and
 	// HOSAKA publish nothing here; glyphbyte added 2026-11-08; ONOSENDAI sealed
 	// entries, 33335, added 2026-11-09; Seeds DNA and tends, 3350 and 3352,
-	// added 2026-11-10).
+	// added 2026-11-10; TV upgrade announcements, 33338, added 2026-11-12).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -103,6 +103,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		35129: "glyphbyte napplet",
 		3350:  "Seeds DNA",
 		3352:  "Seeds tend",
+		33338: "TV upgrade announcements",
 	}
 	for k, what := range published {
 		if !kinds[k] {
@@ -217,7 +218,8 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 }
 
 // TestOnosendaiSeedsCapsFitAnUpperBound builds an upper bound for the Seeds
-// DNA and tend (DECK-0008 §8): every tag the DECK allows at once, even ones it
+// DNA and tend (DECK-0008 §8), and for TV's upgrade announcement (33338):
+// every tag the DECK allows at once, even ones it
 // forbids together (written content with mixed-only tags, `-` with `p`), every
 // bounded field at its longest, and long relay hints. It checks that the
 // profile's caps let it through and still bind.
@@ -270,6 +272,17 @@ func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
 	}
 	placeholder := "This garden is hidden at a place in cyberspace. Find it with ONOSENDAI: https://onosendai.tech"
 
+	// TV upgrade announcement (ONOSENDAI announceFeed): at most 900 characters
+	// of words in six pages, every one escaped, and the longest simple version.
+	version := "999999.999999.999999.999999"
+	words := strings.Repeat(strings.Repeat("<", 150)+"\n\n", 6)
+	announceTags := [][]string{
+		{"d", version},
+		{"t", "onosendai-upgrade"},
+		{"published_at", "18000000000"},
+		{"alt", "ONOSENDAI version " + version + ": an upgrade announcement for Cyberspace TV"},
+	}
+
 	for _, c := range []struct {
 		kind    int
 		what    string
@@ -278,6 +291,7 @@ func TestOnosendaiSeedsCapsFitAnUpperBound(t *testing.T) {
 	}{
 		{3350, "DNA", dnaText, dnaTags},
 		{3352, "tend", placeholder, tendTags},
+		{33338, "TV upgrade announcement", words, announceTags},
 	} {
 		limit, ok := caps[c.kind]
 		if !ok {

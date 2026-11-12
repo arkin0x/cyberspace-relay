@@ -17,6 +17,7 @@ region.)
 | 23334 | TV watching ping (ephemeral, never stored); without it every TV set reads 1 WATCHING | anyone |
 | 33340, 3367 | item listings (the ITEM FEED, DECK-0004 §4), color palettes objects name by nevent (DECK-0003 §1.3b) | anyone |
 | 3350, 3352 | Seeds (DECK-0008): DNA and tends (a seed, 3351, rides inside bags and is refused alone) | anyone |
+| 33338 | Cyberspace TV upgrade announcements (ONOSENDAI): one per version; TV plays only the announcer key's | anyone |
 | 1738, 35129 | glyphbyte: cairns (one URL, found by event-id prefix) and the glyphbyte napplet | anyone |
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
@@ -64,6 +65,18 @@ client bug from publishing a hidden place here. Each kind has a size cap in
 |---|---|---|
 | 3350 DNA | 64 KB | A written DNA's text is at most 8,192 bytes (DECK-0008 §3.1). grain measures the event as Go's `json.Marshal` writes it, which turns `<`, `>` and `&` into six bytes each, and every rule line holds `->`; comments may hold any character, and most control characters also take six. So the content takes at most 49,152 bytes, and the rest leaves room for long relay hints. A mixed DNA's content is empty: its child's text, which may pass 8,192 bytes (§6.6), is computed by readers and never sent. A copy of it published as a written DNA is held to 8,192 bytes again. |
 | 3352 tend | 8 KB | A sealed payload of fixed length (about 400 bytes of base64, §8.3), the bag's address, a block and a placeholder: under 2 KB. |
+| 33338 TV upgrade announcement | 8 KB | At most 900 characters of words (the segment shows no more, and the announce script refuses more), up to 5,400 bytes if every one is escaped; `d`, `t`, `published_at` and `alt` are short. |
+
+33338 was added on 2026-11-12 for Cyberspace TV's UPGRADE ANNOUNCEMENT (owner
+rulings 2026-11-12, ONOSENDAI `src/lib/tv/announceFeed.ts`). After a deploy
+batch is live, the coordinator publishes one addressable event per version
+(`d` = the simple version, 2.1, 2.2, ...; `content` = the words; `t`
+`onosendai-upgrade`, `published_at`, `alt`), signed by a dedicated announcer
+key. TV subscribes for the last week, plays each version once within a day of
+publishing, and counts the week for N UPDATES THIS WEEK. The relay takes the
+kind from anyone, like every kind here; TV believes only the announcer key it
+pins, so an event by any other key is never shown. Unused before (no NIP, no
+events on the big public relays; 33336 and 33337 are taken by other apps).
 
 `config/deploy_onosendai_test.go` builds an upper bound for each kind (every
 tag the DECK allows at once, every bounded field at its longest, long relay
