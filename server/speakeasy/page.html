@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex">
 <title>{{if .Name}}{{.Name}}{{else}}Region {{.Region}}{{end}}</title>
-<link rel="icon" href="/favicon.ico" type="image/x-icon">
+{{if .Favicon}}<link rel="icon" href="{{.Favicon}}">{{else}}<link rel="icon" href="/favicon.ico" type="image/x-icon">{{end}}
 <!-- grain's theme: the saved palette (theme.js) and its tokens and fonts
      (the compiled stylesheet, in release builds). Every token below has a
      fallback, the grain palette, so the page reads the same where those

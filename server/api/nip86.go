@@ -26,6 +26,7 @@ import (
 	"strconv"
 
 	"github.com/0ceanslim/grain/config"
+	"github.com/0ceanslim/grain/server/branding"
 	"github.com/0ceanslim/grain/server/utils"
 	"github.com/0ceanslim/grain/server/utils/log"
 )
@@ -41,6 +42,10 @@ const NIP86ContentType = "application/nostr+json+rpc"
 type nip86Request struct {
 	Method string `json:"method"`
 	Params []any  `json:"params"`
+	// baseURL is the request's own origin, set by HandleNIP86 (never from
+	// the body): tells the image-field writes which host is the relay's own
+	// when auth.relay_url is unset.
+	baseURL string
 }
 
 // nip86Response mirrors the spec: present `error` on failure (HTTP
@@ -83,6 +88,8 @@ type nip86IPEntry struct {
 // @Description
 // @Description **Grain vendor extensions (writes):** `grain_updateserver`, `grain_updateratelimit`, `grain_updateeventpurge`, `grain_updatelogging`, `grain_updateauth`, `grain_updatebackuprelay`, `grain_updateclient`, `grain_updateresourcelimits`, `grain_updateeventtimeconstraints`, `grain_updatewhitelistconfig`, `grain_updateblacklistconfig`. Each takes the full section blob as `params[0]` (same shape the matching GET endpoint returns) and stages it to disk; the response is `{ok:true, restart_pending:true}`. Operator clicks Apply → dashboard calls `grain_reloadconfig`.
 // @Description
+// @Description **Grain vendor extensions (relay identity):** `grain_changerelaylogo` / `grain_changerelaylogolight` (params: `[url:string]`, empty clears) set the header logo on grain's own web pages, and its optional variant for light themes. Stored in `relay_metadata.json` (`logo`, `logo_light`) beside the identity fields but never served in the NIP-11 document. `grain_storebrandingimage` (params: `[slot, source]`; slot `icon` / `logo` / `logo_light` / `banner`; source a `data:` URL upload or an http(s) URL fetched once) stores grain's own copy (PNG, JPEG, WebP, GIF or ICO, at most 700 KiB), serves it at `/branding/<file>`, and points the slot's field at it; returns `{url, type, width, height, bytes}`.
+// @Description
 // @Description **Grain vendor extensions (ops + reads):** `grain_reloadconfig` (triggers restart), `grain_refreshcache` (synchronous whitelist + blacklist cache refresh), `grain_whitelistconfig` / `grain_blacklistconfig` (full-struct reads — the blacklist read overlays IP fields from config.yml so the dashboard sees one coherent shape), `grain_stats_overview` (server counters + list/cache stats).
 // @Description
 // @Description **Out of scope:** event-moderation methods (`allowevent` / `banevent` / `listbannedevents` / `listeventsneedingmoderation`) need a moderation queue that doesn't exist yet — tracked separately. Call `supportedmethods` at runtime for the authoritative list this build advertises.
@@ -119,6 +126,7 @@ func HandleNIP86(w http.ResponseWriter, r *http.Request) {
 		"signer", signer,
 		"method", req.Method)
 
+	req.baseURL = branding.PublicBase("", r)
 	result, err := dispatchNIP86(req, signer)
 	if err != "" {
 		writeNIP86Error(w, err)
@@ -179,10 +187,12 @@ func dispatchNIP86(req nip86Request, signer string) (any, string) {
 		return runChangeRelayMetadata(req.Params, signer, "name")
 	case "changerelaydescription":
 		return runChangeRelayMetadata(req.Params, signer, "description")
+	// The image fields: an outside URL or upload is stored by grain first
+	// (see nip86_branding.go), so visitors never load it from elsewhere.
 	case "changerelayicon":
-		return runChangeRelayMetadata(req.Params, signer, "icon")
+		return runChangeRelayImage(req.Params, signer, "icon", req.baseURL)
 	case "changerelaybanner":
-		return runChangeRelayMetadata(req.Params, signer, "banner")
+		return runChangeRelayImage(req.Params, signer, "banner", req.baseURL)
 	case "changerelaycontact":
 		return runChangeRelayMetadata(req.Params, signer, "contact")
 	case "changerelayprivacypolicy":
@@ -197,6 +207,16 @@ func dispatchNIP86(req nip86Request, signer string) (any, string) {
 		return runChangeRelayMetadataArray(req.Params, signer, "language_tags")
 	case "changerelaytags":
 		return runChangeRelayMetadataArray(req.Params, signer, "tags")
+	// grain extension: the header logo on grain's own web pages. Stored in
+	// relay_metadata.json but not a NIP-11 field (never served there).
+	case "grain_changerelaylogo":
+		return runChangeRelayImage(req.Params, signer, "logo", req.baseURL)
+	case "grain_changerelaylogolight":
+		return runChangeRelayImage(req.Params, signer, "logo_light", req.baseURL)
+	// grain extension: keep grain's own copy of a branding image (upload or
+	// fetch-once URL) and point its field at it. See nip86_branding.go.
+	case "grain_storebrandingimage":
+		return runStoreBrandingImage(req.Params, signer)
 
 	// ─── grain_* phase 2: config section updates ─────────────
 	// Each takes the full section blob as params[0] and stages
@@ -286,6 +306,9 @@ func supportedNIP86Methods() []string {
 		"changerelaylanguagetags",
 		"changerelaytags",
 		// grain extensions
+		"grain_changerelaylogo",
+		"grain_changerelaylogolight",
+		"grain_storebrandingimage",
 		"grain_updateserver",
 		"grain_updateratelimit",
 		"grain_updateeventpurge",

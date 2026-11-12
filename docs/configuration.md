@@ -859,6 +859,22 @@ GRAIN provides a NIP-11 compliant template constructed from default example conf
 
 For detailed NIP-11 configuration options and field specifications, refer to [NIP-11 documentation](https://github.com/nostr-protocol/nips/blob/master/11.md) and adjust the configuration to your relay's specific requirements.
 
+### Branding grain's own web pages
+
+The relay's web pages follow the same file, read live (an `/admin` change shows on the next page load):
+
+| Setting (admin "Relay information") | Key | Used for |
+| --- | --- | --- |
+| Name | `name` (NIP-11) | Browser tab title; the header text when no logo is set (else "🌾 grain") |
+| Favicon | `icon` (NIP-11) | Browser tab icon on every page, the installed-app (PWA) icon and name, and what nostr clients show. Square, 512px or larger. Unset: grain's icons |
+| Logo | `logo` (grain only) | The header image, shown alone at the header's text height. Unset: the name |
+| Logo for light themes | `logo_light` (grain only) | Optional: replaces the Logo while a light theme is active; needs a Logo |
+| Banner | `banner` (NIP-11) | Shown whole above the relay description on the home page |
+
+`logo` and `logo_light` are not NIP-11 fields: they are stored here but never served in the NIP-11 document. They are written with the grain NIP-86 methods `grain_changerelaylogo` and `grain_changerelaylogolight` (owner-only, like `changerelayicon`).
+
+grain keeps its own copy of the four images and serves them itself, so visitors never load them from an outside host and they survive the source going away. In the admin form, upload an image or paste a URL and Save (grain fetches it once). Either way the owner-only NIP-86 method `grain_storebrandingimage` (`[slot, source]`, source a `data:` upload or an http(s) URL) checks it (PNG, JPEG, WebP, GIF or ICO by content, at most 700 KiB and 8192 px a side; SVG is refused because it can carry script), writes it to `<data dir>/branding/<slot>-<hash>.<ext>` on the persistent data volume, and points the field at the relay-relative path `/branding/<file>`. The NIP-11 document serves `icon` and `banner` absolute, on `auth.relay_url`'s origin or else the request's, so nothing breaks when the relay is reached under another name or moves domain. The plain write methods (`changerelayicon`, `changerelaybanner`, `grain_changerelaylogo`, `grain_changerelaylogolight`) do the same for an outside URL or a `data:` upload, whichever NIP-86 client sends it; a path on the relay (e.g. `/static/...`) or a URL on its own host is kept as set. Fetches are http(s) only, to public addresses only (checked at connection time), 8 s at most. At startup, any of the four fields still pointing at another host (for example a seeded `relay_metadata.json`) is fetched and stored the same way, in the background; one that fails is kept and tried again on the next start.
+
 ---
 
 ## Configuration Validation

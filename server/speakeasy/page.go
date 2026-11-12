@@ -42,6 +42,9 @@ type Page struct {
 	// and the region is not one yet, with an optional name (step 6: a name
 	// comes only with creation, in the same invoice).
 	Create *PageCreate
+	// Favicon is the tab icon: the relay's NIP-11 icon, which the
+	// speakeasy's own NIP-11 document carries too. Empty: grain's favicon.
+	Favicon string
 }
 
 // PageCreate is the Create Speakeasy offer: its price, the price a name

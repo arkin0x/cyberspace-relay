@@ -3,6 +3,7 @@ package integration
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -278,7 +279,9 @@ func TestNIP86_ChangeRelayIcon(t *testing.T) {
 	owner := tests.NewDeterministicKeypair(tests.NIP86OwnerSeed)
 	before := fetchRelayInfo(t)
 	orig, _ := before["icon"].(string)
-	target := "https://example.com/grain-test.png"
+	// A path on the relay is kept as set (an outside URL would be fetched
+	// and stored by grain first); NIP-11 serves it absolute.
+	target := "/static/icons/icon-192x192.png"
 
 	_, env := callNIP86(t, owner, "changerelayicon", []any{target})
 	assertResultTrue(t, env)
@@ -287,8 +290,8 @@ func TestNIP86_ChangeRelayIcon(t *testing.T) {
 	})
 
 	after := fetchRelayInfo(t)
-	if got, _ := after["icon"].(string); got != target {
-		t.Fatalf("relay icon not updated: got %q want %q", got, target)
+	if got, _ := after["icon"].(string); !strings.HasPrefix(got, "http") || !strings.HasSuffix(got, target) {
+		t.Fatalf("relay icon not updated: got %q want an absolute URL ending %q", got, target)
 	}
 }
 
@@ -389,6 +392,7 @@ func TestNIP86_InvalidInput(t *testing.T) {
 		{"blockip", []any{"not.an.ip.addr"}, "invalid"},
 		{"blockip", []any{}, "invalid ip"},
 		{"changerelayicon", []any{"javascript:alert(1)"}, "invalid icon"},
+		{"grain_changerelaylogo", []any{"javascript:alert(1)"}, "invalid logo"},
 		{"changerelayname", []any{}, "missing value"},
 		{"changerelayname", []any{""}, "name cannot be empty"},
 	}
