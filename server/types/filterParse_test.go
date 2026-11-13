@@ -38,6 +38,10 @@ func TestParseFilter_RejectsMalformed(t *testing.T) {
 		"search not string":    `{"search":1}`,
 		"tag not array":        `{"#e":"abc"}`,
 		"tag with number":      `{"#t":["nostr",1]}`,
+		"double hash tag":      `{"##p":["ab"]}`,
+		"long tag key":         `{"#aa":["zz"]}`,
+		"bare hash":            `{"#":["zz"]}`,
+		"digit tag key":        `{"#1":["zz"]}`,
 	}
 	for name, js := range cases {
 		t.Run(name, func(t *testing.T) {

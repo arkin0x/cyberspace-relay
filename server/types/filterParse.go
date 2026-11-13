@@ -80,7 +80,16 @@ func ParseFilter(raw map[string]interface{}) (f Filter, matchable bool, err erro
 			}
 			f.Search = s
 
-		case len(key) >= 2 && key[0] == '#':
+		case len(key) >= 1 && key[0] == '#':
+			// NIP-01: a tag filter is "#" and one letter. Anything else is
+			// refused, never ignored: nostrdb's JSON filter parser loses its
+			// place on a key it does not know and swallows the keys after
+			// it, and "##p" would reach it as a second "#p". Either widened
+			// the query past constraints the relay added (the gift wrap #p
+			// narrowing, NIP-17 privacy).
+			if !IsTagFilterKey(key[1:]) {
+				return Filter{}, false, fmt.Errorf("%s: a tag filter is # and one letter", key)
+			}
 			vals, err := parseStrings(key, val)
 			if err != nil {
 				return Filter{}, false, err
@@ -177,4 +186,14 @@ func parseNonNegative(key string, val interface{}) (int64, error) {
 		return 0, fmt.Errorf("%s must be a non-negative integer", key)
 	}
 	return int64(n), nil
+}
+
+// IsTagFilterKey reports whether name (a tag filter key without its "#") is
+// one ASCII letter, the only tag filters NIP-01 defines.
+func IsTagFilterKey(name string) bool {
+	if len(name) != 1 {
+		return false
+	}
+	c := name[0]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }

@@ -9,6 +9,9 @@ import (
 // Above this we return the cap and report `approximate: true` per NIP-45.
 const countHardCap = 1_000_000
 
+// CountHardCap is countHardCap for callers: a count at it is approximate.
+const CountHardCap = countHardCap
+
 // countPageSize is how many events one COUNT page asks nostrdb for. A
 // variable only so tests can cross page boundaries with a few events.
 var countPageSize = maxQueryResults

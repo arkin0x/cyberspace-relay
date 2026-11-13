@@ -307,11 +307,15 @@ func filterToJSON(f nostr.Filter) (string, error) {
 	// Tag filters
 	for key, values := range f.Tags {
 		if len(values) > 0 {
-			tagKey := key
-			if len(tagKey) > 0 && tagKey[0] != '#' {
-				tagKey = "#" + tagKey
+			// Only "#" and one letter: nostrdb's JSON parser loses its place
+			// on any other key and drops the constraints after it, and a key
+			// already holding "#" would collide with its one-letter twin.
+			// Failing drops this filter (buildNDBFilters), which narrows the
+			// request instead of widening it.
+			if !nostr.IsTagFilterKey(key) {
+				return "", fmt.Errorf("invalid tag filter key %q", key)
 			}
-			m[tagKey] = values
+			m["#"+key] = values
 		}
 	}
 

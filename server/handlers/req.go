@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/0ceanslim/grain/config"
@@ -172,9 +173,29 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 		}
 	}
 
+	// NIP-17 DM privacy (#73): the database must not hand back gift wraps the
+	// caller may not see, or the shortfall against a filter's limit (or the
+	// slots they take in a prefix scan) would count them. Filters are
+	// narrowed so it never does; only where the kinds cannot be listed (a
+	// speakeasy, or no kind whitelist) does a kindless filter go through
+	// GatedQuery instead.
+	authedPubkey := GetAuthedPubkey(client)
+	var openKinds []int
+	if scope == nil {
+		openKinds = RootOpenKinds()
+	}
+	exact, gated := PrivateFilters(nonSearch, authedPubkey, openKinds)
+	gated = dedupeFilters(gated)
+	if len(gated) > MaxGatedFilters {
+		release()
+		client.DeleteSubscription(subID)
+		response.SendClosed(client, subID, fmt.Sprintf("invalid: at most %d filters without kinds", MaxGatedFilters))
+		return
+	}
+
 	var queriedEvents []nostr.Event
-	if len(nonSearch) > 0 {
-		evts, err := db.Query(nonSearch, effectiveLimit)
+	if len(exact) > 0 {
+		evts, err := db.Query(exact, effectiveLimit)
 		if err != nil {
 			log.Req().Error("Error querying events",
 				"sub_id", subID,
@@ -183,6 +204,26 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 			return
 		}
 		queriedEvents = append(queriedEvents, evts...)
+	}
+	// One nostrdb query over several filters returns at most effectiveLimit
+	// events, newest first; keep that cap across the separate gated queries,
+	// cutting after each so no more than twice the cap is ever held.
+	for _, gf := range gated {
+		evts, err := GatedQuery(db.Query, gf, effectiveLimit, authedPubkey)
+		if err != nil {
+			log.Req().Error("Error querying events",
+				"sub_id", subID,
+				"error", err)
+			response.SendClosed(client, subID, "error: could not query events")
+			return
+		}
+		queriedEvents = append(queriedEvents, evts...)
+		sort.SliceStable(queriedEvents, func(i, j int) bool {
+			return queriedEvents[i].CreatedAt > queriedEvents[j].CreatedAt
+		})
+		if len(queriedEvents) > effectiveLimit {
+			queriedEvents = queriedEvents[:effectiveLimit]
+		}
 	}
 	for _, sf := range searchFilters {
 		evts, err := pagedTextSearch(db, sf, effectiveLimit)
@@ -208,7 +249,6 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 	// alongside the background sweeper — guarantees expired events are
 	// never served even if a sweep hasn't yet reached them.
 	nowUnix := time.Now().Unix()
-	authedPubkey := GetAuthedPubkey(client)
 	delivered := 0
 	skippedExpired := 0
 	skippedProtected := 0
@@ -256,6 +296,25 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 	// 2. Client disconnects
 	// 3. New REQ with same subID (replaces this one)
 	// 4. Subscription limit reached (oldest removed)
+}
+
+// dedupeFilters drops repeated filters (same JSON), so a REQ cannot multiply
+// the work of one gated filter by listing it many times.
+func dedupeFilters(filters []nostr.Filter) []nostr.Filter {
+	if len(filters) < 2 {
+		return filters
+	}
+	seen := make(map[string]bool, len(filters))
+	out := filters[:0:0]
+	for _, f := range filters {
+		h := hashFilters([]nostr.Filter{f})
+		if h != "" && seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, f)
+	}
+	return out
 }
 
 // parseFilters strictly parses the filter objects of a REQ or COUNT. Filters

@@ -1,5 +1,7 @@
 package config
 
+import "sort"
+
 // NIP-17 DM metadata privacy (#73), always on, no opt-out.
 //
 // NIP-17 says relays MAY serve kind:1059 gift wraps only to the recipient
@@ -21,4 +23,15 @@ var dmProtectedKinds = map[int]bool{
 // the AUTHed p-tagged recipient. See the package var for rationale.
 func IsDMProtectedKind(kind int) bool {
 	return dmProtectedKinds[kind]
+}
+
+// DMProtectedKinds lists the protected kinds in ascending order, for building
+// the filters that query or count them on their own.
+func DMProtectedKinds() []int {
+	kinds := make([]int, 0, len(dmProtectedKinds))
+	for k := range dmProtectedKinds {
+		kinds = append(kinds, k)
+	}
+	sort.Ints(kinds)
+	return kinds
 }

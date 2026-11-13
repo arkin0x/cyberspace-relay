@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/0ceanslim/grain/client/connection"
+	"github.com/0ceanslim/grain/config"
 	nostr "github.com/0ceanslim/grain/server/types"
 	"github.com/0ceanslim/grain/server/utils/log"
 )
@@ -67,7 +68,9 @@ func ResolveEventHandler(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		for _, ev := range cc.FetchEvents(r.Context(), []nostr.Filter{filter}, relays, 1, timeout) {
-			if ev != nil && ev.ID == id {
+			// NIP-17 DM privacy (#73): never hand a gift wrap to an anonymous
+			// HTTP caller (see QueryEventsHandler).
+			if ev != nil && ev.ID == id && !config.IsDMProtectedKind(ev.Kind) {
 				return ev
 			}
 		}

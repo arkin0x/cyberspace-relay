@@ -67,17 +67,12 @@ func HandleCount(client nostr.ClientInterface, message []interface{}) {
 		filters[i].Limit = nil
 
 		// NIP-17 DM privacy (#73): COUNT on protected kinds leaks message-
-		// volume metadata. If a filter explicitly counts gift wraps, require
-		// AUTH and constrain the count to the AUTHed pubkey's own p-tag, so a
-		// caller can only count their own inbox — never someone else's.
-		if FilterRequestsProtectedKind(filters[i]) {
-			authed := GetAuthedPubkey(client)
-			if authed == "" {
-				log.Req().Info("COUNT for protected kind requires auth", "sub_id", subID)
-				response.SendClosed(client, subID, "auth-required: authentication is required to count these events")
-				return
-			}
-			filters[i].Tags["p"] = []string{authed}
+		// volume metadata. A filter that explicitly counts gift wraps needs
+		// AUTH; CountPrivately below then counts only the caller's own.
+		if FilterRequestsProtectedKind(filters[i]) && !IsAuthenticated(client) {
+			log.Req().Info("COUNT for protected kind requires auth", "sub_id", subID)
+			response.SendClosed(client, subID, "auth-required: authentication is required to count these events")
+			return
 		}
 	}
 
@@ -96,7 +91,14 @@ func HandleCount(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
-	count, approximate, err := db.CountFiltered(filters)
+	// Every filter, kinds or not, counts a gift wrap only for its p-tagged
+	// recipient: a broad filter (no kinds, an ids prefix, a #p) would
+	// otherwise count other people's gift wraps too.
+	var openKinds []int
+	if scope == nil {
+		openKinds = RootOpenKinds()
+	}
+	count, approximate, err := CountPrivately(db.CountFiltered, filters, GetAuthedPubkey(client), openKinds)
 	release()
 	if err != nil {
 		log.Req().Error("COUNT query failed", "sub_id", subID, "error", err)
