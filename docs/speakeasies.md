@@ -199,6 +199,32 @@ Off by default. On only with `payments: {enabled: true, nwc_file: <path>}` in `s
 | Routing | `/<name>` routes as the hex path does, to the same speakeasy. NIP-11 there is named by the name; AUTH on a connection to the name names the name's URL (#19's rule, per path). Discovery gives the name in `name`; `url` stays the hex address. |
 | Price | `payments.name_sats`, default 7,000, added to `speakeasy_sats` (owner ruling 2026-11-09). |
 
+## The landing page: `/speakeasy` (owner, 2026-11-13)
+
+The owner: "make a speakeasy landing page on relay.onosendai.tech/speakeasy that looks beautiful, explains speakeasies, and provides a tool to create one."
+
+While speakeasies are open, a browser at `relay.onosendai.tech/speakeasy` (a GET or HEAD whose `Accept` has `text/html`) gets a public page: what a speakeasy is, how it works, the prices, the tool to create one, the speakeasies already open, and a few questions. `/speakeasy/` is a 301 to it (query kept). It is matched before the name paths; `speakeasy` is a reserved name, so no speakeasy can be there, and a websocket or NIP-11 request at `/speakeasy` is a 404 as at any path that is not a speakeasy. With speakeasies off or closed, the path goes on to grain's usual handlers.
+
+| Part | How |
+|---|---|
+| The tool | Takes a region string, a `/C/` link (www.onosendai.tech or the relay, with or without a scheme), the bare relay link ONOSENDAI's REGION chip makes, a speakeasy's address (also at its name), or a full coordinate. A coordinate gets a size slider (cubes only: 3 to 63 hex in steps of 3, 2^1 to 2^81 gibsons a side), since 64 hex is a place, not a region. |
+| Checking | `GET /api/speakeasies/check` (below), asked once per pause in typing. The relay reads the input with `RegionInput`, the same `ParseRegionPath` rules and shared vectors as `/C/<hex>`. |
+| Buying | The same `POST /api/speakeasies/orders` and `GET /api/speakeasies/orders/<id>` as the region page, through the same browser code (`server/speakeasy/checkout.js`, inlined into both pages), so both read an order identically and remember it under the same key (`speakeasy-order:<region>`): an order started on the landing page is picked up on that region's page, and the landing page picks up any open order for the region in `?region=` (and, without it, the last order it started itself). A paid order that bought nothing stays on the region page; on the landing page "Start another" stops reopening it. A 404 clears a remembered order only when the relay says "no such order"; any other failure is tried again. |
+| `?region=` | Prefills the tool with the canonical region (anything else is ignored), so ONOSENDAI's REGION chip can link to `/speakeasy?region=<hex>` later instead of the region page. |
+| Open speakeasies | Up to 12 from the registry, rendered into the page (no endpoint): named ones first, oldest first, then the rest, newest first. Only what NIP-11 and discovery already say (name or region, address, since, size). The list is read from the registry at most every 30 s. |
+| Payments | Open, paused (the wallet self-check has not passed, lookups fail, or too many lingering orders) or off. Paused and off say so plainly and the button stays off. Why sales stopped is never shown: it may name the wallet. |
+
+### `GET /api/speakeasies/check?region=<input>&name=<name>`
+
+Both parameters optional; same origin only (no CORS); `Cache-Control: no-store`; 120 requests a minute per address (an IPv4 address or IPv6 /64), then `429` with `Retry-After` (never escalated to a ban). `404` while speakeasies are off; `405` for another method; `400` for a region over 512 bytes or a name over 64.
+
+| Field | Meaning |
+|---|---|
+| `region` | `{hex, coordinate, size, heights: [x, y, z], cube, planes, url, page, onosendai, speakeasy, inside}`: the canonical string; whether it is a full coordinate; the region page's size and planes words; its address; its page; the same region in ONOSENDAI; the speakeasy at exactly this region (discovery's fields plus `name_url`) or null; the larger speakeasies holding it, the smallest first. |
+| `region_error` | the input is not a region |
+| `name` | `{name, ok, error}`: `Registry.NameFree` for this region (a name bound to it stays free for it). Holds by an open invoice are not shown; the order endpoint still answers 409 for them. |
+| `payments` | `open`, `paused` or `off` |
+
 ## Later: a region picker (owner, 2026-11-04)
 
 An interface for choosing a speakeasy region, so nobody needs to know a hex string to reach `/C/<region>`. To plan later and add to the relay implementation. Ideas to weigh when it is planned: pick from the visitor's own position (their chain head's region at several sizes), from a coordinate or ONOSENDAI link pasted in, or from a map of existing speakeasies; show each candidate's size and whether it is already a speakeasy.

@@ -120,6 +120,11 @@ type speakeasyRuntime struct {
 	// checkout takes payment for new speakeasies (step 5); nil while
 	// payments are off.
 	checkout *speakeasy.Checkout
+
+	// live is the landing page's list of open speakeasies, reused for
+	// liveTTL.
+	live   atomic.Pointer[liveSnapshot]
+	liveMu sync.Mutex
 }
 
 // speakeasyState is what the router reads: nil without speakeasies.yml, a
@@ -285,6 +290,28 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 		}
 		if p := r.URL.EscapedPath(); p == OrdersPath || strings.HasPrefix(p, OrdersPath+"/") {
 			serveOrders(w, r, rt)
+			return
+		}
+		if r.URL.EscapedPath() == CheckPath {
+			serveCheck(w, r, rt)
+			return
+		}
+		// The landing page, while speakeasies are open, for a browser (a
+		// websocket or NIP-11 request at /speakeasy is refused below, as at
+		// any path that is not a speakeasy). Matched before the name paths:
+		// "speakeasy" is a reserved name, so none can be there.
+		if p := r.URL.EscapedPath(); (p == LandingPath || p == LandingPath+"/") && rt != nil && rt.reg != nil &&
+			wantsPage(r) && r.Header.Get("Upgrade") == "" {
+			if p != LandingPath {
+				w.Header().Add("Vary", "Accept")
+				to := LandingPath
+				if r.URL.RawQuery != "" {
+					to += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, to, http.StatusMovedPermanently)
+				return
+			}
+			rt.serveLanding(w, r)
 			return
 		}
 		// Matched on the path as sent, never through http.ServeMux, which

@@ -19,6 +19,9 @@ var reservedNames = map[string]bool{
 	"c": true,
 }
 
+// IsReservedName reports whether name is on the reserved list.
+func IsReservedName(name string) bool { return reservedNames[name] }
+
 // CheckName says why name cannot be a speakeasy name, or nil (ruling D3):
 // 3 to 40 lowercase letters, digits and dashes; not reserved; and never
 // something that reads as a region, since a name must not look like one.

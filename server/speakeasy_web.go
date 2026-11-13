@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0ceanslim/grain/config"
 	"github.com/0ceanslim/grain/server/regiongate"
 	"github.com/0ceanslim/grain/server/speakeasy"
 	"github.com/0ceanslim/grain/server/utils"
@@ -288,4 +289,268 @@ func (rt *speakeasyRuntime) createOrder(w http.ResponseWriter, r *http.Request) 
 		log.RegionGate().Warn("Speakeasy invoice not made", "region", canonical, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the wallet did not make an invoice; try again"})
 	}
+}
+
+// ── The landing page (/speakeasy) and its region check ───────────────────
+
+// LandingPath is the speakeasy landing page: what a speakeasy is, and a
+// tool to create one. "speakeasy" is a reserved name, so no speakeasy can
+// ever be at this path.
+const LandingPath = "/speakeasy"
+
+// CheckPath answers the landing page's tool:
+//
+//	GET CheckPath?region=<input>&name=<name>
+//
+// region is anything InputPath reads (a region string, a /C/ link, a
+// coordinate, a speakeasy's address); name is a name to check. Both are
+// optional. The answer says what the region is (its canonical string,
+// size and planes, by the relay's own rules), whether it is a speakeasy
+// already, whether the name can be bought with it, and whether payments
+// are open. It is read-only, shows only what discovery and NIP-11 already
+// say, is never cached, and is rate-limited per address.
+const CheckPath = "/api/speakeasies/check"
+
+// checkPerMinute caps check requests per address (an IPv4 address or an
+// IPv6 /64) a minute. The page asks once per pause in typing; a person
+// never comes near it. Refusals are not escalated to a ban.
+var checkPerMinute = 120
+
+// liveTTL is how long the landing page's list of open speakeasies is
+// reused before the registry is read again; liveMax how many it shows.
+var liveTTL = 30 * time.Second
+
+const liveMax = 12
+
+// liveSnapshot is the landing page's list, read from the registry at.
+type liveSnapshot struct {
+	at    time.Time
+	items []speakeasy.LiveSpeakeasy
+	more  int
+}
+
+// liveList is the landing page's list of open speakeasies, from a copy at
+// most liveTTL old, so a flood of page loads reads the registry at most
+// once per liveTTL.
+func (rt *speakeasyRuntime) liveList() ([]speakeasy.LiveSpeakeasy, int) {
+	if s := rt.live.Load(); s != nil && time.Since(s.at) < liveTTL {
+		return s.items, s.more
+	}
+	// One refresh at a time: the others wait for it, then use it.
+	rt.liveMu.Lock()
+	defer rt.liveMu.Unlock()
+	if s := rt.live.Load(); s != nil && time.Since(s.at) < liveTTL {
+		return s.items, s.more
+	}
+	items, more := speakeasy.LiveList(rt.reg.List(), rt.url, liveMax)
+	rt.live.Store(&liveSnapshot{at: time.Now(), items: items, more: more})
+	return items, more
+}
+
+// paymentsState is whether Create Speakeasy is open (speakeasy.Payments*).
+// Why sales are paused or off is never shown: it may name the wallet.
+func (rt *speakeasyRuntime) paymentsState() string {
+	switch {
+	case rt.checkout == nil:
+		return speakeasy.PaymentsOff
+	case rt.checkout.Selling():
+		return speakeasy.PaymentsOpen
+	case strings.HasPrefix(rt.checkout.State(), "off:"):
+		return speakeasy.PaymentsOff
+	}
+	return speakeasy.PaymentsPaused
+}
+
+// serveLanding serves the landing page. ?region= prefills the tool when it
+// is a region (ONOSENDAI's REGION chip can link here).
+func (rt *speakeasyRuntime) serveLanding(w http.ResponseWriter, r *http.Request) {
+	m := utils.GetRelayMetadataCopy()
+	l := speakeasy.Landing{
+		RelayName: strings.TrimSpace(m.Name), Favicon: strings.TrimSpace(m.Icon),
+		Logo: strings.TrimSpace(m.Logo), LogoLight: strings.TrimSpace(m.LogoLight),
+		PublicURL: rt.publicURL, Host: rt.publicURL,
+		Sats: rt.cfg.Payments.SpeakeasySats, NameSats: rt.cfg.Payments.NameSats,
+		Payments: rt.paymentsState(), Endpoint: OrdersPath, CheckEndpoint: CheckPath,
+		BothPlanes: len(rt.cfg.Planes) != 1,
+	}
+	if u, err := url.Parse(rt.publicURL); err == nil && u.Host != "" {
+		l.Host = u.Host
+	}
+	if q := r.URL.Query().Get("region"); q != "" {
+		if c, ok := speakeasy.RegionInput(q); ok {
+			l.Region = c
+		}
+	}
+	l.Live, l.LiveMore = rt.liveList()
+	var buf bytes.Buffer
+	if err := speakeasy.RenderLanding(&buf, l); err != nil {
+		log.RegionGate().Error("Speakeasy landing page failed", "error", err)
+		http.Error(w, "could not render this page", http.StatusInternalServerError)
+		return
+	}
+	h := w.Header()
+	h.Add("Vary", "Accept")
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		w.Write(buf.Bytes())
+	}
+}
+
+// checkItem is a speakeasy in a check answer: discovery's fields, plus its
+// address at its name.
+type checkItem struct {
+	discoveryItem
+	NameURL string `json:"name_url,omitempty"`
+}
+
+// checkRegion is a region in a check answer.
+type checkRegion struct {
+	// Hex is the canonical region string; Coordinate is true when it is a
+	// full coordinate (a place: the page offers sizes around it).
+	Hex        string `json:"hex"`
+	Coordinate bool   `json:"coordinate"`
+	// Size and Planes are the region page's words; Heights each axis's
+	// height (x, y, z), so the box is 2^h gibsons along it.
+	Size    string  `json:"size"`
+	Heights [3]uint `json:"heights"`
+	Cube    bool    `json:"cube"`
+	Planes  string  `json:"planes"`
+	// URL is the address a speakeasy here has; Page its page on this
+	// relay; ONOSENDAI the same region in ONOSENDAI.
+	URL       string `json:"url"`
+	Page      string `json:"page"`
+	ONOSENDAI string `json:"onosendai"`
+	// Speakeasy is the speakeasy at exactly this region, or null.
+	Speakeasy *checkItem `json:"speakeasy"`
+	// Inside are the speakeasies of larger regions that hold this one,
+	// the smallest first.
+	Inside []checkItem `json:"inside"`
+}
+
+type checkName struct {
+	Name  string `json:"name"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type checkAnswer struct {
+	Region      *checkRegion `json:"region,omitempty"`
+	RegionError string       `json:"region_error,omitempty"`
+	Name        *checkName   `json:"name,omitempty"`
+	Payments    string       `json:"payments"`
+}
+
+func (rt *speakeasyRuntime) checkItem(sp *speakeasy.Speakeasy) *checkItem {
+	it := &checkItem{discoveryItem: discoveryItem{Region: sp.ID, URL: rt.url(sp.ID), CreatedAt: sp.CreatedAt}}
+	if len(sp.Names) > 0 {
+		name := sp.Names[0]
+		it.Name, it.NameURL = &name, rt.url(name)
+	}
+	return it
+}
+
+// serveCheck answers CheckPath.
+func serveCheck(w http.ResponseWriter, r *http.Request, rt *speakeasyRuntime) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	if rt == nil || rt.reg == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "speakeasies are not open on this relay"})
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		h.Set("Allow", "GET, HEAD")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET"})
+		return
+	}
+	ip := utils.GetClientIP(r)
+	if blocked, _ := config.IsIPBlocked(ip); ip != "" && blocked {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "blocked"})
+		return
+	}
+	if ip != "" && !takeAttempt(regiongate.AddressBucket(ip)+"\x00speakeasy-check", checkPerMinute) {
+		h.Set("Retry-After", "60")
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many checks; wait a minute"})
+		return
+	}
+	q := r.URL.Query()
+	rawRegion, rawName := q.Get("region"), strings.TrimSpace(q.Get("name"))
+	if len(rawRegion) > 512 || len(rawName) > 64 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too long"})
+		return
+	}
+	out := checkAnswer{Payments: rt.paymentsState()}
+	canonical := ""
+	if strings.TrimSpace(rawRegion) != "" {
+		c, ok := speakeasy.RegionInput(rawRegion)
+		if !ok {
+			// A speakeasy's address at its name leads to its region.
+			if p := speakeasy.InputPath(rawRegion); p != "" {
+				if sp, _ := rt.reg.Lookup(p); sp != nil {
+					c, ok = sp.ID, true
+				}
+			}
+		}
+		if ok {
+			canonical = c
+			out.Region = rt.checkRegion(c)
+		}
+		if out.Region == nil {
+			canonical = ""
+			out.RegionError = "Not a region. Paste a region hex, a /C/ link, or a full coordinate."
+		}
+	}
+	if rawName != "" {
+		n := &checkName{Name: rawName, OK: true}
+		if err := rt.reg.NameFree(rawName, canonical); err != nil {
+			n.OK, n.Error = false, nameProblem(rawName, err)
+		}
+		out.Name = n
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// checkRegion describes region c (canonical) for a check answer.
+func (rt *speakeasyRuntime) checkRegion(c string) *checkRegion {
+	pr, err := regiongate.ParseRegionPath("/" + c)
+	if err != nil {
+		return nil
+	}
+	out := &checkRegion{
+		Hex: c, Coordinate: pr.PlaneFixed,
+		Size: speakeasy.SizeText(pr.HX, pr.HY, pr.HZ), Heights: [3]uint{pr.HX, pr.HY, pr.HZ},
+		Cube: pr.HX == pr.HY && pr.HY == pr.HZ, Planes: speakeasy.PlanesText(pr, rt.cfg.Planes),
+		URL: rt.url(c), Page: speakeasy.RegionPrefix + c, ONOSENDAI: speakeasy.ONOSENDAIBase + c,
+		Inside: []checkItem{},
+	}
+	if sp := rt.reg.Get(c); sp != nil {
+		out.Speakeasy = rt.checkItem(sp)
+	}
+	// A region whose string starts with a speakeasy's lies inside it.
+	for k := len(c) - 1; k >= 1; k-- {
+		if sp := rt.reg.Get(c[:k]); sp != nil {
+			out.Inside = append(out.Inside, *rt.checkItem(sp))
+		}
+	}
+	return out
+}
+
+// nameProblem says, in the page's words, why name cannot be bought.
+func nameProblem(name string, err error) string {
+	switch {
+	case errors.Is(err, speakeasy.ErrNameTaken):
+		return "That name is taken."
+	case !errors.Is(err, speakeasy.ErrBadName):
+		return "That name can't be used."
+	case len(name) < 3 || len(name) > 40:
+		return "A name is 3 to 40 characters."
+	case strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789-") != "":
+		return "A name is lowercase letters, digits and dashes."
+	case speakeasy.IsReservedName(name):
+		return "That name is reserved."
+	}
+	return "That reads as a region hex. Add a dash, or a letter past f."
 }
