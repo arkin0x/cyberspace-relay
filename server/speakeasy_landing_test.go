@@ -91,8 +91,27 @@ func TestLandingPage(t *testing.T) {
 			t.Errorf("crawler (Accept %q): %d, or no card", accept, code)
 		}
 	}
-	// Not a GET, or not this path: grain's usual handlers.
+	// Not a GET, not this path, a websocket upgrade or a NIP-11 request:
+	// grain's usual handlers, never the page, whatever else it accepts.
 	passed := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) })
+	for _, accept := range []string{"*/*", "", "application/nostr+json, */*"} {
+		for _, upgrade := range []string{"websocket", ""} {
+			if upgrade == "" && !strings.Contains(accept, "nostr") {
+				continue // a plain GET: the page, above
+			}
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, LandingPath, nil)
+			req.Header.Set("Accept", accept)
+			if upgrade != "" {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", upgrade)
+			}
+			speakeasyRoutes(passed).ServeHTTP(w, req)
+			if strings.Contains(w.Body.String(), "og:image") {
+				t.Errorf("Upgrade %q, Accept %q: served the landing page", upgrade, accept)
+			}
+		}
+	}
 	for _, c := range []struct{ method, path, accept string }{
 		{http.MethodPost, LandingPath, browser},
 		{http.MethodGet, "/speakeasyx", browser},

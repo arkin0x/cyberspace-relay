@@ -30,7 +30,10 @@ const ONOSENDAIRegionPicker = "https://www.onosendai.tech/?mode=region"
 
 // The link preview (owner, 2026-11-13, in his words). The card is drawn
 // from tools/og/speakeasy-card.html; its URL is versioned because previews
-// are cached by the image's address, so a new card needs a new number.
+// are cached by the image's address, so a new card needs a new number. It
+// is served by the root's static handler, which sits behind the region
+// gate's HTTP guard: on a relay that gates reads (gate_reads), /static/ is
+// refused and the card does not show. The onosendai profile does not gate.
 const (
 	CardTitle       = "Speakeasies: private relays for places in cyberspace"
 	CardDescription = "Claim a region of cyberspace and get a private relay. Only people standing inside your region can read or write. One payment in sats."
@@ -96,7 +99,7 @@ func (l Landing) CardTitle() string       { return CardTitle }
 func (l Landing) CardDescription() string { return CardDescription }
 func (l Landing) CardImageAlt() string    { return CardImageAlt }
 func (l Landing) CardImage() string       { return l.Origin() + CardImagePath }
-func (l Landing) PageURL() string         { return l.Origin() + "/speakeasy" }
+func (l Landing) PageURL() string         { return l.Origin() + "/speakeasy" } // server.LandingPath
 
 // ExampleRegion is the region the price card shows an address for.
 func (l Landing) ExampleRegion() string { return "56db6db6db6db6db6db6dbad" }
