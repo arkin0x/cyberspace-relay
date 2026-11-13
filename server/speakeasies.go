@@ -123,7 +123,8 @@ type speakeasyRuntime struct {
 
 	// live is the landing page's list of open speakeasies, reused for
 	// liveTTL.
-	live atomic.Pointer[liveSnapshot]
+	live   atomic.Pointer[liveSnapshot]
+	liveMu sync.Mutex
 }
 
 // speakeasyState is what the router reads: nil without speakeasies.yml, a

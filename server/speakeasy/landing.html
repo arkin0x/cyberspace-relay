@@ -284,6 +284,7 @@
     .buy { grid-template-columns: 1fr; }
     .buy .btn { width: 100%; }
     .inv { grid-template-columns: 280px 1fr; align-items: start; }
+    .inv:has(.qr:empty) { grid-template-columns: 1fr; max-width: 40rem; }
     .qr { margin: 0; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -373,7 +374,7 @@
         </svg>
         <span class="n">01</span>
         <h3>Pick a region</h3>
-        <p>A cube in cyberspace. It covers the same place in dataspace and ideaspace.</p>
+        <p>A cube in cyberspace.{{if .BothPlanes}} It covers the same place in dataspace and ideaspace.{{end}}</p>
       </li>
       <li class="step card">
         <svg viewBox="0 0 160 104" aria-hidden="true" fill="none">
@@ -453,7 +454,7 @@
               <label for="region-in">Region</label>
               <input id="region-in" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="{{.Region}}"
                 placeholder="56db6d… or a /C/ link" aria-describedby="region-help region-err">
-              <p class="err" id="region-err" role="alert"></p>
+              <p class="err" id="region-err" aria-live="polite"></p>
               <p class="help" id="region-help">A region hex, a /C/ link, or a full coordinate. <a href="https://www.onosendai.tech" target="_blank" rel="noopener">Pick a region visually in ONOSENDAI</a> (VIEW, then Region).</p>
             </div>
             <div class="field size" id="size-box" hidden>
@@ -461,7 +462,7 @@
               <input id="size-in" type="range" min="1" max="21" step="1" value="12" aria-describedby="size-out">
               <div class="scale" aria-hidden="true"><span>Smaller</span><span>Bigger</span></div>
               <output id="size-out" for="size-in"></output>
-              <p class="help">A region covers both planes, whichever plane this place is in.</p>
+              {{if .BothPlanes}}<p class="help">A region covers both planes, whichever plane this place is in.</p>{{end}}
             </div>
             <div class="field">
               <label for="name-in">Name <span class="opt">optional, {{.NamePrice}} sats more</span></label>
@@ -472,13 +473,13 @@
           </div>
 
           <div>
-            <div class="rc" id="rc" aria-live="polite">
+            <div class="rc" id="rc">
               <div class="rc-empty" id="rc-empty">
                 <svg viewBox="0 0 64 64" fill="none" aria-hidden="true"><g stroke="var(--yellow)" stroke-width="1.8" stroke-linejoin="round" opacity="0.8"><path d="M8 22h30v30H8Z M8 22l12-12h30L38 22 M50 10v30L38 52"/></g><path d="M20 10v30h30M20 40 8 52" stroke="var(--yellow)" stroke-opacity="0.35" stroke-dasharray="2 3"/></svg>
                 <span>Your region shows here: its size, its planes, and whether it's free.</span>
               </div>
               <div id="rc-body" hidden>
-                <div class="rc-head"><span class="chip wait" id="rc-status">Checking</span><a id="rc-map" href="#" target="_blank" rel="noopener">Open in ONOSENDAI</a></div>
+                <div class="rc-head"><span class="chip wait" id="rc-status" role="status">Checking</span><a id="rc-map" href="#" target="_blank" rel="noopener">Open in ONOSENDAI</a></div>
                 <dl>
                   <dt>Region</dt><dd><code id="rc-hex"></code></dd>
                   <dt>Size</dt><dd id="rc-size"></dd>
@@ -505,13 +506,14 @@
         <div class="inv">
           <div class="qr" id="qr"></div>
           <div>
-            <h3>Pay this invoice</h3>
+            <h3 id="inv-title">Pay this invoice</h3>
             <p class="inv-sum" id="inv-sum"></p>
             <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
             <a class="btn primary" id="open-wallet" href="#">Open in wallet</a>
             <p class="status" id="pay-status" role="status">Waiting for payment</p>
             <p class="help" id="inv-expiry"></p>
             <p class="err" id="inv-err" role="alert"></p>
+            <button type="button" class="btn ghost" id="start-over" hidden>Start another</button>
             <p class="meta">Order <span id="order-id"></span><br>Payment hash <span id="payment-hash"></span></p>
           </div>
         </div>
@@ -547,7 +549,7 @@
       {{range .Live}}<li class="live-item card">
         {{if .Name}}<div class="live-name">{{.Name}}</div>{{else}}<div class="live-name hex">{{.Region}}</div>{{end}}
         <div class="live-meta">{{pow .Size}} · since {{.Since}}</div>
-        <div class="addr"><code>{{.URL}}</code><button type="button" class="quiet" data-copy-text="{{.URL}}">Copy</button></div>
+        <div class="addr"><code>{{.URL}}</code><button type="button" class="quiet" data-copy-text="{{.URL}}" aria-label="Copy {{.URL}}">Copy</button></div>
         <a href="{{.Page}}">Its page</a>
       </li>
       {{end}}
@@ -597,7 +599,8 @@
   var regionIn = $("region-in"), nameIn = $("name-in"), sizeIn = $("size-in"), btn = $("create-btn");
   // coord: a full coordinate the visitor gave, to size a region around;
   // region: the relay's answer about the region now chosen.
-  var st = { coord: null, region: null, nameOK: false, seq: 0, timer: null, stop: null, clock: null };
+  // asked: the region string the last answer is about (what Create buys).
+  var st = { coord: null, region: null, asked: "", nameOK: false, seq: 0, timer: null, stop: null, clock: null };
 
   function key(region) { return "speakeasy-order:" + region; } // the region page's key too
   function group(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
@@ -652,6 +655,7 @@
     var row = document.createElement("div"); row.className = "addr";
     var c = document.createElement("code"); c.textContent = url;
     var b = document.createElement("button"); b.type = "button"; b.className = "quiet"; b.textContent = "Copy"; b.setAttribute("data-copy-text", url);
+    b.setAttribute("aria-label", "Copy " + url);
     row.appendChild(c); row.appendChild(b); wrap.appendChild(row);
     return wrap;
   }
@@ -741,8 +745,10 @@
     }
   }
 
+  // asking is the region string the tool asks about now.
+  function asking() { return st.coord ? st.coord.slice(0, prefixLen()) : regionIn.value.trim(); }
   function check() {
-    var raw = st.coord ? st.coord.slice(0, prefixLen()) : regionIn.value.trim();
+    var raw = asking();
     var name = nameIn.value.trim();
     var seq = ++st.seq;
     if (!raw && !name) {
@@ -769,6 +775,7 @@
         }
         $("region-err").textContent = raw && a.region_error ? a.region_error : "";
         st.region = a.region || null;
+        st.asked = raw;
         renderRegion(st.region);
         renderName(a.name || null);
         update();
@@ -779,7 +786,9 @@
         st.region = null; update();
       });
   }
-  function later(ms) { clearTimeout(st.timer); st.timer = setTimeout(check, ms); }
+  // An edit makes every answer still on its way stale (seq), so an answer
+  // about the old input can never come back and arm Create.
+  function later(ms) { st.seq++; clearTimeout(st.timer); st.timer = setTimeout(check, ms); }
 
   regionIn.addEventListener("input", function () {
     st.coord = null; showSize(false);
@@ -806,6 +815,7 @@
     view("invoice");
     if (o.qr_svg) $("qr").innerHTML = o.qr_svg; // drawn by this relay
     else if (o.status !== "pending") $("qr").textContent = "";
+    $("inv-title").textContent = o.status === "pending" ? "Pay this invoice" : "Your payment";
     $("bolt11").textContent = o.invoice;
     $("open-wallet").href = "lightning:" + o.invoice;
     $("open-wallet").hidden = o.status !== "pending";
@@ -832,10 +842,12 @@
     s.textContent = text;
     s.className = stopped ? "status stop" : "status";
   }
-  function showDone(o, note) {
+  // named: the speakeasy got its name (not so when the name was taken
+  // first, though the order still carries the name asked for).
+  function showDone(o, note, named) {
     stopClock();
     view("done");
-    $("done-title").textContent = o.name ? o.name + " is open" : "Your speakeasy is open";
+    $("done-title").textContent = named ? o.name + " is open" : "Your speakeasy is open";
     $("done-sub").textContent = "Region " + o.region;
     $("done-note").textContent = note || "";
     var addrs = $("done-addrs"); addrs.textContent = "";
@@ -843,7 +855,7 @@
     addrs.appendChild(addrRow("Its address", o.url));
     if (o.url !== regionURL) addrs.appendChild(addrRow("Also at", regionURL));
     $("done-map").href = mapBase + o.region;
-    $("done-page").href = o.url !== regionURL && o.name ? "/" + encodeURIComponent(o.name) : "/C/" + o.region;
+    $("done-page").href = named && o.url !== regionURL ? "/" + encodeURIComponent(o.name) : "/C/" + o.region;
   }
   function backToForm(msg) {
     stopClock();
@@ -854,22 +866,28 @@
   function follow(id, region) {
     if (st.stop) st.stop();
     st.stop = S.watch(endpoint, id, {
-      update: function (o) { if (!S.outcome(o)) showInvoice(o); },
+      update: function (o) {
+        if (S.outcome(o)) return;
+        showInvoice(o);
+        if (o.status === "pending") status("Waiting for payment");
+      },
       paid: function () { status("Paid. Opening the speakeasy."); },
       gone: function () { forget(region); backToForm(""); },
       end: function (kind, o) {
         if (kind === "made") {
-          forget(region); showDone(o, "");
+          forget(region); showDone(o, "", true);
         } else if (kind === "made-without-name") {
           // Made, but its name was taken first: the name's part is owed.
           forget(region);
           showDone(o, "Its name was taken first (" + o.outcome + "). The name's part is owed back: give the relay owner order " +
-            o.id + " and payment hash " + o.payment_hash + ".");
+            o.id + " and payment hash " + o.payment_hash + ".", false);
         } else if (kind === "owed") {
           // A refund owed, or held: never a success.
           showInvoice(o); stopClock(); $("inv-expiry").textContent = "";
           status("Paid, but it bought nothing (" + o.outcome + "). " + group(o.amount_sats) +
             " sats are owed back: give the relay owner the order and payment hash below.", true);
+          // This page stops reopening it; the region page still shows it.
+          $("start-over").hidden = false;
         } else if (kind === "expired") {
           forget(region); backToForm("That invoice expired. Make a new one when you're ready.");
         } else {
@@ -885,7 +903,7 @@
   $("tool-form").addEventListener("submit", function (e) {
     e.preventDefault();
     var r = st.region;
-    if (btn.disabled || !r) return;
+    if (btn.disabled || !r || st.asked !== asking() || (nameIn.value.trim() && !st.nameOK)) return;
     var body = { region: r.hex };
     var name = nameIn.value.trim().toLowerCase();
     if (name) body.name = name;
@@ -894,20 +912,28 @@
     S.create(endpoint, body)
       .then(function (x) {
         if (!x.ok) {
-          if (x.status === 503) setPayments("paused");
-          if (x.status === 404) setPayments("off");
           $("create-err").textContent = x.o.error || "Something went wrong. Try again.";
+          if (x.status === 503 || x.status === 404) { st.region = null; later(0); } // ask the relay how payments stand
           update();
           return;
         }
         S.remember(key(x.o.region), x.o.id);
         S.remember(LAST, x.o.region);
         $("inv-err").textContent = "";
+        $("start-over").hidden = true;
         status("Waiting for payment");
         showInvoice(x.o);
         follow(x.o.id, x.o.region);
       })
       .catch(function () { $("create-err").textContent = "Something went wrong. Try again."; update(); });
+  });
+
+  $("start-over").addEventListener("click", function () {
+    if (st.stop) st.stop();
+    S.remember(LAST, null);
+    $("start-over").hidden = true;
+    $("inv-err").textContent = "";
+    backToForm("");
   });
 
   // ── start: ?region= prefills; a reload picks up the order being paid ──

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0ceanslim/grain/config"
 	"github.com/0ceanslim/grain/server/regiongate"
 	"github.com/0ceanslim/grain/server/speakeasy"
 	"github.com/0ceanslim/grain/server/utils"
@@ -335,6 +336,12 @@ func (rt *speakeasyRuntime) liveList() ([]speakeasy.LiveSpeakeasy, int) {
 	if s := rt.live.Load(); s != nil && time.Since(s.at) < liveTTL {
 		return s.items, s.more
 	}
+	// One refresh at a time: the others wait for it, then use it.
+	rt.liveMu.Lock()
+	defer rt.liveMu.Unlock()
+	if s := rt.live.Load(); s != nil && time.Since(s.at) < liveTTL {
+		return s.items, s.more
+	}
 	items, more := speakeasy.LiveList(rt.reg.List(), rt.url, liveMax)
 	rt.live.Store(&liveSnapshot{at: time.Now(), items: items, more: more})
 	return items, more
@@ -459,7 +466,12 @@ func serveCheck(w http.ResponseWriter, r *http.Request, rt *speakeasyRuntime) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET"})
 		return
 	}
-	if ip := utils.GetClientIP(r); ip != "" && !takeAttempt(regiongate.AddressBucket(ip)+"\x00speakeasy-check", checkPerMinute) {
+	ip := utils.GetClientIP(r)
+	if blocked, _ := config.IsIPBlocked(ip); ip != "" && blocked {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "blocked"})
+		return
+	}
+	if ip != "" && !takeAttempt(regiongate.AddressBucket(ip)+"\x00speakeasy-check", checkPerMinute) {
 		h.Set("Retry-After", "60")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many checks; wait a minute"})
 		return
@@ -485,7 +497,9 @@ func serveCheck(w http.ResponseWriter, r *http.Request, rt *speakeasyRuntime) {
 		if ok {
 			canonical = c
 			out.Region = rt.checkRegion(c)
-		} else {
+		}
+		if out.Region == nil {
+			canonical = ""
 			out.RegionError = "Not a region. Paste a region hex, a /C/ link, or a full coordinate."
 		}
 	}

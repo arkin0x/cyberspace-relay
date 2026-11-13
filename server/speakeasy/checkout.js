@@ -36,14 +36,22 @@
   }
   // watch polls GET endpoint/<id>: h.update(o) on every answer, h.paid(o)
   // while it is paid but not yet applied, then once h.end(outcome, o), or
-  // h.gone() when the relay no longer knows the order. A failed request is
-  // tried again. It returns a function that stops it.
+  // h.gone() when the relay says it has no such order. Anything else that
+  // is not an order (payments off for a moment, a restart, a 429 or 5xx)
+  // is tried again, never taken for "gone": the order id and payment hash
+  // are what a payer quotes for a refund. It returns a function that stops
+  // it.
   function watch(endpoint, id, h) {
     var stopped = false, timer = null;
     function again(ms) { if (!stopped) timer = setTimeout(tick, ms); }
     function tick() {
       fetch(endpoint + "/" + encodeURIComponent(id), { cache: "no-store" })
-        .then(function (r) { if (r.status === 404) throw "gone"; return r.json(); })
+        .then(function (r) {
+          if (r.ok) return r.json();
+          return r.json().catch(function () { return {}; }).then(function (o) {
+            throw r.status === 404 && o.error === "no such order" ? "gone" : "retry";
+          });
+        })
         .then(function (o) {
           if (stopped) return;
           if (h.update) h.update(o);
