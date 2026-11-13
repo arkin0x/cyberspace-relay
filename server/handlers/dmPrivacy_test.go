@@ -3,6 +3,7 @@ package handlers
 import (
 	"testing"
 
+	"github.com/0ceanslim/grain/server/db/nostrdb"
 	nostr "github.com/0ceanslim/grain/server/types"
 )
 
@@ -58,7 +59,7 @@ func TestPrivateFilters(t *testing.T) {
 		{Kinds: []int{7, 1059}, Tags: map[string][]string{}},
 		{Kinds: []int{7}},
 		{Authors: []string{strangerPK}},
-	}, "")
+	}, "", nil)
 	if len(exact) != 2 || exact[0].Kinds[0] != 7 || len(exact[0].Kinds) != 1 || exact[1].Kinds[0] != 7 {
 		t.Fatalf("unauthenticated exact = %+v", exact)
 	}
@@ -69,7 +70,7 @@ func TestPrivateFilters(t *testing.T) {
 	// Authenticated: the protected part is narrowed to the caller's p tag,
 	// and the caller's filter is not changed in place.
 	orig := nostr.Filter{Kinds: []int{1059}, Tags: map[string][]string{"p": {strangerPK, recipientPK}}}
-	exact, _ = PrivateFilters([]nostr.Filter{orig}, recipientPK)
+	exact, _ = PrivateFilters([]nostr.Filter{orig}, recipientPK, nil)
 	if len(exact) != 1 || len(exact[0].Tags["p"]) != 1 || exact[0].Tags["p"][0] != recipientPK {
 		t.Fatalf("authed exact = %+v", exact)
 	}
@@ -77,9 +78,20 @@ func TestPrivateFilters(t *testing.T) {
 		t.Fatal("PrivateFilters changed the caller's filter")
 	}
 	// A #p that leaves the caller out matches none of their gift wraps.
-	exact, _ = PrivateFilters([]nostr.Filter{{Kinds: []int{1059}, Tags: map[string][]string{"p": {strangerPK}}}}, recipientPK)
+	exact, _ = PrivateFilters([]nostr.Filter{{Kinds: []int{1059}, Tags: map[string][]string{"p": {strangerPK}}}}, recipientPK, nil)
 	if len(exact) != 0 {
 		t.Fatalf("a #p naming only someone else kept a protected filter: %+v", exact)
+	}
+
+	// With the kinds listed (the root's whitelist), a kindless filter is
+	// answered exactly: the open kinds, plus the caller's own gift wraps.
+	exact, gated = PrivateFilters([]nostr.Filter{{IDs: []string{"0"}, Tags: map[string][]string{}}}, recipientPK, []int{0, 7})
+	if len(gated) != 0 || len(exact) != 2 || len(exact[0].Kinds) != 2 || exact[1].Kinds[0] != 1059 || exact[1].Tags["p"][0] != recipientPK {
+		t.Fatalf("kindless with open kinds: exact %+v gated %+v", exact, gated)
+	}
+	exact, gated = PrivateFilters([]nostr.Filter{{IDs: []string{"0"}}}, "", []int{7})
+	if len(gated) != 0 || len(exact) != 1 || exact[0].Kinds[0] != 7 {
+		t.Fatalf("kindless with open kinds, unauthenticated: exact %+v gated %+v", exact, gated)
 	}
 }
 
@@ -119,9 +131,24 @@ func TestCountPrivately(t *testing.T) {
 		{"7+1059, recipient", nostr.Filter{Kinds: []int{7, 1059}}, recipientPK, 4},
 	}
 	for _, c := range cases {
-		got, _, err := CountPrivately(count, []nostr.Filter{c.f}, c.authed)
-		if err != nil || got != c.want {
-			t.Errorf("%s: got %d (%v), want %d", c.name, got, err, c.want)
+		for _, open := range [][]int{nil, {7}} {
+			got, _, err := CountPrivately(count, []nostr.Filter{c.f}, c.authed, open)
+			if err != nil || got != c.want {
+				t.Errorf("%s (open kinds %v): got %d (%v), want %d", c.name, open, got, err, c.want)
+			}
 		}
+	}
+
+	// A kindless count at the hard cap subtracts nothing: the cap minus the
+	// protected count would be the protected count.
+	capped := func(fs []nostr.Filter) (int, bool, error) {
+		if len(fs[0].Kinds) == 0 {
+			return nostrdb.CountHardCap, true, nil
+		}
+		return 12345, false, nil
+	}
+	got, approx, _ := CountPrivately(capped, []nostr.Filter{{}}, strangerPK, nil)
+	if got != nostrdb.CountHardCap || !approx {
+		t.Errorf("capped kindless count: got %d approx %v, want the cap", got, approx)
 	}
 }

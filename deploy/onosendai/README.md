@@ -82,17 +82,30 @@ private:
   (`auth-required:`).
 - After AUTH, a REQ or COUNT sees only the gift wraps that p-tag the AUTHed
   pubkey; a `#p` naming anyone else matches none of theirs.
-- A filter without kinds (ids, authors, `#p`, a time range) never returns or
-  counts someone else's gift wrap, and pages past the ones it withholds, so
-  the number of events it returns does not count them either.
+- A filter without kinds (ids or authors, prefixes included, `#p`, a time
+  range) is read as if it named every whitelisted kind, with 1059 narrowed to
+  the AUTHed pubkey as above. The database never hands back someone else's
+  gift wrap, so neither the number of events returned against a limit nor
+  the slots of a prefix scan count them. (Events of a kind no longer
+  whitelisted, stored before it was dropped, no longer match a kindless
+  filter.)
+- A tag filter must be `#` and one letter (NIP-01); anything else, such as
+  `##p` or `#aa`, is refused as `invalid:`, because nostrdb's filter parser
+  mishandled those and dropped the `#p` narrowing.
 - A live subscription is sent a new gift wrap only on the connection AUTHed
   as its recipient.
-- grain's HTTP event endpoints (`/api/v1/events/...`) never return one.
+- grain's HTTP event endpoints (`/api/v1/events/...`) never return one, and
+  the public `/api/v1/relay/stats` leaves gift wraps out of its event counts.
+  What stays visible: the storage fill and the byte size of the "other"
+  bucket, which every Cyberspace kind shares, grow with each event stored,
+  gift wraps included.
 
 `server/handlers/dmPrivacy.go` holds these rules; there is no setting to turn
 them off. The speakeasy paths keep refusing gift wraps in practice: a
 speakeasy admits an event only from an author placed in its region, and a
-gift wrap's author is a throwaway key; the same read rules apply there too.
+gift wrap's author is a throwaway key. The same read rules apply there too;
+a speakeasy takes any kind, so a kindless filter there pages past withheld
+gift wraps instead, and a REQ may carry at most 32 such filters.
 Each gift wrap is capped at 64 KB (`kind_size_limits`): a NIP-17 message or
 file message (the file itself lives elsewhere) is a few KB even after two
 layers of NIP-44, so this leaves wide room for long messages and many tags.

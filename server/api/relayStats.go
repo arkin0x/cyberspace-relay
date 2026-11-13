@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0ceanslim/grain/config"
 	"github.com/0ceanslim/grain/server/db/nostrdb"
+	nostr "github.com/0ceanslim/grain/server/types"
 	"github.com/0ceanslim/grain/server/utils/log"
 )
 
@@ -121,6 +123,9 @@ func (c *eventStatsCache) refreshLocked(db *nostrdb.NDB) {
 	go func() {
 		defer close(done)
 		total, byKind, err := db.EventStats()
+		if err == nil {
+			total, byKind, err = withoutProtectedKinds(db, total, byKind)
+		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		c.pending = nil
@@ -133,4 +138,51 @@ func (c *eventStatsCache) refreshLocked(db *nostrdb.NDB) {
 			c.at = time.Now()
 		}
 	}()
+}
+
+// withoutProtectedKinds takes the protected kinds (NIP-17 gift wraps, see
+// config.IsDMProtectedKind) out of the public event counts. Left in, the
+// total minus an unauthenticated COUNT {} (which never counts them) would be
+// the relay's number of gift wraps, and polling it would time each DM that
+// arrives. A protected kind is counted with its own query and taken out of
+// its bucket: its own if nostrdb has one, else "other". The byte sizes are
+// left as they are: they cannot be split per kind, and the "other" bucket
+// they would hide in also holds every Cyberspace kind.
+func withoutProtectedKinds(db *nostrdb.NDB, total uint64, byKind []nostrdb.KindStat) (uint64, []nostrdb.KindStat, error) {
+	for _, k := range config.DMProtectedKinds() {
+		n, _, err := db.CountFiltered([]nostr.Filter{{Kinds: []int{k}}})
+		if err != nil {
+			return 0, nil, err
+		}
+		if n <= 0 {
+			continue
+		}
+		total = subFloor(total, uint64(n))
+		bucket := -1
+		for i := range byKind {
+			if byKind[i].Kind == k {
+				bucket = i
+				break
+			}
+		}
+		if bucket < 0 {
+			for i := range byKind {
+				if byKind[i].Kind == -1 {
+					bucket = i
+					break
+				}
+			}
+		}
+		if bucket >= 0 {
+			byKind[bucket].Count = subFloor(byKind[bucket].Count, uint64(n))
+		}
+	}
+	return total, byKind, nil
+}
+
+func subFloor(a, b uint64) uint64 {
+	if b > a {
+		return 0
+	}
+	return a - b
 }

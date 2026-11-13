@@ -84,4 +84,66 @@ func TestGatedQueryPagesPastWithheldGiftWraps(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("unauthenticated, no limit: want 3 reactions, got %d", len(got))
 	}
+
+	// An ids prefix is scanned in id order, where withheld gift wraps take
+	// slots anywhere in a page, whatever their created_at. Four gift wraps
+	// under "00" sort before three newer reactions under "0" (not "00"):
+	// paged by created_at, the first page (all gift wraps) would move the
+	// cursor past the reactions, and the stranger would get none of them.
+	grind := func(ok func(string) bool, at int64, kind int, p string) nostr.Event {
+		for {
+			if e := sign(at, kind, p); ok(e.ID) {
+				return e
+			}
+		}
+	}
+	var prefixed []nostr.Event
+	for i := 0; i < 4; i++ {
+		prefixed = append(prefixed, grind(func(id string) bool { return id[:2] == "00" }, at-500-int64(i), 1059, recipientPK))
+	}
+	for i := 0; i < 3; i++ {
+		prefixed = append(prefixed, grind(func(id string) bool { return id[0] == '0' && id[1] != '0' }, at-300-int64(i), 7, strangerPK))
+	}
+	for _, e := range prefixed {
+		if err := db.StoreEvent(context.Background(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		got, _ := db.Query([]nostr.Filter{{}}, 100)
+		if len(got) == len(evts)+len(prefixed) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("indexed %d of %d", len(got), len(evts)+len(prefixed))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Events from the first batch may share the prefix too; count what the
+	// stranger should get: every non-gift-wrap under "0", newest first.
+	all, _ := db.Query([]nostr.Filter{{IDs: []string{"0"}}}, 1000)
+	open := 0
+	for _, e := range all {
+		if e.Kind != 1059 {
+			open++
+		}
+	}
+	two := 2
+	got, err = GatedQuery(db.Query, nostr.Filter{IDs: []string{"0"}, Limit: &two}, 500, strangerPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantN := open
+	if wantN > two {
+		wantN = two
+	}
+	if len(got) != wantN {
+		t.Fatalf("ids prefix 0 limit 2 as a stranger: want %d, got %d", wantN, len(got))
+	}
+	for _, e := range got {
+		if e.Kind == 1059 {
+			t.Fatal("prefix query served a gift wrap to a stranger")
+		}
+	}
 }

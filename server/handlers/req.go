@@ -174,11 +174,24 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 	}
 
 	// NIP-17 DM privacy (#73): the database must not hand back gift wraps the
-	// caller may not see, or the shortfall against a filter's limit would
-	// count them. Filters with kinds are narrowed so it never does; a filter
-	// without kinds pages past the withheld ones (GatedQuery).
+	// caller may not see, or the shortfall against a filter's limit (or the
+	// slots they take in a prefix scan) would count them. Filters are
+	// narrowed so it never does; only where the kinds cannot be listed (a
+	// speakeasy, or no kind whitelist) does a kindless filter go through
+	// GatedQuery instead.
 	authedPubkey := GetAuthedPubkey(client)
-	exact, gated := PrivateFilters(nonSearch, authedPubkey)
+	var openKinds []int
+	if scope == nil {
+		openKinds = RootOpenKinds()
+	}
+	exact, gated := PrivateFilters(nonSearch, authedPubkey, openKinds)
+	gated = dedupeFilters(gated)
+	if len(gated) > MaxGatedFilters {
+		release()
+		client.DeleteSubscription(subID)
+		response.SendClosed(client, subID, fmt.Sprintf("invalid: at most %d filters without kinds", MaxGatedFilters))
+		return
+	}
 
 	var queriedEvents []nostr.Event
 	if len(exact) > 0 {
@@ -192,6 +205,9 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 		}
 		queriedEvents = append(queriedEvents, evts...)
 	}
+	// One nostrdb query over several filters returns at most effectiveLimit
+	// events, newest first; keep that cap across the separate gated queries,
+	// cutting after each so no more than twice the cap is ever held.
 	for _, gf := range gated {
 		evts, err := GatedQuery(db.Query, gf, effectiveLimit, authedPubkey)
 		if err != nil {
@@ -202,11 +218,6 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 			return
 		}
 		queriedEvents = append(queriedEvents, evts...)
-	}
-	if len(gated) > 0 {
-		// One nostrdb query over several filters returns at most
-		// effectiveLimit events, newest first; keep that cap across the
-		// separate gated queries too.
 		sort.SliceStable(queriedEvents, func(i, j int) bool {
 			return queriedEvents[i].CreatedAt > queriedEvents[j].CreatedAt
 		})
@@ -285,6 +296,25 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 	// 2. Client disconnects
 	// 3. New REQ with same subID (replaces this one)
 	// 4. Subscription limit reached (oldest removed)
+}
+
+// dedupeFilters drops repeated filters (same JSON), so a REQ cannot multiply
+// the work of one gated filter by listing it many times.
+func dedupeFilters(filters []nostr.Filter) []nostr.Filter {
+	if len(filters) < 2 {
+		return filters
+	}
+	seen := make(map[string]bool, len(filters))
+	out := filters[:0:0]
+	for _, f := range filters {
+		h := hashFilters([]nostr.Filter{f})
+		if h != "" && seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, f)
+	}
+	return out
 }
 
 // parseFilters strictly parses the filter objects of a REQ or COUNT. Filters

@@ -94,7 +94,11 @@ func HandleCount(client nostr.ClientInterface, message []interface{}) {
 	// Every filter, kinds or not, counts a gift wrap only for its p-tagged
 	// recipient: a broad filter (no kinds, an ids prefix, a #p) would
 	// otherwise count other people's gift wraps too.
-	count, approximate, err := CountPrivately(db.CountFiltered, filters, GetAuthedPubkey(client))
+	var openKinds []int
+	if scope == nil {
+		openKinds = RootOpenKinds()
+	}
+	count, approximate, err := CountPrivately(db.CountFiltered, filters, GetAuthedPubkey(client), openKinds)
 	release()
 	if err != nil {
 		log.Req().Error("COUNT query failed", "sub_id", subID, "error", err)

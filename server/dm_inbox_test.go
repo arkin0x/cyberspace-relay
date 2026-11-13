@@ -1,11 +1,13 @@
 package server
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/0ceanslim/grain/server/handlers"
 	nostr "github.com/0ceanslim/grain/server/types"
 )
 
@@ -142,6 +144,58 @@ func TestOnosendaiDMInbox(t *testing.T) {
 		}
 	})
 
+	t.Run("tag keys other than # and one letter are refused, not passed on", func(t *testing.T) {
+		// "##p" reached nostrdb as a second "#p", and nostrdb's JSON parser
+		// lost its place on "#aa" and swallowed the "#p" after it: both
+		// undid the #p narrowing and counted other people's gift wraps.
+		c := authed(eve)
+		for _, f := range []map[string]any{
+			{"kinds": []int{1059}, "##p": []string{bob.pub}},
+			{"kinds": []int{1059}, "#aa": []string{"zz"}},
+			{"##p": []string{bob.pub}},
+		} {
+			if got, closed := c.req("tagkey", f); len(got) != 0 || !strings.HasPrefix(closed, "invalid:") {
+				t.Fatalf("REQ %v: want invalid, got %d %q", f, len(got), closed)
+			}
+			if n, closed := c.count("tagkey", f); n != -1 || !strings.HasPrefix(closed, "invalid:") {
+				t.Fatalf("COUNT %v: want invalid, got %d %q", f, n, closed)
+			}
+		}
+	})
+
+	t.Run("an ids prefix scan does not reveal gift wraps by the slots they take", func(t *testing.T) {
+		// nostrdb fills a prefix query's limit in id order. Plant reactions
+		// under prefix "0" and a gift wrap that sorts before them: if the
+		// wrap took a slot, the limit would come back one short.
+		carol := newKey(t)
+		grind := func(ok func(id string) bool, sign func() nostr.Event) nostr.Event {
+			for {
+				if e := sign(); ok(e.ID) {
+					return e
+				}
+			}
+		}
+		hidden := grind(func(id string) bool { return strings.HasPrefix(id, "00") }, func() nostr.Event { return wrap(carol, now-60) })
+		var planted []nostr.Event
+		for i := 0; i < 3; i++ {
+			at := now - 200 - int64(i)
+			planted = append(planted, grind(func(id string) bool { return id[0] == '0' && id[1] != '0' },
+				func() nostr.Event { return newKey(t).signAt(t, at, 7, "+", []string{"p", carol.pub}) }))
+		}
+		r.storeRoot(t, append([]nostr.Event{hidden}, planted...)...)
+		c := mustDial(t, r.wsRoot)
+		got, closed := c.req("prefix", map[string]any{"ids": []string{"0"}, "#p": []string{carol.pub}, "limit": 3})
+		if closed != "" || !same(got, ids(planted...)) {
+			t.Fatalf("REQ ids 0 #p carol limit 3: want the 3 reactions, got %v %q", got, closed)
+		}
+		if n, _ := c.count("prefix", map[string]any{"ids": []string{"0"}, "#p": []string{carol.pub}}); n != 3 {
+			t.Fatalf("COUNT ids 0 #p carol: want 3, got %d", n)
+		}
+		if n, _ := c.count("prefix", map[string]any{"authors": []string{hidden.PubKey[:2]}, "#p": []string{carol.pub}}); n != 0 {
+			t.Fatalf("COUNT by the wrap's author prefix: want 0, got %d", n)
+		}
+	})
+
 	t.Run("a stranger AUTHed as someone else sees and counts none", func(t *testing.T) {
 		c := authed(eve)
 		for _, f := range []map[string]any{
@@ -230,6 +284,17 @@ func TestOnosendaiDMInbox(t *testing.T) {
 		}
 		if ok, msg := c.publish(wrap(alice, now)); ok {
 			t.Fatalf("a speakeasy stored a gift wrap: %s", msg)
+		}
+		// A speakeasy takes any kind, so its kindless filters are gated one
+		// query each; a REQ may carry only so many.
+		var filters []any
+		for i := 0; i <= handlers.MaxGatedFilters; i++ {
+			filters = append(filters, map[string]any{"authors": []string{fmt.Sprintf("%02x", i)}})
+		}
+		c.send(append([]any{"REQ", "many"}, filters...)...)
+		m := c.until("CLOSED many", func(m []any) bool { return len(m) >= 3 && m[1] == "many" && m[0] != "EVENT" })
+		if reason, _ := m[2].(string); m[0] != "CLOSED" || !strings.HasPrefix(reason, "invalid:") {
+			t.Fatalf("a REQ of %d kindless filters on a speakeasy: want CLOSED invalid, got %v", len(filters), m)
 		}
 	})
 }

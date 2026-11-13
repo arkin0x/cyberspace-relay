@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"sort"
+	"strconv"
+
 	"github.com/0ceanslim/grain/config"
 	"github.com/0ceanslim/grain/server/db/nostrdb"
 	nostr "github.com/0ceanslim/grain/server/types"
@@ -90,27 +93,60 @@ func splitKinds(kinds []int) (open, protected []int) {
 	return open, protected
 }
 
-// PrivateFilters rewrites a REQ's filters so the database itself never hands
-// back a protected event the caller may not see, which keeps the number of
-// events delivered from revealing how many were withheld.
-//
-//   - A filter with explicit kinds is answered exactly: its open kinds as
-//     they are, and its protected kinds only with #p narrowed to the caller
-//     (dropped when the caller is unauthenticated or its #p leaves them out).
-//     Each part keeps the filter's limit, so a filter that mixes a protected
-//     kind with open kinds may return up to that limit per part.
-//   - A filter with no kinds can match a protected event and the database
-//     cannot exclude a kind, so it is returned in gated, to be run through
-//     GatedQuery.
-func PrivateFilters(filters []nostr.Filter, authedPubkey string) (exact, gated []nostr.Filter) {
-	for _, f := range filters {
-		if len(f.Kinds) == 0 {
-			gated = append(gated, f)
+// RootOpenKinds returns the kinds a kindless filter can stand for on the
+// root relay: the kind whitelist minus the protected kinds. It is nil when the
+// whitelist is off (any kind may be stored, so no list covers them all); the
+// filters are then gated instead (GatedQuery, CountPrivately's subtraction).
+// A speakeasy takes any kind (ruling D6), so its callers pass nil.
+func RootOpenKinds() []int {
+	wl := config.GetWhitelistConfig()
+	if wl == nil || !wl.KindWhitelist.Enabled {
+		return nil
+	}
+	open := []int{}
+	seen := map[int]bool{}
+	for _, s := range wl.KindWhitelist.Kinds {
+		k, err := strconv.Atoi(s)
+		if err != nil || seen[k] || config.IsDMProtectedKind(k) {
 			continue
 		}
-		open, protected := splitKinds(f.Kinds)
-		if len(protected) == 0 {
-			exact = append(exact, f)
+		seen[k] = true
+		open = append(open, k)
+	}
+	return open
+}
+
+// PrivateFilters rewrites a REQ's filters so the database itself never hands
+// back a protected event the caller may not see. Withheld events then never
+// take a slot under a filter's limit, so the number of events delivered (or
+// which ones, under an ids or authors prefix scan) reveals nothing about them.
+//
+//   - A filter with explicit kinds: its open kinds as they are, and its
+//     protected kinds only with #p narrowed to the caller (dropped when the
+//     caller is unauthenticated or its #p leaves them out).
+//   - A filter with no kinds, when openKinds is not nil (RootOpenKinds): the
+//     same, as if it had named openKinds and the protected kinds. Only kinds
+//     the relay accepts are stored, so it matches what it matched before.
+//   - A filter with no kinds and openKinds nil: the database cannot exclude
+//     a kind, so it is returned in gated, to be run through GatedQuery.
+//
+// Each part keeps the filter's limit, so a filter split in two may return up
+// to that limit per part.
+func PrivateFilters(filters []nostr.Filter, authedPubkey string, openKinds []int) (exact, gated []nostr.Filter) {
+	protectedKinds := config.DMProtectedKinds()
+	for _, f := range filters {
+		var open, protected []int
+		switch {
+		case len(f.Kinds) > 0:
+			open, protected = splitKinds(f.Kinds)
+			if len(protected) == 0 {
+				exact = append(exact, f)
+				continue
+			}
+		case openKinds != nil:
+			open, protected = openKinds, protectedKinds
+		default:
+			gated = append(gated, f)
 			continue
 		}
 		if len(open) > 0 {
@@ -125,21 +161,31 @@ func PrivateFilters(filters []nostr.Filter, authedPubkey string) (exact, gated [
 	return exact, gated
 }
 
-// gatedScanCap bounds how many events GatedQuery reads past withheld ones for
-// a single filter. Past it the shortfall could show that thousands of
-// protected events sit in the filter's range; reaching it takes a filter whose
-// matches are almost all gift wraps the caller may not see.
+// gatedScanCap bounds how many events GatedQuery reads for a single filter.
+// Past it a shortfall could show that thousands of protected events sit in
+// the filter's range; reaching it takes a filter whose matches are almost all
+// gift wraps the caller may not see.
 var gatedScanCap = 10000
 
 // gatedMinPage is the smallest page GatedQuery asks for, so a small limit
 // does not turn into many one-event queries when it has to page.
 var gatedMinPage = 50
 
-// GatedQuery runs one kindless filter and returns up to its limit (or
-// effectiveLimit) of the events the caller may see, newest first. When
-// protected events it may not see fill part of a page, it pages on past them
-// (by created_at, with nostrdb.PageCursor) so the caller still gets a full
-// limit and cannot count the withheld ones by the shortfall.
+// MaxGatedFilters caps the kindless filters one REQ may run through
+// GatedQuery: each is its own query (or several), unlike the filters nostrdb
+// answers in one call.
+const MaxGatedFilters = 32
+
+// GatedQuery runs one kindless filter where the kinds cannot be listed
+// (PrivateFilters' gated) and returns up to its limit (or effectiveLimit) of
+// the events the caller may see, newest first.
+//
+// nostrdb fills a limit newest first from its created_at-ordered indexes, so
+// when withheld gift wraps fill part of a page it pages on past them (by
+// created_at, with nostrdb.PageCursor) and the caller still gets a full limit.
+// An ids or authors prefix is scanned in id order instead, where withheld
+// events take slots anywhere in the page; that filter is read in one query of
+// up to gatedScanCap events, gated, then sorted and cut to the limit.
 func GatedQuery(query func([]nostr.Filter, int) ([]nostr.Event, error), f nostr.Filter, effectiveLimit int, authedPubkey string) ([]nostr.Event, error) {
 	want := effectiveLimit
 	if f.Limit != nil && *f.Limit < want {
@@ -148,6 +194,28 @@ func GatedQuery(query func([]nostr.Filter, int) ([]nostr.Event, error), f nostr.
 	if want <= 0 {
 		return nil, nil
 	}
+
+	if f.HasPrefixMatch() {
+		page := f
+		lim := gatedScanCap
+		page.Limit = &lim
+		events, err := query([]nostr.Filter{page}, gatedScanCap)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]nostr.Event, 0, want)
+		for _, evt := range events {
+			if CanServeProtectedEvent(evt, authedPubkey) {
+				out = append(out, evt)
+			}
+		}
+		sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+		if len(out) > want {
+			out = out[:want]
+		}
+		return out, nil
+	}
+
 	pageSize := want
 	if pageSize < gatedMinPage {
 		pageSize = gatedMinPage
@@ -188,60 +256,79 @@ func GatedQuery(query func([]nostr.Filter, int) ([]nostr.Event, error), f nostr.
 
 // CountPrivately counts filters so a protected event is counted only for the
 // caller it may be served to: the caller's own p-tagged gift wraps, never
-// anyone else's. count is the database's per-filter count (CountFiltered).
+// anyone else's. count is the database's per-filter count (CountFiltered);
+// openKinds is RootOpenKinds (nil when the kinds cannot be listed).
 //
-//   - Explicit kinds: the open kinds are counted as they are, the protected
-//     kinds only narrowed to the caller's p tag (see ownPTagFilter).
-//   - No kinds: the database cannot exclude a kind, so the filter is counted
-//     whole, minus its protected-kind matches, plus the caller's own.
+//   - Explicit kinds, or no kinds with openKinds: the open kinds are counted
+//     as they are, the protected kinds only narrowed to the caller's p tag
+//     (see ownPTagFilter). The parts never overlap.
+//   - No kinds, openKinds nil: the database cannot exclude a kind, so the
+//     filter is counted whole, minus its protected-kind matches, plus the
+//     caller's own. A whole count at nostrdb.CountHardCap is reported as the
+//     cap, approximate, with nothing subtracted: the cap minus the protected
+//     count would be the protected count.
 //
-// The parts of one filter never overlap, so a single filter stays exact
-// unless a part is approximate; several filters are approximate already.
-func CountPrivately(count func([]nostr.Filter) (int, bool, error), filters []nostr.Filter, authedPubkey string) (int, bool, error) {
+// A single filter stays exact unless a part is approximate; several filters
+// are approximate already.
+func CountPrivately(count func([]nostr.Filter) (int, bool, error), filters []nostr.Filter, authedPubkey string, openKinds []int) (int, bool, error) {
 	total := 0
 	approximate := len(filters) > 1
-	add := func(f nostr.Filter, sign int) error {
+	one := func(f nostr.Filter) (int, error) {
 		n, approx, err := count([]nostr.Filter{f})
-		if err != nil {
-			return err
-		}
-		total += sign * n
 		approximate = approximate || approx
-		return nil
+		return n, err
 	}
 	protectedKinds := config.DMProtectedKinds()
 	for _, f := range filters {
 		var open, protected []int
-		if len(f.Kinds) == 0 {
-			if err := add(f, 1); err != nil {
+		switch {
+		case len(f.Kinds) > 0:
+			open, protected = splitKinds(f.Kinds)
+		case openKinds != nil:
+			open, protected = openKinds, protectedKinds
+		default:
+			whole, err := one(f)
+			if err != nil {
 				return 0, false, err
+			}
+			if whole >= nostrdb.CountHardCap {
+				total += whole
+				approximate = true
+				continue
 			}
 			p := f
 			p.Kinds = protectedKinds
-			if err := add(p, -1); err != nil {
+			theirs, err := one(p)
+			if err != nil {
 				return 0, false, err
 			}
-			protected = protectedKinds
-		} else {
-			open, protected = splitKinds(f.Kinds)
-			if len(open) > 0 {
-				o := f
-				o.Kinds = open
-				if err := add(o, 1); err != nil {
-					return 0, false, err
-				}
+			if d := whole - theirs; d > 0 {
+				total += d
 			}
+			protected = protectedKinds
+		}
+		if len(open) > 0 {
+			o := f
+			o.Kinds = open
+			n, err := one(o)
+			if err != nil {
+				return 0, false, err
+			}
+			total += n
 		}
 		if len(protected) > 0 {
 			if own, ok := ownPTagFilter(f, protected, authedPubkey); ok {
-				if err := add(own, 1); err != nil {
+				n, err := one(own)
+				if err != nil {
 					return 0, false, err
 				}
+				total += n
 			}
 		}
 	}
-	if total < 0 {
-		total = 0
+	if total > nostrdb.CountHardCap {
+		total = nostrdb.CountHardCap
+		approximate = true
 	}
 	return total, approximate, nil
 }
