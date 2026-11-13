@@ -117,20 +117,25 @@ backup_relay:
           #   - a peer relay you've paired with for federation
           # Each entry must start with ws:// or wss://.
 
+# ONOSENDAI, 2026-11-13: set up to delete ONLY gift wraps (1059, NIP-17 DMs)
+# older than 90 days, and OFF until the owner rules on it (it deletes his
+# messages). To turn it on, set enabled: true and nothing else. Never set
+# purge_by_kind_enabled: false while enabled: then every kind of an enabled
+# category is purged, and "regular" holds the movement chains (3333).
+# config/deploy_onosendai_test.go checks that only 1059 can be purged.
 event_purge:
   enabled: false # Toggle to enable/disable event purging
   disable_at_startup: true # Disable purging at startup
-  keep_interval_hours: 24 # Number of hours to keep events before purging
+  keep_interval_hours: 2160 # ONOSENDAI: was 24. 90 days
   purge_interval_minutes: 240 # Interval in minutes for running the purge
   purge_by_category: # Configure purging based on categories
-    regular: true
+    regular: true # ONOSENDAI: 1059 is regular; with purge_by_kind_enabled only kinds_to_purge are walked
     replaceable: false
     addressable: false
-    deprecated: true
-  purge_by_kind_enabled: false # Enable purging by specific kinds, if false, all collections will be purged
+    deprecated: false # ONOSENDAI: was true
+  purge_by_kind_enabled: true # ONOSENDAI: was false. Only kinds_to_purge are purged; NEVER false while enabled (see above)
   kinds_to_purge: # List of event kinds to explicitly purge (kind 2 is deprecated and never stored, so don't list it)
-    - 1
-    - 1000
+    - 1059 # ONOSENDAI: was 1 and 1000. Gift wraps (NIP-17 DMs), nothing else
   keep_kinds: [] # Kinds that are NEVER purged, overriding the category filter and kinds_to_purge (e.g. [0, 3, 10002] to always retain profiles + relay lists)
   exclude_whitelisted: true # Exclude events from whitelisted pubkeys during purging
 
@@ -195,6 +200,13 @@ rate_limit:
     # characters of words, all of which may be ones json.Marshal escapes to six bytes.
     - kind: 33338 # TV upgrade announcement
       max_size: 8192 # 8KB - 900 characters escaped is 5,400 B, four short tags and the envelope under 1 KB
+    # NIP-17 DMs (owner, 2026-11-13): a gift wrap holds a seal holding the
+    # message, each layer NIP-44 encrypted (padded up to 1/8 more) and base64
+    # encoded (4/3 the size, and no characters json.Marshal escapes): at most
+    # about 2.25 times the message. A message or a file message (the file
+    # lives elsewhere) is a few KB even with many tags.
+    - kind: 1059 # Gift wrap (NIP-59)
+      max_size: 65536 # 64KB - a message of about 25 KB still fits
 
   # Rate limits for different event categories
   category_limits:

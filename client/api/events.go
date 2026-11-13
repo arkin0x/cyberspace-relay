@@ -10,6 +10,7 @@ import (
 	"github.com/0ceanslim/grain/client/connection"
 	"github.com/0ceanslim/grain/client/core"
 	"github.com/0ceanslim/grain/client/session"
+	"github.com/0ceanslim/grain/config"
 	nostr "github.com/0ceanslim/grain/server/types"
 	"github.com/0ceanslim/grain/server/utils/log"
 )
@@ -355,6 +356,13 @@ func QueryEventsHandler(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case event := <-sub.Events:
+			// NIP-17 DM privacy (#73): this endpoint has no NIP-42 AUTH of its
+			// own, but the shared pool's sockets may have AUTHed as a signed-in
+			// user, so a relay could hand it that user's gift wraps. Never
+			// pass one on to an anonymous HTTP caller.
+			if event == nil || config.IsDMProtectedKind(event.Kind) {
+				continue
+			}
 			// Only add if we haven't seen this event ID before
 			if _, exists := eventMap[event.ID]; !exists {
 				eventMap[event.ID] = event

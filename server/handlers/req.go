@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/0ceanslim/grain/config"
@@ -172,9 +173,16 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 		}
 	}
 
+	// NIP-17 DM privacy (#73): the database must not hand back gift wraps the
+	// caller may not see, or the shortfall against a filter's limit would
+	// count them. Filters with kinds are narrowed so it never does; a filter
+	// without kinds pages past the withheld ones (GatedQuery).
+	authedPubkey := GetAuthedPubkey(client)
+	exact, gated := PrivateFilters(nonSearch, authedPubkey)
+
 	var queriedEvents []nostr.Event
-	if len(nonSearch) > 0 {
-		evts, err := db.Query(nonSearch, effectiveLimit)
+	if len(exact) > 0 {
+		evts, err := db.Query(exact, effectiveLimit)
 		if err != nil {
 			log.Req().Error("Error querying events",
 				"sub_id", subID,
@@ -183,6 +191,28 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 			return
 		}
 		queriedEvents = append(queriedEvents, evts...)
+	}
+	for _, gf := range gated {
+		evts, err := GatedQuery(db.Query, gf, effectiveLimit, authedPubkey)
+		if err != nil {
+			log.Req().Error("Error querying events",
+				"sub_id", subID,
+				"error", err)
+			response.SendClosed(client, subID, "error: could not query events")
+			return
+		}
+		queriedEvents = append(queriedEvents, evts...)
+	}
+	if len(gated) > 0 {
+		// One nostrdb query over several filters returns at most
+		// effectiveLimit events, newest first; keep that cap across the
+		// separate gated queries too.
+		sort.SliceStable(queriedEvents, func(i, j int) bool {
+			return queriedEvents[i].CreatedAt > queriedEvents[j].CreatedAt
+		})
+		if len(queriedEvents) > effectiveLimit {
+			queriedEvents = queriedEvents[:effectiveLimit]
+		}
 	}
 	for _, sf := range searchFilters {
 		evts, err := pagedTextSearch(db, sf, effectiveLimit)
@@ -208,7 +238,6 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 	// alongside the background sweeper — guarantees expired events are
 	// never served even if a sweep hasn't yet reached them.
 	nowUnix := time.Now().Unix()
-	authedPubkey := GetAuthedPubkey(client)
 	delivered := 0
 	skippedExpired := 0
 	skippedProtected := 0

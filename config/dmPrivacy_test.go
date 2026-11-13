@@ -12,3 +12,10 @@ func TestIsDMProtectedKind(t *testing.T) {
 		}
 	}
 }
+
+func TestDMProtectedKinds(t *testing.T) {
+	got := DMProtectedKinds()
+	if len(got) != 1 || got[0] != 1059 {
+		t.Errorf("DMProtectedKinds() = %v, want [1059]", got)
+	}
+}

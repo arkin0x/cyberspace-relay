@@ -3,8 +3,9 @@
 # "not allowed: event kind is not whitelisted". To accept a new kind, add it
 # here and to the table in deploy/onosendai/README.md. grain reloads this file
 # when it is written in place (README.md, "Changing the config on the droplet").
-# Refused on purpose: 1 (never, see the ruling below), 4, 1059, 9735, 30023
-# (DMs go to inbox relays). glyphbyte's link-less notes are kind 1, so they
+# Refused on purpose: 1 (never, see the ruling below), 4 (legacy NIP-04 DMs),
+# 9735, 30023. 1059 (NIP-17 DMs) is accepted since 2026-11-13, see the ruling
+# at its line below. glyphbyte's link-less notes are kind 1, so they
 # are refused here too; its cairns (1738) are accepted. 3351 (a Seeds seed)
 # is refused: it is an item inside a bag, never published on its own (DECK-0008
 # §8.2), like the other bag items (3330, 3340, 3341, 1063).
@@ -54,6 +55,14 @@ kind_whitelist:
     - "1111"   # comments (NIP-22) on hops, objects, bags
     - "10002"  # relay lists (NIP-65)
     - "10050"  # DM inbox relay lists (NIP-17): agents copy their operator's
+    # DMs (owner, 2026-11-13: "let's make relay.onosendai accept dms and ill
+    # use that"): this relay is a NIP-17 DM inbox for the owner and his agents.
+    # NIP-17 DMs travel as gift wraps, so only 1059 is accepted; the sealed
+    # 13 and the 14/15 rumors inside it are never published bare and stay
+    # refused, and so do legacy NIP-04 DMs (4). Reading a gift wrap needs
+    # NIP-42 AUTH as the pubkey it p-tags: anyone else can neither read nor
+    # count it (server/handlers/dmPrivacy.go). Size cap in config.yml.
+    - "1059"   # gift wraps (NIP-59), the envelope of every NIP-17 DM
     - "10063"  # Blossom server lists
     - "10000"  # mute lists (NIP-51): BLOCK and MUTE THIS ITEM
 

@@ -79,7 +79,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// 2026-11-05: ONOSENDAI, cyberspace-mcp, NTH; cyberspace-cli, snocrash and
 	// HOSAKA publish nothing here; glyphbyte added 2026-11-08; ONOSENDAI sealed
 	// entries, 33335, added 2026-11-09; Seeds DNA and tends, 3350 and 3352,
-	// added 2026-11-10; TV upgrade announcements, 33338, added 2026-11-12).
+	// added 2026-11-10; TV upgrade announcements, 33338, added 2026-11-12;
+	// gift wraps, 1059, added 2026-11-13 for NIP-17 DMs).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -104,6 +105,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		3350:  "Seeds DNA",
 		3352:  "Seeds tend",
 		33338: "TV upgrade announcements",
+		1059:  "gift wraps (NIP-17 DMs)",
 	}
 	for k, what := range published {
 		if !kinds[k] {
@@ -114,12 +116,20 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 
 func TestOnosendaiWhitelistRefusesWhatTheOwnerRefused(t *testing.T) {
 	kinds := onosendaiKinds(t)
-	// arkinox: notes, legacy DMs, gift wraps, zap receipts and long-form are
-	// refused on purpose; DMs go to inbox relays. RULED 2026-11-05: "we never
-	// want to accept bare kind 1s".
-	for _, k := range []int{1, 4, 1059, 9735, 30023} {
+	// arkinox: notes, legacy DMs, zap receipts and long-form are refused on
+	// purpose. RULED 2026-11-05: "we never want to accept bare kind 1s".
+	// Gift wraps (1059) are accepted since 2026-11-13 for NIP-17 DMs, but
+	// legacy NIP-04 DMs (4) stay refused.
+	for _, k := range []int{1, 4, 9735, 30023} {
 		if kinds[k] {
 			t.Errorf("whitelist.yml accepts kind %d, which the owner refused", k)
+		}
+	}
+	// A NIP-17 seal (13) and its rumors (14, 15) ride inside a gift wrap and
+	// are never published bare.
+	for _, k := range []int{13, 14, 15} {
+		if kinds[k] {
+			t.Errorf("whitelist.yml accepts kind %d bare; it only rides inside a 1059 gift wrap", k)
 		}
 	}
 	// The inner chat line rides inside a 23330 and is never published bare.
@@ -417,5 +427,55 @@ func TestOnosendaiWsLimitAboveReqAndEvent(t *testing.T) {
 	}
 	if need := 2*rl.ReqBurst + rl.EventBurst; rl.WsBurst < need {
 		t.Errorf("ws_burst %d is under 2 x req_burst + event_burst = %d", rl.WsBurst, need)
+	}
+}
+
+// NIP-17 DMs (owner, 2026-11-13): a gift wrap is capped well under
+// max_event_size, and the purge, staged for gift wraps, can never reach
+// another kind if it is switched on.
+func TestOnosendaiDMInboxConfig(t *testing.T) {
+	cfg := onosendaiConfig(t)
+	capped := false
+	for _, l := range cfg.RateLimit.KindSizeLimits {
+		if l.Kind == 1059 {
+			capped = true
+			if l.MaxSize < 16384 || l.MaxSize > 65536 {
+				t.Errorf("kind 1059 is capped at %d B; want 16 KB to 64 KB", l.MaxSize)
+			}
+		}
+	}
+	if !capped {
+		t.Error("kind 1059 has no kind_size_limits entry")
+	}
+
+	p := cfg.EventPurge
+	if !p.PurgeByKindEnabled {
+		t.Error("event_purge.purge_by_kind_enabled must stay true: without it the purge reaches every kind of an enabled category, movement chains (3333) included")
+	}
+	if len(p.KindsToPurge) != 1 || p.KindsToPurge[0] != 1059 {
+		t.Errorf("event_purge.kinds_to_purge = %v; only gift wraps (1059) may be purged", p.KindsToPurge)
+	}
+	if p.KeepIntervalHours < 90*24 {
+		t.Errorf("event_purge.keep_interval_hours = %d; gift wraps are kept at least 90 days", p.KeepIntervalHours)
+	}
+
+	var meta struct {
+		SupportedNIPs []int `json:"supported_nips"`
+	}
+	data, err := os.ReadFile(filepath.Join(onosendaiProfile, "relay_metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	has := map[int]bool{}
+	for _, n := range meta.SupportedNIPs {
+		has[n] = true
+	}
+	for _, n := range []int{17, 42, 59} {
+		if !has[n] {
+			t.Errorf("relay_metadata.json supported_nips lacks NIP-%d", n)
+		}
 	}
 }

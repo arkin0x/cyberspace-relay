@@ -20,15 +20,18 @@ region.)
 | 33338 | Cyberspace TV upgrade announcements (ONOSENDAI): one per version; TV plays only the announcer key's | anyone |
 | 1738, 35129 | glyphbyte: cairns (one URL, found by event-id prefix) and the glyphbyte napplet | anyone |
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
+| 1059 | gift wraps (NIP-59), the envelope of every NIP-17 DM; only the AUTHed recipient can read or count one | anyone |
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
 
-Refused on purpose: 1, 4, 1059, 9735 and 30023; DMs go to inbox relays.
+Refused on purpose: 1, 4 (legacy NIP-04 DMs), 9735 and 30023. NIP-17 DMs
+(1059) are accepted since 2026-11-13; see below.
 3351, a Seeds seed, is refused too: it is an item inside a bag (DECK-0008 §8.2).
 RULED (arkinox, 2026-11-05): "ALL cyberspace and onosendai events must be
 accepted by our relay. Add them. But, we never want to accept bare kind 1s."
 A kind a Cyberspace or ONOSENDAI client starts publishing is added to
 `whitelist.yml` and this table in the same change; kind 1 never is.
-Reads are open. NIP-70 protected events need NIP-42 AUTH from their author.
+Reads are open, except gift wraps (1059): see below. NIP-70 protected events
+need NIP-42 AUTH from their author.
 NIP-09 deletions by the author are honored. To accept a new kind, add it to
 `whitelist.yml` here and on the droplet's volume (see "Changing the config on
 the droplet"). `config/deploy_onosendai_test.go` checks that this table,
@@ -66,6 +69,39 @@ client bug from publishing a hidden place here. Each kind has a size cap in
 | 3350 DNA | 64 KB | A written DNA's text is at most 8,192 bytes (DECK-0008 §3.1). grain measures the event as Go's `json.Marshal` writes it, which turns `<`, `>` and `&` into six bytes each, and every rule line holds `->`; comments may hold any character, and most control characters also take six. So the content takes at most 49,152 bytes, and the rest leaves room for long relay hints. A mixed DNA's content is empty: its child's text, which may pass 8,192 bytes (§6.6), is computed by readers and never sent. A copy of it published as a written DNA is held to 8,192 bytes again. |
 | 3352 tend | 8 KB | A sealed payload of fixed length (about 400 bytes of base64, §8.3), the bag's address, a block and a placeholder: under 2 KB. |
 | 33338 TV upgrade announcement | 8 KB | At most 900 characters of words in six pages (the segment shows no more; the announce script refuses more, and sends the whitespace-normalized text it counted, pages joined by one blank line), up to 5,400 bytes if every one is escaped; `d`, `t`, `published_at` and `alt` are short. |
+
+1059 was added on 2026-11-13 (owner: "let's make relay.onosendai accept dms
+and ill use that"), so the owner and his agents can list this relay in their
+NIP-17 DM inbox (kind 10050). NIP-17 DMs travel as gift wraps (1059), signed
+by a throwaway key and p-tagging the recipient; the seal (13) and the rumors
+(14, 15) ride inside and are never published bare, so they stay refused, and
+so do legacy NIP-04 DMs (4). Anyone may send a DM here; reading one is
+private:
+
+- A REQ or COUNT that names kind 1059 without NIP-42 AUTH is refused
+  (`auth-required:`).
+- After AUTH, a REQ or COUNT sees only the gift wraps that p-tag the AUTHed
+  pubkey; a `#p` naming anyone else matches none of theirs.
+- A filter without kinds (ids, authors, `#p`, a time range) never returns or
+  counts someone else's gift wrap, and pages past the ones it withholds, so
+  the number of events it returns does not count them either.
+- A live subscription is sent a new gift wrap only on the connection AUTHed
+  as its recipient.
+- grain's HTTP event endpoints (`/api/v1/events/...`) never return one.
+
+`server/handlers/dmPrivacy.go` holds these rules; there is no setting to turn
+them off. The speakeasy paths keep refusing gift wraps in practice: a
+speakeasy admits an event only from an author placed in its region, and a
+gift wrap's author is a throwaway key; the same read rules apply there too.
+Each gift wrap is capped at 64 KB (`kind_size_limits`): a NIP-17 message or
+file message (the file itself lives elsewhere) is a few KB even after two
+layers of NIP-44, so this leaves wide room for long messages and many tags.
+Retention: gift wraps are kept like every other event. `event_purge` in
+`config.yml` is set up to delete only kind 1059, older than 90 days, but stays
+off (`enabled: false`) until the owner rules on it, because it deletes his
+messages. Never turn `purge_by_kind_enabled` off while purging is on: the
+purge would then reach every regular kind, movement chains included.
+`config/deploy_onosendai_test.go` checks this.
 
 33338 was added on 2026-11-12 for Cyberspace TV's UPGRADE ANNOUNCEMENT (owner
 rulings 2026-11-12, ONOSENDAI `src/lib/tv/announceFeed.ts`). After a deploy
