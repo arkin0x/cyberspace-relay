@@ -1,0 +1,207 @@
+<!doctype html>
+<!--
+  speakeasy-card.html - the link preview for /speakeasy, at
+  www/static/og/speakeasy.png.
+
+  Owner, 2026-11-13: "design and deploy a beautiful opengraph card for the
+  /speakeasy page in the style of onosendai's og card. use language that i
+  would use ... clear and concise."
+
+  It follows ONOSENDAI's own card (ONOSENDAI tools/og-card.html, public/og.png):
+  the same ground, the wordmark's plum, blue and teal bands down the left
+  edge, the ONOSENDAI wordmark, the yellow mark top right, and ONOSENDAI's
+  typefaces. The picture on the right is the landing page's own hero: the
+  yellow region box, avatars inside it, and one bouncing off from outside.
+
+  Rendered at exactly 1200x630, which is what every platform crops to, from
+  the repository root:
+
+    PLAYWRIGHT_BROWSERS_PATH=/path/to/ms-playwright node -e "
+      const{chromium}=require('playwright');(async()=>{
+      const b=await chromium.launch({args:['--allow-file-access-from-files']});
+      const p=await b.newPage({viewport:{width:1200,height:630}});
+      await p.route('**/*',(r)=>r.request().url().startsWith('file://')?r.continue():r.abort());
+      await p.goto('file://'+process.cwd()+'/tools/og/speakeasy-card.html');
+      await p.evaluate(()=>document.fonts.ready);
+      await p.screenshot({path:'www/static/og/speakeasy.png'});await b.close();})()"
+
+  playwright is not a dependency of this relay: this is a one-off render, and
+  any headless Chromium pointed at this file at that size makes the same card.
+  Nothing is fetched from the network; the fonts and the wordmark sit beside
+  this file. Check the render rather than assuming: a silent fallback to a
+  system font changes every width here.
+
+  The URL of the card is versioned in landing.html (?v=1): previews are cached
+  by the image's address, so a new card needs a new number.
+
+  Type: Monaspace Argon Bold for the headline and Monaspace Krypton for the
+  rest, ONOSENDAI's own files (fonts/, SIL OFL 1.1, fonts/Monaspace-OFL.txt).
+  The wordmark is ONOSENDAI's public/logo.png.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: 'Monaspace Krypton';
+    src: url('./fonts/MonaspaceKrypton-Regular.woff') format('woff');
+    font-weight: 400;
+    font-display: block;
+  }
+  @font-face {
+    font-family: 'Monaspace Argon';
+    src: url('./fonts/MonaspaceArgon-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-display: block;
+  }
+  /* ONOSENDAI's tokens (its src/styles.css and og-card.html), and the
+     landing page's neon: the yellow region, cyan inside, magenta outside. */
+  :root {
+    --bg: #05070d;
+    --fg: #e8fbff;
+    --body: #b4d3e2;
+    --dim: #6f8ea0;
+    --accent: #00e5ff;
+    --border: #1d3547;
+    --plum: #78004E;
+    --blue: #0062CD;
+    --teal: #06A4A4;
+    --yellow: #ffe94a;
+    --cyan: #2fe6f0;
+    --magenta: #ff3d8b;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; }
+  body {
+    background: var(--bg);
+    font-family: 'Monaspace Krypton', ui-monospace, monospace;
+    position: relative; overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* A faint cyan grid behind the picture, fading out toward the type, and a
+     yellow glow where the region sits. */
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(47,230,240,0.075) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(47,230,240,0.075) 1px, transparent 1px);
+    background-size: 42px 42px;
+    -webkit-mask-image: radial-gradient(ellipse 46% 72% at 78% 52%, #000 25%, transparent 78%);
+  }
+  .glow {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 30% 42% at 77% 54%, rgba(255,233,74,0.13), transparent 70%),
+      radial-gradient(ellipse 34% 40% at 104% 100%, rgba(255,61,139,0.10), transparent 70%),
+      radial-gradient(ellipse 30% 40% at 0% 100%, rgba(47,230,240,0.07), transparent 70%);
+  }
+
+  /* The wordmark's bands, in the order they sit in the logo. */
+  .spine {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
+    background: linear-gradient(to bottom, var(--plum) 0%, var(--plum) 33%, var(--blue) 33%, var(--blue) 66%, var(--teal) 66%);
+  }
+
+  .plate {
+    position: absolute; left: 70px; top: 0; bottom: 0; width: 610px;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: 26px; z-index: 2;
+  }
+  /* The wordmark itself, not typeset: the offset bands are the identity. */
+  .mark { width: 330px; height: auto; display: block; filter: drop-shadow(0 0 18px rgba(0,229,255,0.25)); }
+
+  h1 { font-family: 'Monaspace Argon', ui-monospace, monospace; font-weight: 700; }
+  h1 .name {
+    display: block; font-size: 78px; line-height: 1.02; letter-spacing: -0.02em;
+    color: var(--yellow); text-shadow: 0 0 26px rgba(255,233,74,0.35);
+  }
+  h1 .what {
+    display: block; margin-top: 12px; font-size: 39px; line-height: 1.2; letter-spacing: -0.01em;
+    color: var(--fg);
+  }
+  .sub { font-size: 27px; line-height: 1.45; color: var(--body); max-width: 610px; }
+  .sub b { display: block; margin-top: 6px; color: var(--fg); font-weight: 400; }
+
+  .host {
+    font-size: 24px; letter-spacing: 0.02em; color: var(--accent);
+    padding-top: 14px; border-top: 1px solid var(--border); width: max-content;
+    text-shadow: 0 0 14px rgba(0,229,255,0.35);
+  }
+
+  /* ONOSENDAI's mark, top right, in its hyperjump yellow (the same vector
+     as its own card). */
+  .glyph {
+    position: absolute; top: 34px; right: 40px; width: 60px; height: 60px; z-index: 3;
+    filter: drop-shadow(0 0 10px rgba(255,255,0,0.45)) drop-shadow(0 0 22px rgba(255,255,0,0.18));
+  }
+
+  .art { position: absolute; left: 680px; top: 96px; width: 500px; height: 460px; z-index: 1; }
+  .art svg { width: 100%; height: 100%; display: block; overflow: visible; }
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="glow"></div>
+  <div class="spine"></div>
+  <svg class="glyph" viewBox="0 0 500 500" aria-hidden="true"><g transform="translate(0,500) scale(0.1,-0.1)" fill="#FFFF00">
+    <path d="M3262 3922 l107 -187 -972 -3 -972 -3 -211 -366 c-115 -202 -214 -368 -220 -370 -5 -2 -106 164 -223 369 l-215 371 28 51 c16 28 64 113 108 189 l80 137 1191 0 1192 -1 107 -187z m1046 51 c44 -76 92 -161 108 -189 l28 -51 -591 -1024 -592 -1024 -220 -3 c-122 -1 -221 0 -221 4 0 3 212 372 471 821 258 448 475 825 481 838 9 19 -16 67 -197 381 -114 197 -209 364 -212 371 -4 11 76 13 430 13 l435 0 80 -137z m-2499 -1639 l479 -829 431 -3 c237 -1 431 -4 431 -6 0 -3 -96 -170 -213 -373 l-213 -368 -224 0 -224 0 -588 1018 c-323 560 -588 1024 -588 1030 0 10 34 71 172 310 24 41 44 65 49 60 5 -5 225 -382 488 -839z"/>
+  </g></svg>
+
+  <!-- The landing page's hero, redrawn larger: the region box, three avatars
+       inside it, and one from outside bouncing off its side. -->
+  <div class="art">
+    <svg viewBox="0 0 380 350" fill="none" aria-hidden="true">
+      <defs>
+        <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+      </defs>
+      <!-- stars -->
+      <circle cx="22" cy="40" r="1.5" fill="#fff" opacity="0.8"/><circle cx="356" cy="22" r="1.3" fill="#fff" opacity="0.7"/>
+      <circle cx="10" cy="300" r="1.2" fill="#fff" opacity="0.6"/><circle cx="300" cy="336" r="1.3" fill="#fff" opacity="0.6"/>
+      <circle cx="74" cy="10" r="1.1" fill="#2fe6f0"/><circle cx="372" cy="150" r="1.1" fill="#ff3d8b"/>
+
+      <g transform="translate(0,14)">
+        <!-- the region: a yellow box -->
+        <polygon points="40,120 100,60 270,60 210,120" fill="#ffe94a" fill-opacity="0.08"/>
+        <polygon points="210,120 270,60 270,230 210,290" fill="#ffe94a" fill-opacity="0.05"/>
+        <rect x="40" y="120" width="170" height="170" fill="#ffe94a" fill-opacity="0.035"/>
+        <!-- where the outsider hits: the side face flares magenta -->
+        <polygon points="210,120 270,60 270,230 210,290" fill="#ff3d8b" fill-opacity="0.16"/>
+        <ellipse cx="248" cy="186" rx="16" ry="40" fill="#ff3d8b" fill-opacity="0.45" filter="url(#soft)"/>
+        <g stroke="#ffe94a" stroke-width="1.4" stroke-dasharray="4 5" opacity="0.45">
+          <path d="M100 60V230H270M100 230 40 290"/>
+        </g>
+        <g stroke="#ffe94a" stroke-width="2.6" stroke-linejoin="round" filter="url(#glow)">
+          <path d="M40 120H210V290H40Z M40 120 100 60H270L210 120 M270 60V230L210 290"/>
+        </g>
+
+        <!-- avatars inside get in -->
+        <g fill="#2fe6f0" filter="url(#glow)">
+          <circle cx="98" cy="232" r="8"/><circle cx="98" cy="232" r="15" stroke="#2fe6f0" stroke-opacity="0.45" stroke-width="1.6" fill="none"/>
+          <circle cx="150" cy="180" r="8"/><circle cx="150" cy="180" r="15" stroke="#2fe6f0" stroke-opacity="0.45" stroke-width="1.6" fill="none"/>
+          <circle cx="172" cy="252" r="8"/><circle cx="172" cy="252" r="15" stroke="#2fe6f0" stroke-opacity="0.45" stroke-width="1.6" fill="none"/>
+        </g>
+
+        <!-- an outsider bounces off: its path in, the hit, and its path away -->
+        <path d="M352 120 C 318 140, 290 160, 262 184" stroke="#ff3d8b" stroke-width="2" stroke-dasharray="3 6" stroke-linecap="round" opacity="0.55"/>
+        <path d="M262 184 C 296 200, 324 222, 346 252" stroke="#ff3d8b" stroke-width="2.2" stroke-dasharray="3 6" stroke-linecap="round" opacity="0.9"/>
+        <path d="M336 244l10 8 1-13" stroke="#ff3d8b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+        <g stroke="#ff3d8b" stroke-width="2.4" stroke-linecap="round" filter="url(#glow)">
+          <path d="M276 166l8-10M280 184h11M276 202l8 10"/>
+        </g>
+        <g filter="url(#glow)">
+          <circle cx="358" cy="276" r="8" fill="#ff3d8b"/><circle cx="358" cy="276" r="15" stroke="#ff3d8b" stroke-opacity="0.45" stroke-width="1.6"/>
+        </g>
+      </g>
+    </svg>
+  </div>
+
+  <div class="plate">
+    <img class="mark" src="./onosendai-wordmark.png" alt="ONOSENDAI">
+    <h1><span class="name">Speakeasies:</span><span class="what">private relays for places in cyberspace</span></h1>
+    <p class="sub">Claim a region. Only people inside it can read or write. <b>One payment in sats.</b></p>
+    <div class="host">relay.onosendai.tech/speakeasy</div>
+  </div>
+</body>
+</html>

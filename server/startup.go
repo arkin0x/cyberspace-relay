@@ -588,7 +588,15 @@ func initRoot(w http.ResponseWriter, r *http.Request) {
 		// no-cache so a rebuilt binary's updated assets are picked up on the next
 		// load without a manual hard-refresh: the bytes are embedded in the binary,
 		// so the same URL serves new content after every build.
-		w.Header().Set("Cache-Control", "no-cache")
+		//
+		// The link-preview cards under /static/og/ are the exception: their
+		// URLs are versioned (?v=N, bumped with each new card), and crawlers
+		// fetch them often, so they are cached for a day.
+		if strings.HasPrefix(r.URL.Path, "/static/og/") {
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		subFS, _ := fs.Sub(client.GetEmbeddedWWW(), "www")
 		fileServer := http.FileServer(http.FS(subFS))
 		http.StripPrefix("/", fileServer).ServeHTTP(w, r)

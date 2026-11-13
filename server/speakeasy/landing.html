@@ -5,9 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 {{$icon := or .Favicon "/static/icons/onosendai-logo.png"}}
 <title>Speakeasies{{if .RelayName}} · {{.RelayName}}{{end}}</title>
-<meta name="description" content="A private relay you can only use from inside its region of cyberspace. Location is the key.">
-<meta property="og:title" content="Speakeasies{{if .RelayName}} · {{.RelayName}}{{end}}">
-<meta property="og:description" content="A private relay you can only use from inside its region of cyberspace. Location is the key.">
+<meta name="description" content="{{.CardDescription}}">
+<!-- The link preview. Absolute URLs, made from the relay's own address; the
+     card is drawn from tools/og/speakeasy-card.html. -->
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{.PageURL}}">
+{{if .RelayName}}<meta property="og:site_name" content="{{.RelayName}}">
+{{end}}<meta property="og:title" content="{{.CardTitle}}">
+<meta property="og:description" content="{{.CardDescription}}">
+<meta property="og:image" content="{{.CardImage}}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{{.CardImageAlt}}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{.CardTitle}}">
+<meta name="twitter:description" content="{{.CardDescription}}">
+<meta name="twitter:image" content="{{.CardImage}}">
+<meta name="twitter:image:alt" content="{{.CardImageAlt}}">
 <link rel="icon" href="{{$icon}}">
 <!-- grain's theme: the saved palette (theme.js), its tokens and fonts. Every
      token below has a fallback, so the page reads the same without them. -->
@@ -455,7 +470,7 @@
               <input id="region-in" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="{{.Region}}"
                 placeholder="56db6d… or a /C/ link" aria-describedby="region-help region-err">
               <p class="err" id="region-err" aria-live="polite"></p>
-              <p class="help" id="region-help">A region hex, a /C/ link, or a full coordinate. <a href="https://www.onosendai.tech" target="_blank" rel="noopener">Pick a region visually in ONOSENDAI</a> (VIEW, then Region).</p>
+              <p class="help" id="region-help">A region hex, a /C/ link, or a full coordinate. <a href="{{.RegionPicker}}" target="_blank" rel="noopener">Pick a region in ONOSENDAI</a>.</p>
             </div>
             <div class="field size" id="size-box" hidden>
               <label for="size-in">That's a place. Choose a region around it.</label>

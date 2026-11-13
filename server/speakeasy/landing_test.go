@@ -156,3 +156,71 @@ func TestLandingPathIsReserved(t *testing.T) {
 		t.Fatalf("speakeasy is not reserved: %v", err)
 	}
 }
+
+// TestLandingCard: the page carries the link preview, with absolute URLs
+// made from the relay's address (https for wss, http for plain ws), the
+// owner's words, and the region picker's arrival link into ONOSENDAI.
+func TestLandingCard(t *testing.T) {
+	l := Landing{RelayName: "ONOSENDAI Official Relay", Host: "relay.onosendai.tech", PublicURL: "wss://relay.onosendai.tech", Payments: PaymentsOpen}
+	var buf bytes.Buffer
+	if err := RenderLanding(&buf, l); err != nil {
+		t.Fatal(err)
+	}
+	body := buf.String()
+	for _, want := range []string{
+		`<meta property="og:type" content="website">`,
+		`<meta property="og:url" content="https://relay.onosendai.tech/speakeasy">`,
+		`<meta property="og:site_name" content="ONOSENDAI Official Relay">`,
+		`<meta property="og:title" content="Speakeasies: private relays for places in cyberspace">`,
+		`<meta property="og:description" content="Claim a region of cyberspace and get a private relay. Only people standing inside your region can read or write. One payment in sats.">`,
+		`<meta property="og:image" content="https://relay.onosendai.tech/static/og/speakeasy.png?v=1">`,
+		`<meta property="og:image:type" content="image/png">`,
+		`<meta property="og:image:width" content="1200">`, `<meta property="og:image:height" content="630">`,
+		`<meta property="og:image:alt" content="The ONOSENDAI wordmark`,
+		`<meta name="twitter:card" content="summary_large_image">`,
+		`<meta name="twitter:title" content="Speakeasies: private relays for places in cyberspace">`,
+		`<meta name="twitter:description" content="Claim a region of cyberspace`,
+		`<meta name="twitter:image" content="https://relay.onosendai.tech/static/og/speakeasy.png?v=1">`,
+		`<a href="https://www.onosendai.tech/?mode=region" target="_blank" rel="noopener">Pick a region in ONOSENDAI</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("landing lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "VIEW, then Region") {
+		t.Error("the old region-picking directions are still on the page")
+	}
+
+	// A relay on plain ws (local development) gets http URLs; no relay name,
+	// no site name.
+	l = Landing{Host: "localhost:8181", PublicURL: "ws://localhost:8181", Payments: PaymentsOff}
+	buf.Reset()
+	if err := RenderLanding(&buf, l); err != nil {
+		t.Fatal(err)
+	}
+	body = buf.String()
+	if !strings.Contains(body, `content="http://localhost:8181/static/og/speakeasy.png?v=1"`) || !strings.Contains(body, `content="http://localhost:8181/speakeasy"`) {
+		t.Error("a plain ws relay's preview URLs are not http")
+	}
+	if strings.Contains(body, "og:site_name") {
+		t.Error("a site name without a relay name")
+	}
+}
+
+// TestCardImageIsTheCard: the file the preview names is in the static
+// assets, a 1200x630 PNG.
+func TestCardImageIsTheCard(t *testing.T) {
+	path := "../../www" + strings.SplitN(CardImagePath, "?", 2)[0]
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 24 || string(b[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatal("not a PNG")
+	}
+	w := uint32(b[16])<<24 | uint32(b[17])<<16 | uint32(b[18])<<8 | uint32(b[19])
+	h := uint32(b[20])<<24 | uint32(b[21])<<16 | uint32(b[22])<<8 | uint32(b[23])
+	if w != 1200 || h != 630 {
+		t.Errorf("card is %dx%d, want 1200x630", w, h)
+	}
+}

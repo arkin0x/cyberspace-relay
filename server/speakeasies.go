@@ -296,12 +296,14 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 			serveCheck(w, r, rt)
 			return
 		}
-		// The landing page, while speakeasies are open, for a browser (a
-		// websocket or NIP-11 request at /speakeasy is refused below, as at
-		// any path that is not a speakeasy). Matched before the name paths:
+		// The landing page, while speakeasies are open, for any plain GET
+		// or HEAD (a websocket or NIP-11 request at /speakeasy is refused
+		// below, as at any path that is not a speakeasy). Not only for a
+		// browser: link-preview crawlers often ask with Accept */* or none,
+		// and they must see the page's card. Matched before the name paths:
 		// "speakeasy" is a reserved name, so none can be there.
 		if p := r.URL.EscapedPath(); (p == LandingPath || p == LandingPath+"/") && rt != nil && rt.reg != nil &&
-			wantsPage(r) && r.Header.Get("Upgrade") == "" {
+			wantsLanding(r) {
 			if p != LandingPath {
 				w.Header().Add("Vary", "Accept")
 				to := LandingPath
