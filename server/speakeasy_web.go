@@ -92,6 +92,16 @@ func wantsPage(r *http.Request) bool {
 		strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
+// wantsLanding reports whether r asks for the landing page: a GET or HEAD
+// that is neither a websocket upgrade nor a NIP-11 request, whatever else
+// it accepts, so a link-preview crawler (Accept */*, or none) gets the page
+// and its card.
+func wantsLanding(r *http.Request) bool {
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		r.Header.Get("Upgrade") == "" &&
+		!strings.Contains(r.Header.Get("Accept"), "application/nostr+json")
+}
+
 // servePage serves the region dashboard for a path that is a region string
 // or a registered speakeasy path, and reports whether it did. Another
 // spelling of a region is sent to its canonical one.

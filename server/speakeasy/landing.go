@@ -24,9 +24,22 @@ var landingHTML string
 
 var landingTemplate = template.Must(template.New("landing").Funcs(templateFuncs).Parse(landingHTML))
 
-// ONOSENDAIHome is where a visitor picks a region by eye (VIEW, then the
-// Region button).
-const ONOSENDAIHome = "https://www.onosendai.tech"
+// ONOSENDAIRegionPicker is where a visitor picks a region by eye:
+// ONOSENDAI's ?mode=region arrival opens VIEW with region mode on.
+const ONOSENDAIRegionPicker = "https://www.onosendai.tech/?mode=region"
+
+// The link preview (owner, 2026-11-13, in his words). The card is drawn
+// from tools/og/speakeasy-card.html; its URL is versioned because previews
+// are cached by the image's address, so a new card needs a new number. It
+// is served by the root's static handler, which sits behind the region
+// gate's HTTP guard: on a relay that gates reads (gate_reads), /static/ is
+// refused and the card does not show. The onosendai profile does not gate.
+const (
+	CardTitle       = "Speakeasies: private relays for places in cyberspace"
+	CardDescription = "Claim a region of cyberspace and get a private relay. Only people standing inside your region can read or write. One payment in sats."
+	CardImagePath   = "/static/og/speakeasy.png?v=1"
+	CardImageAlt    = "The ONOSENDAI wordmark and the words Speakeasies: private relays for places in cyberspace, beside a glowing yellow box with three avatars inside it and one bouncing off its side."
+)
 
 // Payment states the landing page and the check endpoint report.
 const (
@@ -67,6 +80,26 @@ type Landing struct {
 func (l Landing) Price() string      { return groupThousands(l.Sats) }
 func (l Landing) NamedPrice() string { return groupThousands(l.Sats + l.NameSats) }
 func (l Landing) NamePrice() string  { return groupThousands(l.NameSats) }
+
+// Origin is the relay's web origin, for the absolute URLs a link preview
+// needs: https, or http when the relay's own URL is plain ws or http.
+func (l Landing) Origin() string {
+	scheme := "https"
+	if u := strings.ToLower(l.PublicURL); strings.HasPrefix(u, "ws://") || strings.HasPrefix(u, "http://") {
+		scheme = "http"
+	}
+	return scheme + "://" + l.Host
+}
+
+// RegionPicker is ONOSENDAIRegionPicker, for the template.
+func (l Landing) RegionPicker() string { return ONOSENDAIRegionPicker }
+
+// Card* are the link preview's constants, for the template.
+func (l Landing) CardTitle() string       { return CardTitle }
+func (l Landing) CardDescription() string { return CardDescription }
+func (l Landing) CardImageAlt() string    { return CardImageAlt }
+func (l Landing) CardImage() string       { return l.Origin() + CardImagePath }
+func (l Landing) PageURL() string         { return l.Origin() + "/speakeasy" } // server.LandingPath
 
 // ExampleRegion is the region the price card shows an address for.
 func (l Landing) ExampleRegion() string { return "56db6db6db6db6db6db6dbad" }

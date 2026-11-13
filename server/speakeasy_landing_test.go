@@ -83,10 +83,36 @@ func TestLandingPage(t *testing.T) {
 	if code, _, _ := nip11(t, r.root+LandingPath); code != http.StatusNotFound {
 		t.Errorf("NIP-11 at /speakeasy: %d", code)
 	}
-	// Not a browser, or not a GET: grain's usual handlers.
+	// A link-preview crawler (Accept */*, or none at all) gets the page too,
+	// with its card.
+	for _, accept := range []string{"*/*", ""} {
+		code, body, _ := get(t, http.MethodGet, r.root+LandingPath, "Accept", accept, "User-Agent", "facebookexternalhit/1.1")
+		if code != 200 || !strings.Contains(body, `<meta property="og:image" content="`) || !strings.Contains(body, speakeasy.CardImagePath) {
+			t.Errorf("crawler (Accept %q): %d, or no card", accept, code)
+		}
+	}
+	// Not a GET, not this path, a websocket upgrade or a NIP-11 request:
+	// grain's usual handlers, never the page, whatever else it accepts.
 	passed := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) })
+	for _, accept := range []string{"*/*", "", "application/nostr+json, */*"} {
+		for _, upgrade := range []string{"websocket", ""} {
+			if upgrade == "" && !strings.Contains(accept, "nostr") {
+				continue // a plain GET: the page, above
+			}
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, LandingPath, nil)
+			req.Header.Set("Accept", accept)
+			if upgrade != "" {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", upgrade)
+			}
+			speakeasyRoutes(passed).ServeHTTP(w, req)
+			if strings.Contains(w.Body.String(), "og:image") {
+				t.Errorf("Upgrade %q, Accept %q: served the landing page", upgrade, accept)
+			}
+		}
+	}
 	for _, c := range []struct{ method, path, accept string }{
-		{http.MethodGet, LandingPath, "*/*"},
 		{http.MethodPost, LandingPath, browser},
 		{http.MethodGet, "/speakeasyx", browser},
 		{http.MethodGet, "/speakeasy/x", browser},
