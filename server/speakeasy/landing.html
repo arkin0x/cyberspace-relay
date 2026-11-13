@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+{{$icon := or .Favicon "/static/icons/onosendai-logo.png"}}
+<title>Speakeasies{{if .RelayName}} · {{.RelayName}}{{end}}</title>
+<meta name="description" content="A private relay you can only use from inside its region of cyberspace. Location is the key.">
+<meta property="og:title" content="Speakeasies{{if .RelayName}} · {{.RelayName}}{{end}}">
+<meta property="og:description" content="A private relay you can only use from inside its region of cyberspace. Location is the key.">
+<link rel="icon" href="{{$icon}}">
+<!-- grain's theme: the saved palette (theme.js), its tokens and fonts. Every
+     token below has a fallback, so the page reads the same without them. -->
+<script src="/static/js/theme.js"></script>
+<link rel="stylesheet" href="/style/tailwind.min.css">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: var(--color-surface-base, #07080d);
+    --panel: var(--color-surface, #0d0f17);
+    --panel-2: var(--color-surface-elevated, #141726);
+    --line: var(--color-border, #232740);
+    --line-2: var(--color-border-strong, #343a5c);
+    --text: var(--color-text, #eef0fb);
+    --dim: var(--color-text-secondary, #a2a8c6);
+    --mute: var(--color-text-muted, #646a8a);
+    --inset: var(--color-surface-inset-strong, rgb(0 0 0 / 0.35));
+    --ok: var(--color-success, #4ade80);
+    --warn: var(--color-warning, #f5b544);
+    --bad: var(--color-danger, #ff5f6d);
+    /* ONOSENDAI's neon: the yellow region box, avatars inside (cyan),
+       outsiders (magenta). */
+    --yellow: #ffe94a;
+    --yellow-ink: #ffe94a;
+    --cyan: #2fe6f0;
+    --magenta: #ff3d8b;
+    --display: var(--font-display, "Space Grotesk", system-ui, sans-serif);
+    --sans: var(--font-sans, "Space Grotesk", system-ui, sans-serif);
+    --mono: var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+    --radius: 14px;
+  }
+  html[data-color-scheme="light"] { color-scheme: light; --yellow: #e2b900; --yellow-ink: #7a5d00; --cyan: #0a8fa0; --magenta: #c2185b; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--yellow-ink); text-underline-offset: 3px; }
+  code, .mono { font-family: var(--mono); }
+  :focus-visible { outline: 2px solid var(--yellow); outline-offset: 3px; border-radius: 4px; }
+  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 16px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ── top bar ── */
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 600; min-width: 0; }
+  .brand img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
+  .brand span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.95rem; }
+  .top nav { display: flex; gap: 18px; align-items: center; flex: none; }
+  .top nav a { color: var(--dim); text-decoration: none; font-size: 0.92rem; }
+  .top nav a:hover { color: var(--text); }
+  .top nav .hide-sm { display: none; }
+
+  /* ── hero: always the dark of cyberspace, whatever the theme ── */
+  .hero {
+    position: relative; overflow: hidden; border-radius: 22px; color: #eef0fb;
+    border: 1px solid rgb(255 255 255 / 0.07);
+    background:
+      radial-gradient(ellipse 60% 70% at 78% 42%, rgb(255 233 74 / 0.11), transparent 70%),
+      radial-gradient(ellipse 50% 60% at 8% 100%, rgb(47 230 240 / 0.12), transparent 70%),
+      radial-gradient(ellipse 40% 50% at 100% 100%, rgb(255 61 139 / 0.10), transparent 70%),
+      linear-gradient(180deg, #05060c, #0a0c17);
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: linear-gradient(rgb(47 230 240 / 0.07) 1px, transparent 1px), linear-gradient(90deg, rgb(47 230 240 / 0.07) 1px, transparent 1px);
+    background-size: 34px 34px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 60% 50%, #000 20%, transparent 75%);
+    mask-image: radial-gradient(ellipse 80% 70% at 60% 50%, #000 20%, transparent 75%);
+  }
+  .hero-in { position: relative; display: grid; gap: 8px; padding: 30px 20px 18px; }
+  .wordmark { display: block; width: min(300px, 80%); height: auto; margin: 0 0 22px; filter: drop-shadow(0 0 22px rgb(47 230 240 / 0.18)); }
+  .eyebrow { font: 600 0.74rem var(--mono); letter-spacing: 0.2em; text-transform: uppercase; color: #2fe6f0; margin: 0; }
+  .hero h1 {
+    font-family: var(--display); font-weight: 700; font-size: clamp(2.7rem, 11vw, 4.8rem); line-height: 0.95;
+    letter-spacing: -0.025em; margin: 10px 0 16px; color: #ffe94a;
+    text-shadow: 0 0 10px rgb(255 233 74 / 0.55), 0 0 44px rgb(255 233 74 / 0.28);
+    animation: neon 2.4s ease-out 1 both;
+  }
+  @keyframes neon { 0% { opacity: 0.15; } 8% { opacity: 1; } 12% { opacity: 0.3; } 18% { opacity: 1; } 22% { opacity: 0.55; } 30%, 100% { opacity: 1; } }
+  .lede { font-size: clamp(1.12rem, 4vw, 1.4rem); line-height: 1.4; color: #dfe2f4; margin: 0; max-width: 28ch; }
+  .key { margin: 14px 0 0; font: 600 0.82rem var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: #2fe6f0; }
+  .key::before { content: ""; display: inline-block; width: 22px; height: 2px; background: #2fe6f0; vertical-align: middle; margin-right: 10px; box-shadow: 0 0 8px #2fe6f0; }
+  .cta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+  .hero-art svg { display: block; width: 100%; max-width: 420px; height: auto; margin: 0 auto; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px;
+    padding: 0.7rem 1.15rem; border-radius: 10px; border: 1px solid transparent;
+    font: 700 1rem var(--sans); text-decoration: none; cursor: pointer; transition: filter 0.15s, transform 0.15s;
+  }
+  .btn.primary { background: var(--yellow); color: #141200; box-shadow: 0 0 0 1px rgb(255 233 74 / 0.35), 0 10px 32px -10px rgb(255 233 74 / 0.7); }
+  .btn.primary:hover { filter: brightness(1.07); transform: translateY(-1px); }
+  .btn.ghost { color: inherit; border-color: var(--line-2); background: transparent; }
+  .hero .btn.ghost { border-color: rgb(255 255 255 / 0.2); background: rgb(255 255 255 / 0.03); }
+  .btn.ghost:hover { border-color: var(--yellow); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; transform: none; filter: none; }
+  .quiet {
+    flex: none; min-height: 36px; padding: 0.35rem 0.75rem; border-radius: 8px; cursor: pointer;
+    background: transparent; color: var(--dim); border: 1px solid var(--line-2); font: 600 0.85rem var(--sans);
+  }
+  .quiet:hover { color: var(--text); border-color: var(--yellow); }
+
+  /* hero animation */
+  .edges { animation: pulse 4.5s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.72; } }
+  .av { animation: float 5s ease-in-out infinite; }
+  .av.d2 { animation-delay: -1.7s; } .av.d3 { animation-delay: -3.3s; }
+  @keyframes float { 50% { transform: translateY(-7px); } }
+  .outsider { animation: bounce 3.8s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+  @keyframes bounce { 0% { transform: translateX(0); } 40% { transform: translateX(-40px); } 48% { transform: translateX(-10px); } 56% { transform: translateX(4px); } 64%, 100% { transform: translateX(0); } }
+  .hit { opacity: 0; animation: hit 3.8s linear infinite; }
+  @keyframes hit { 0%, 38% { opacity: 0; } 41% { opacity: 1; } 54%, 100% { opacity: 0; } }
+  .twinkle { animation: twinkle 3s ease-in-out infinite; }
+  .twinkle.d2 { animation-delay: -1s; } .twinkle.d3 { animation-delay: -2s; }
+  @keyframes twinkle { 50% { opacity: 0.2; } }
+
+  /* ── sections ── */
+  .block { padding-top: 72px; }
+  .kicker { font: 600 0.74rem var(--mono); letter-spacing: 0.2em; text-transform: uppercase; color: var(--yellow-ink); margin: 0 0 8px; }
+  h2 { font-family: var(--display); font-size: clamp(1.7rem, 6vw, 2.4rem); line-height: 1.1; letter-spacing: -0.015em; margin: 0 0 10px; }
+  .intro { color: var(--dim); margin: 0; max-width: 40rem; font-size: 1.05rem; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+
+  .steps { list-style: none; padding: 0; margin: 26px 0 0; display: grid; gap: 14px; }
+  .step { padding: 18px; position: relative; }
+  .step { display: grid; grid-template-columns: 92px 1fr; column-gap: 14px; align-items: start; }
+  .step svg { grid-row: span 3; display: block; width: 92px; height: 68px; margin: 0; }
+  .step .n { font: 600 0.75rem var(--mono); color: var(--yellow-ink); letter-spacing: 0.12em; }
+  .step h3 { margin: 4px 0 6px; font-size: 1.12rem; line-height: 1.3; }
+  .step p { margin: 0; color: var(--dim); font-size: 0.97rem; }
+
+  .prices { display: grid; gap: 14px; margin-top: 26px; }
+  .price-card { padding: 22px; display: flex; flex-direction: column; gap: 10px; }
+  .price-card.named { border-color: rgb(255 233 74 / 0.45); box-shadow: 0 0 46px -22px rgb(255 233 74 / 0.7); }
+  .price-card h3 { margin: 0; font-size: 1rem; color: var(--dim); font-weight: 600; }
+  .amount { font: 700 2.5rem/1 var(--display); letter-spacing: -0.02em; }
+  .amount small { font-size: 1rem; font-weight: 600; color: var(--dim); letter-spacing: 0; }
+  .example { font: 0.86rem var(--mono); background: var(--inset); border-radius: 8px; padding: 0.55rem 0.7rem; overflow-wrap: anywhere; color: var(--text); }
+  .example b { color: var(--yellow-ink); font-weight: 600; }
+  .price-card p { margin: 0; color: var(--dim); font-size: 0.95rem; }
+  .fine { margin: 18px 0 0; color: var(--dim); max-width: 44rem; }
+  .fine strong { color: var(--text); }
+
+  /* ── the tool ── */
+  .tool { position: relative; margin-top: 26px; padding: 20px 16px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); }
+  .tool::before {
+    content: ""; position: absolute; inset: -1px; pointer-events: none; border-radius: 6px;
+    --c: var(--yellow);
+    background:
+      linear-gradient(var(--c), var(--c)) top left / 26px 2px no-repeat, linear-gradient(var(--c), var(--c)) top left / 2px 26px no-repeat,
+      linear-gradient(var(--c), var(--c)) top right / 26px 2px no-repeat, linear-gradient(var(--c), var(--c)) top right / 2px 26px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom left / 26px 2px no-repeat, linear-gradient(var(--c), var(--c)) bottom left / 2px 26px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom right / 26px 2px no-repeat, linear-gradient(var(--c), var(--c)) bottom right / 2px 26px no-repeat;
+    filter: drop-shadow(0 0 4px rgb(255 233 74 / 0.6));
+  }
+  .tool-grid { display: grid; gap: 22px; }
+  .field { margin: 0 0 18px; }
+  .field:last-child { margin-bottom: 0; }
+  label, .label { display: block; font-weight: 600; margin: 0 0 7px; }
+  .opt { font-weight: 400; color: var(--mute); font-size: 0.9rem; }
+  input[type=text] {
+    width: 100%; min-height: 50px; padding: 0.75rem 0.9rem; border-radius: 10px;
+    background: var(--inset); color: var(--text); border: 1px solid var(--line-2);
+    font: 500 1rem var(--mono); transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input[type=text]::placeholder { color: var(--mute); }
+  input[type=text]:focus { outline: none; border-color: var(--yellow); box-shadow: 0 0 0 3px rgb(255 233 74 / 0.18); }
+  .help { margin: 7px 0 0; color: var(--dim); font-size: 0.9rem; }
+  .err { margin: 7px 0 0; color: var(--bad); font-size: 0.92rem; min-height: 0; }
+  .err:empty { display: none; }
+  .good { color: var(--ok); }
+  .name-row { display: flex; align-items: center; border: 1px solid var(--line-2); border-radius: 10px; background: var(--inset); transition: border-color 0.15s, box-shadow 0.15s; }
+  .name-row:focus-within { border-color: var(--yellow); box-shadow: 0 0 0 3px rgb(255 233 74 / 0.18); }
+  .name-prefix { padding-left: 0.9rem; color: var(--mute); font: 0.8rem var(--mono); white-space: nowrap; }
+  .name-row input[type=text] { border: 0; background: transparent; padding-left: 1px; box-shadow: none; min-width: 0; }
+  .size { padding: 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); }
+  .size input[type=range] { width: 100%; accent-color: var(--yellow); margin: 6px 0 2px; height: 28px; }
+  .scale { display: flex; justify-content: space-between; font: 0.75rem var(--mono); color: var(--mute); text-transform: uppercase; letter-spacing: 0.1em; }
+  .size output { display: block; margin-top: 8px; font-size: 0.95rem; }
+  .size output b { color: var(--yellow-ink); }
+
+  .rc { border: 1px dashed rgb(255 233 74 / 0.55); border-radius: 8px; padding: 16px; background: linear-gradient(180deg, rgb(255 233 74 / 0.05), transparent 60%); }
+  .rc-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; padding: 0.28rem 0.6rem; border-radius: 999px; font: 600 0.74rem var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+  .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+  .chip.ok { color: var(--ok); background: color-mix(in oklab, var(--ok) 14%, transparent); }
+  .chip.taken { color: var(--yellow-ink); background: rgb(255 233 74 / 0.13); }
+  .chip.wait { color: var(--dim); background: var(--inset); }
+  .rc dl { display: grid; grid-template-columns: 4.6rem 1fr; gap: 6px 12px; margin: 0; font-size: 0.95rem; }
+  .rc dt { color: var(--mute); }
+  .rc dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .rc dd code { font-size: 0.86rem; background: none; padding: 0; }
+  .rc-empty { display: flex; gap: 14px; align-items: center; color: var(--mute); font-size: 0.95rem; }
+  .rc-empty svg { flex: none; width: 64px; height: 64px; }
+  .taken-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .taken-box p { margin: 0 0 8px; }
+  .addr { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; }
+  .addr code { flex: 1; min-width: 0; background: var(--inset); padding: 0.5rem 0.65rem; border-radius: 8px; font-size: 0.84rem; overflow-wrap: anywhere; }
+  .addr-label { display: block; font-size: 0.8rem; color: var(--mute); margin: 0 0 4px; }
+
+  .buy { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); display: grid; gap: 12px; }
+  .total { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .total .amount { font-size: 2.1rem; }
+  .total > span:first-child { color: var(--dim); }
+  .buy .btn { width: 100%; }
+  .note { margin: 0 0 18px; padding: 12px 14px; border-radius: 10px; border: 1px solid color-mix(in oklab, var(--warn) 55%, transparent); background: color-mix(in oklab, var(--warn) 10%, transparent); }
+  .note strong { color: var(--warn); }
+
+  .inv { display: grid; gap: 22px; }
+  .qr { background: #fff; padding: 10px; border-radius: 12px; width: min(280px, 100%); margin: 0 auto; box-shadow: 0 0 0 1px rgb(255 233 74 / 0.6), 0 0 48px -12px rgb(255 233 74 / 0.6); }
+  .qr:empty { display: none; }
+  .qr svg { display: block; width: 100%; height: auto; }
+  .inv h3, .done h3 { margin: 0 0 6px; font-family: var(--display); font-size: 1.45rem; }
+  .inv-sum { margin: 0 0 14px; color: var(--dim); overflow-wrap: anywhere; }
+  .inv-sum b { color: var(--text); }
+  #bolt11 { max-height: 4.8rem; overflow: auto; word-break: break-all; }
+  .status { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; font-weight: 600; }
+  .status::before { content: ""; flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--yellow); box-shadow: 0 0 10px var(--yellow); animation: blink 1.4s ease-in-out infinite; }
+  .status.stop::before { animation: none; background: var(--mute); box-shadow: none; }
+  @keyframes blink { 50% { opacity: 0.25; } }
+  .meta { margin: 12px 0 0; font-size: 0.78rem; color: var(--mute); overflow-wrap: anywhere; }
+  .done-head { display: flex; gap: 14px; align-items: center; margin-bottom: 10px; }
+  .done-head svg { flex: none; width: 52px; height: 52px; }
+  .tick { stroke-dasharray: 40; stroke-dashoffset: 40; animation: draw 0.7s 0.2s ease-out forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .done h4 { margin: 22px 0 8px; font-size: 1rem; }
+  .done ol { margin: 0; padding-left: 1.3rem; color: var(--dim); list-style: decimal; }
+  .done li { margin: 6px 0; }
+  .done li b { color: var(--text); }
+  .done .cta { margin-top: 14px; }
+
+  .live { list-style: none; padding: 0; margin: 26px 0 0; display: grid; gap: 14px; }
+  .live-item { padding: 18px; display: flex; flex-direction: column; gap: 8px; }
+  .live-name { font: 700 1.2rem var(--display); overflow-wrap: anywhere; }
+  .live-name.hex { font: 600 0.95rem var(--mono); }
+  .live-meta { color: var(--mute); font-size: 0.86rem; }
+  .live-item .addr { margin: 4px 0 0; }
+  .live-item a { font-size: 0.9rem; }
+  .empty { margin: 22px 0 0; padding: 22px; color: var(--dim); text-align: center; border: 1px dashed var(--line-2); border-radius: var(--radius); }
+
+  .faq { margin-top: 18px; max-width: 46rem; }
+  .faq details { border-bottom: 1px solid var(--line); }
+  .faq summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 16px; padding: 16px 0; font-weight: 600; font-size: 1.05rem; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary::after { content: "+"; color: var(--yellow-ink); font: 600 1.2rem var(--mono); line-height: 1.2; }
+  .faq details[open] summary::after { content: "\2212"; }
+  .faq details p { margin: 0 0 16px; color: var(--dim); }
+
+  footer { margin-top: 80px; padding: 26px 0 44px; border-top: 1px solid var(--line); color: var(--mute); font-size: 0.9rem; display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: space-between; }
+  footer a { color: var(--dim); }
+  footer nav { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+
+  @media (min-width: 640px) {
+    .wrap { padding: 0 28px; }
+    .top nav .hide-sm { display: inline; }
+    .steps { grid-template-columns: 1fr 1fr; }
+    .step { display: block; }
+    .step svg { width: 100%; height: 104px; margin: 0 0 14px; }
+    .prices { grid-template-columns: 1fr 1fr; }
+    .live { grid-template-columns: 1fr 1fr; }
+    .tool { padding: 28px; }
+    .buy { grid-template-columns: 1fr auto; align-items: center; }
+    .buy .btn { width: auto; }
+    .name-prefix { font-size: 0.92rem; }
+  }
+  @media (min-width: 900px) {
+    .hero-in { grid-template-columns: 1.05fr 0.95fr; align-items: center; padding: 56px 52px 48px; }
+    .steps { grid-template-columns: repeat(4, 1fr); }
+    .live { grid-template-columns: repeat(3, 1fr); }
+    .tool-grid { grid-template-columns: 1.05fr 0.95fr; gap: 32px; }
+    .buy { grid-template-columns: 1fr; }
+    .buy .btn { width: 100%; }
+    .inv { grid-template-columns: 280px 1fr; align-items: start; }
+    .qr { margin: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="/"><img src="{{$icon}}" alt="" width="28" height="28"><span>{{if .RelayName}}{{.RelayName}}{{else}}Relay{{end}}</span></a>
+    <nav aria-label="Page">
+      <a class="hide-sm" href="#how">How it works</a>
+      <a class="hide-sm" href="#live">Open now</a>
+      <a href="#create">Create</a>
+    </nav>
+  </header>
+
+  <section class="hero" aria-labelledby="title">
+    <div class="hero-in">
+      <div>
+        {{if .Logo}}<img class="wordmark" src="{{.Logo}}" alt="{{if .RelayName}}{{.RelayName}}{{else}}Relay logo{{end}}">{{end}}
+        <p class="eyebrow">{{.Host}}</p>
+        <h1 id="title">Speakeasies</h1>
+        <p class="lede">A private relay you can only use from inside its region of cyberspace.</p>
+        <p class="key">Location is the key.</p>
+        <div class="cta">
+          <a class="btn primary" href="#create">Create a speakeasy</a>
+          <a class="btn ghost" href="#how">How it works</a>
+        </div>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <svg viewBox="0 0 360 320" fill="none">
+          <defs>
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            <radialGradient id="halo" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#ffe94a" stop-opacity="0.22"/><stop offset="1" stop-color="#ffe94a" stop-opacity="0"/></radialGradient>
+          </defs>
+          <circle class="twinkle" cx="28" cy="40" r="1.4" fill="#fff"/><circle class="twinkle d2" cx="330" cy="30" r="1.2" fill="#fff"/>
+          <circle class="twinkle d3" cx="20" cy="250" r="1.1" fill="#fff"/><circle class="twinkle" cx="320" cy="290" r="1.3" fill="#fff"/>
+          <circle class="twinkle d2" cx="60" cy="12" r="1" fill="#2fe6f0"/><circle class="twinkle d3" cx="350" cy="120" r="1" fill="#ff3d8b"/>
+          <ellipse cx="178" cy="176" rx="170" ry="130" fill="url(#halo)"/>
+          <!-- the region: a yellow box -->
+          <polygon points="70,120 126,64 286,64 230,120" fill="#ffe94a" fill-opacity="0.07"/>
+          <polygon points="230,120 286,64 286,224 230,280" fill="#ffe94a" fill-opacity="0.045"/>
+          <rect x="70" y="120" width="160" height="160" fill="#ffe94a" fill-opacity="0.03"/>
+          <polygon class="hit" points="230,120 286,64 286,224 230,280" fill="#ff3d8b" fill-opacity="0.22"/>
+          <g stroke="#ffe94a" stroke-width="1.4" stroke-dasharray="4 5" opacity="0.45">
+            <path d="M126 64V224H286M126 224 70 280"/>
+          </g>
+          <g class="edges" stroke="#ffe94a" stroke-width="2.2" stroke-linejoin="round" filter="url(#glow)">
+            <path d="M70 120H230V280H70Z M70 120 126 64H286L230 120 M286 64V224L230 280"/>
+          </g>
+          <!-- avatars inside get in -->
+          <g fill="#2fe6f0" filter="url(#glow)">
+            <g class="av"><circle cx="128" cy="214" r="7"/><circle cx="128" cy="214" r="13" stroke="#2fe6f0" stroke-opacity="0.45" fill="none"/></g>
+            <g class="av d2"><circle cx="178" cy="176" r="7"/><circle cx="178" cy="176" r="13" stroke="#2fe6f0" stroke-opacity="0.45" fill="none"/></g>
+            <g class="av d3"><circle cx="196" cy="240" r="7"/><circle cx="196" cy="240" r="13" stroke="#2fe6f0" stroke-opacity="0.45" fill="none"/></g>
+          </g>
+          <!-- an outsider bounces off -->
+          <g class="outsider" filter="url(#glow)">
+            <circle cx="334" cy="196" r="7" fill="#ff3d8b"/><circle cx="334" cy="196" r="13" stroke="#ff3d8b" stroke-opacity="0.45"/>
+          </g>
+          <g class="hit" stroke="#ff3d8b" stroke-width="2" stroke-linecap="round" filter="url(#glow)">
+            <path d="M291 184l-6-8M293 196h-9M291 208l-6 8"/>
+          </g>
+          <text x="70" y="306" fill="#2fe6f0" font-family="JetBrains Mono, ui-monospace, monospace" font-size="10.5" letter-spacing="1.6">INSIDE: SIGNED IN</text>
+          <text x="334" y="236" fill="#ff3d8b" font-family="JetBrains Mono, ui-monospace, monospace" font-size="10.5" letter-spacing="1.6" text-anchor="middle">OUTSIDE</text>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="how" aria-labelledby="how-h">
+    <p class="kicker">How it works</p>
+    <h2 id="how-h">A room that only opens where you stand</h2>
+    <p class="intro">Your avatar's movement chain says where it is. The speakeasy checks it every time you sign in.</p>
+    <ol class="steps">
+      <li class="step card">
+        <svg viewBox="0 0 160 104" aria-hidden="true" fill="none">
+          <path d="M14 70h92l40 22H54Z" stroke="var(--cyan)" stroke-opacity="0.75" stroke-width="1.4" fill="var(--cyan)" fill-opacity="0.06"/>
+          <path d="M14 30h92l40 22H54Z" stroke="var(--magenta)" stroke-opacity="0.75" stroke-width="1.4" fill="var(--magenta)" fill-opacity="0.06"/>
+          <g stroke="var(--yellow)" stroke-width="2" stroke-linejoin="round"><path d="M62 38h32v48H62Z M62 38l14-14h32L94 38 M108 24v48L94 86"/></g>
+          <path d="M62 38V86" stroke="var(--yellow)" stroke-width="2"/>
+          <text x="10" y="102" fill="var(--cyan)" font-family="ui-monospace, monospace" font-size="8" letter-spacing="1">DATASPACE</text>
+          <text x="10" y="22" fill="var(--magenta)" font-family="ui-monospace, monospace" font-size="8" letter-spacing="1">IDEASPACE</text>
+        </svg>
+        <span class="n">01</span>
+        <h3>Pick a region</h3>
+        <p>A cube in cyberspace. It covers the same place in dataspace and ideaspace.</p>
+      </li>
+      <li class="step card">
+        <svg viewBox="0 0 160 104" aria-hidden="true" fill="none">
+          <circle cx="80" cy="52" r="40" stroke="var(--cyan)" stroke-opacity="0.6" stroke-width="1.4" stroke-dasharray="3 5"/>
+          <circle cx="80" cy="52" r="28" fill="var(--yellow)" fill-opacity="0.08" stroke="var(--yellow)" stroke-opacity="0.5"/>
+          <path d="M86 26 68 56h12l-6 22 20-32H82Z" fill="var(--yellow)" stroke="var(--yellow)" stroke-width="1.5" stroke-linejoin="round"/>
+          <text x="124" y="30" fill="var(--yellow-ink)" font-family="ui-monospace, monospace" font-size="9" letter-spacing="1">SATS</text>
+        </svg>
+        <span class="n">02</span>
+        <h3>Pay once</h3>
+        <p>In sats, over Lightning. One payment and the room stays open.</p>
+      </li>
+      <li class="step card">
+        <svg viewBox="0 0 160 104" aria-hidden="true" fill="none">
+          <g stroke="var(--yellow)" stroke-width="2" stroke-linejoin="round"><path d="M30 34h50v50H30Z M30 34l16-16h50L80 34 M96 18v50L80 84"/></g>
+          <circle cx="54" cy="60" r="6" fill="var(--cyan)"/>
+          <path d="M45 42l5 5 9-10" stroke="var(--cyan)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="134" cy="56" r="6" fill="var(--magenta)"/>
+          <path d="M100 44c8-8 18-8 26 0" stroke="var(--magenta)" stroke-width="1.6" stroke-dasharray="3 3" stroke-linecap="round"/>
+          <path d="M119 43l7 1-1-7" stroke="var(--magenta)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M120 70l8 8M128 70l-8 8" stroke="var(--magenta)" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span class="n">03</span>
+        <h3>Stand inside to sign in</h3>
+        <p>Only avatars whose movement chain stands inside can sign in (NIP-42 AUTH), read, or write.</p>
+      </li>
+      <li class="step card">
+        <svg viewBox="0 0 160 104" aria-hidden="true" fill="none">
+          <rect x="14" y="30" width="52" height="52" rx="4" stroke="var(--mute)" stroke-width="1.6" fill="var(--mute)" fill-opacity="0.06"/>
+          <path d="M80 18v74" stroke="var(--dim)" stroke-width="1.6" stroke-dasharray="4 4"/>
+          <rect x="94" y="30" width="52" height="52" rx="2" stroke="var(--yellow)" stroke-width="2" fill="var(--yellow)" fill-opacity="0.08"/>
+          <circle cx="112" cy="58" r="4" fill="var(--cyan)"/><circle cx="128" cy="50" r="4" fill="var(--cyan)"/><circle cx="126" cy="66" r="4" fill="var(--cyan)"/>
+          <circle cx="32" cy="52" r="3" fill="var(--mute)"/><circle cx="48" cy="62" r="3" fill="var(--mute)"/>
+          <text x="14" y="98" fill="var(--mute)" font-family="ui-monospace, monospace" font-size="8" letter-spacing="1">MAIN</text>
+          <text x="94" y="98" fill="var(--yellow-ink)" font-family="ui-monospace, monospace" font-size="8" letter-spacing="1">SPEAKEASY</text>
+        </svg>
+        <span class="n">04</span>
+        <h3>A room of its own</h3>
+        <p>It keeps its own events, apart from the main relay. Nothing crosses either way.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="block" id="prices" aria-labelledby="prices-h">
+    <p class="kicker">Prices</p>
+    <h2 id="prices-h">One payment. Open for good.</h2>
+    <div class="prices">
+      <div class="price-card card">
+        <h3>A region</h3>
+        <div class="amount">{{.Price}} <small>sats</small></div>
+        <div class="example">wss://{{.Host}}/C/<b>{{.ExampleRegion}}</b></div>
+        <p>The address is the region itself.</p>
+      </div>
+      <div class="price-card card named">
+        <h3>A region with a name</h3>
+        <div class="amount">{{.NamedPrice}} <small>sats</small></div>
+        <div class="example">wss://{{.Host}}/<b>midwest</b></div>
+        <p>A name comes only at creation, in the same invoice. It stays with its region for life.</p>
+      </div>
+    </div>
+    <p class="fine"><strong>You get the room, not the keys to moderate it.</strong> The relay owner looks after abuse, so every speakeasy stays a good place to be.</p>
+  </section>
+
+  <section class="block" id="create" aria-labelledby="create-h">
+    <p class="kicker">Create</p>
+    <h2 id="create-h">Make your speakeasy</h2>
+    <p class="intro">Paste a region, check it's free, pay the invoice. It opens the moment the payment lands.</p>
+
+    <div class="tool" id="tool" data-endpoint="{{.Endpoint}}" data-check="{{.CheckEndpoint}}" data-relay="{{.PublicURL}}"
+      data-payments="{{.Payments}}" data-price="{{.Price}}" data-named-price="{{.NamedPrice}}" data-onosendai="https://www.onosendai.tech/C/">
+      <div class="note" id="pay-note" role="status"{{if eq .Payments "open"}} hidden{{end}}>{{if eq .Payments "paused"}}<strong>Payments are paused.</strong> The relay's wallet isn't answering right now, so it won't sell an invoice it can't check. Try again in a few minutes.{{else if eq .Payments "off"}}<strong>Not open yet.</strong> Creating speakeasies isn't open on this relay right now. You can still check a region.{{end}}</div>
+
+      <form id="tool-form" novalidate>
+        <div class="tool-grid">
+          <div>
+            <div class="field">
+              <label for="region-in">Region</label>
+              <input id="region-in" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="{{.Region}}"
+                placeholder="56db6d… or a /C/ link" aria-describedby="region-help region-err">
+              <p class="err" id="region-err" role="alert"></p>
+              <p class="help" id="region-help">A region hex, a /C/ link, or a full coordinate. <a href="https://www.onosendai.tech" target="_blank" rel="noopener">Pick a region visually in ONOSENDAI</a> (VIEW, then Region).</p>
+            </div>
+            <div class="field size" id="size-box" hidden>
+              <label for="size-in">That's a place. Choose a region around it.</label>
+              <input id="size-in" type="range" min="1" max="21" step="1" value="12" aria-describedby="size-out">
+              <div class="scale" aria-hidden="true"><span>Smaller</span><span>Bigger</span></div>
+              <output id="size-out" for="size-in"></output>
+              <p class="help">A region covers both planes, whichever plane this place is in.</p>
+            </div>
+            <div class="field">
+              <label for="name-in">Name <span class="opt">optional, {{.NamePrice}} sats more</span></label>
+              <div class="name-row"><span class="name-prefix" aria-hidden="true">{{.Host}}/</span><input id="name-in" type="text" maxlength="40"
+                autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="your-name" aria-describedby="name-out"></div>
+              <p class="help" id="name-out" aria-live="polite">3 to 40 lowercase letters, digits and dashes. Only now: a name can't be added later.</p>
+            </div>
+          </div>
+
+          <div>
+            <div class="rc" id="rc" aria-live="polite">
+              <div class="rc-empty" id="rc-empty">
+                <svg viewBox="0 0 64 64" fill="none" aria-hidden="true"><g stroke="var(--yellow)" stroke-width="1.8" stroke-linejoin="round" opacity="0.8"><path d="M8 22h30v30H8Z M8 22l12-12h30L38 22 M50 10v30L38 52"/></g><path d="M20 10v30h30M20 40 8 52" stroke="var(--yellow)" stroke-opacity="0.35" stroke-dasharray="2 3"/></svg>
+                <span>Your region shows here: its size, its planes, and whether it's free.</span>
+              </div>
+              <div id="rc-body" hidden>
+                <div class="rc-head"><span class="chip wait" id="rc-status">Checking</span><a id="rc-map" href="#" target="_blank" rel="noopener">Open in ONOSENDAI</a></div>
+                <dl>
+                  <dt>Region</dt><dd><code id="rc-hex"></code></dd>
+                  <dt>Size</dt><dd id="rc-size"></dd>
+                  <dt>Planes</dt><dd id="rc-planes"></dd>
+                </dl>
+                <div class="taken-box" id="rc-taken" hidden>
+                  <p>This region is already a speakeasy. Anyone inside can join it now.</p>
+                  <div id="rc-addrs"></div>
+                  <a id="rc-page" href="#">Open its page</a>
+                </div>
+                <p class="help" id="rc-inside" hidden></p>
+              </div>
+            </div>
+            <div class="buy">
+              <div class="total"><span>Total</span><span class="amount"><span id="price">{{.Price}}</span> <small>sats</small></span></div>
+              <button class="btn primary" id="create-btn" type="submit" disabled>Create speakeasy for {{.Price}} sats</button>
+            </div>
+            <p class="err" id="create-err" role="alert"></p>
+          </div>
+        </div>
+      </form>
+
+      <div id="invoice" hidden>
+        <div class="inv">
+          <div class="qr" id="qr"></div>
+          <div>
+            <h3>Pay this invoice</h3>
+            <p class="inv-sum" id="inv-sum"></p>
+            <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
+            <a class="btn primary" id="open-wallet" href="#">Open in wallet</a>
+            <p class="status" id="pay-status" role="status">Waiting for payment</p>
+            <p class="help" id="inv-expiry"></p>
+            <p class="err" id="inv-err" role="alert"></p>
+            <p class="meta">Order <span id="order-id"></span><br>Payment hash <span id="payment-hash"></span></p>
+          </div>
+        </div>
+      </div>
+
+      <div class="done" id="done" hidden>
+        <div class="done-head">
+          <svg viewBox="0 0 52 52" fill="none" aria-hidden="true"><circle cx="26" cy="26" r="24" stroke="var(--ok)" stroke-width="2" fill="var(--ok)" fill-opacity="0.1"/><path class="tick" d="M15 27l7 7 15-16" stroke="var(--ok)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <div><h3 id="done-title">Your speakeasy is open</h3><span class="help" id="done-sub"></span></div>
+        </div>
+        <p class="err" id="done-note"></p>
+        <div id="done-addrs"></div>
+        <div class="cta">
+          <a class="btn primary" id="done-map" href="#" target="_blank" rel="noopener">Open the region in ONOSENDAI</a>
+          <a class="btn ghost" id="done-page" href="#">Its page</a>
+        </div>
+        <h4>How to join</h4>
+        <ol>
+          <li><b>Stand inside the region</b> in ONOSENDAI: spawn there, or travel in.</li>
+          <li>When your avatar is inside, the speakeasy line shows. Tap <b>ADD RELAY</b>.</li>
+          <li>Any nostr client works too: add the address, then sign in when it asks (AUTH).</li>
+          <li>Share the address with people in the region.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="live" aria-labelledby="live-h">
+    <p class="kicker">Open now</p>
+    <h2 id="live-h">Speakeasies on this relay</h2>
+    {{if .Live}}
+    <ul class="live">
+      {{range .Live}}<li class="live-item card">
+        {{if .Name}}<div class="live-name">{{.Name}}</div>{{else}}<div class="live-name hex">{{.Region}}</div>{{end}}
+        <div class="live-meta">{{pow .Size}} · since {{.Since}}</div>
+        <div class="addr"><code>{{.URL}}</code><button type="button" class="quiet" data-copy-text="{{.URL}}">Copy</button></div>
+        <a href="{{.Page}}">Its page</a>
+      </li>
+      {{end}}
+    </ul>
+    {{if .LiveMore}}<p class="help">And {{.LiveMore}} more.</p>{{end}}
+    {{else}}
+    <p class="empty">None open yet. Yours could be the first.</p>
+    {{end}}
+  </section>
+
+  <section class="block" id="faq" aria-labelledby="faq-h">
+    <p class="kicker">Questions</p>
+    <h2 id="faq-h">Good to know</h2>
+    <div class="faq">
+      <details><summary>Do I need an account?</summary><p>No. Your nostr key is you. The speakeasy asks you to sign in (NIP-42 AUTH) and checks your movement chain.</p></details>
+      <details><summary>What if I leave the region?</summary><p>You can't sign in until you're back inside. What you posted stays.</p></details>
+      <details><summary>Does it cover both planes?</summary><p>{{if .BothPlanes}}Yes. A region shorter than a full coordinate covers the same place in dataspace and ideaspace.{{else}}On this relay a region covers one plane.{{end}}</p></details>
+      <details><summary>How long does it last?</summary><p>For good. One payment, no renewals.</p></details>
+      <details><summary>Who runs it?</summary><p>The {{if .RelayName}}{{.RelayName}}{{else}}relay{{end}}. The relay owner keeps it running and handles abuse.</p></details>
+    </div>
+  </section>
+
+  <footer>
+    <span>{{if .RelayName}}{{.RelayName}}{{else}}Relay{{end}} · {{.Host}}</span>
+    <nav aria-label="More">
+      <a href="/">Relay home</a>
+      <a href="https://www.onosendai.tech" target="_blank" rel="noopener">ONOSENDAI</a>
+      <a href="https://github.com/arkin0x/cyberspace-relay/blob/main/docs/speakeasies.md" target="_blank" rel="noopener">How speakeasies work</a>
+    </nav>
+  </footer>
+</div>
+
+<script>{{checkoutJS}}</script>
+<script>
+(function () {
+  "use strict";
+  var S = window.SpeakeasyOrder;
+  function $(id) { return document.getElementById(id); }
+  var tool = $("tool");
+  var endpoint = tool.getAttribute("data-endpoint");
+  var checkURL = tool.getAttribute("data-check");
+  var publicURL = tool.getAttribute("data-relay"); // not data-*-url: html/template would refuse wss:
+  var mapBase = tool.getAttribute("data-onosendai");
+  var price = tool.getAttribute("data-price"), namedPrice = tool.getAttribute("data-named-price");
+  var payments = tool.getAttribute("data-payments");
+  var LAST = "speakeasy-landing:last";
+  var regionIn = $("region-in"), nameIn = $("name-in"), sizeIn = $("size-in"), btn = $("create-btn");
+  // coord: a full coordinate the visitor gave, to size a region around;
+  // region: the relay's answer about the region now chosen.
+  var st = { coord: null, region: null, nameOK: false, seq: 0, timer: null, stop: null, clock: null };
+
+  function key(region) { return "speakeasy-order:" + region; } // the region page's key too
+  function group(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+  // "2^45" as 2 with a raised 45, built from text nodes only.
+  function powText(el, text) {
+    el.textContent = "";
+    String(text).split(/(2\^\d+)/).forEach(function (part) {
+      var m = /^2\^(\d+)$/.exec(part);
+      if (!m) { el.appendChild(document.createTextNode(part)); return; }
+      el.appendChild(document.createTextNode("2"));
+      var sup = document.createElement("sup"); sup.textContent = m[1]; el.appendChild(sup);
+    });
+  }
+  // How wide 2^h gibsons is on Earth's map (dataspace): 2^34 gibsons
+  // are 2 meters (CYBERSPACE_V2 §9.7).
+  function across(h) {
+    var m = Math.pow(2, h - 33);
+    if (m > 2.5e7) return "far wider than Earth";
+    if (m >= 1000) return "about " + (m / 1000).toLocaleString("en", { maximumSignificantDigits: 3 }) + " km across on Earth's map";
+    if (m >= 1) return "about " + m.toLocaleString("en", { maximumSignificantDigits: 3 }) + " m across on Earth's map";
+    if (m >= 0.01) return "about " + (m * 100).toLocaleString("en", { maximumSignificantDigits: 2 }) + " cm across on Earth's map";
+    return "smaller than a grain of sand on Earth's map";
+  }
+  // Slider stop v (1 to 21) is a cube: a prefix of 66 - 3v hex characters,
+  // 2^(4(64 - n) - 1)/3 gibsons a side (CYBERSPACE_V2 §2.5).
+  function prefixLen() { return 66 - 3 * Number(sizeIn.value); }
+  function side(n) { return (4 * (64 - n) - 1) / 3; }
+
+  function copy(text) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    return new Promise(function (ok, no) {
+      var t = document.createElement("textarea");
+      t.value = text; t.setAttribute("readonly", ""); t.style.position = "fixed"; t.style.opacity = "0";
+      document.body.appendChild(t); t.select();
+      try { document.execCommand("copy") ? ok() : no(); } catch (e) { no(e); }
+      document.body.removeChild(t);
+    });
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("[data-copy],[data-copy-text]") : null;
+    if (!b) return;
+    var text = b.hasAttribute("data-copy-text") ? b.getAttribute("data-copy-text") : $(b.getAttribute("data-copy")).textContent;
+    copy(text).then(function () {
+      b.textContent = "Copied";
+      setTimeout(function () { b.textContent = "Copy"; }, 1500);
+    }, function () {});
+  });
+  // An address row: a label, the address, a Copy button (text only).
+  function addrRow(label, url) {
+    var wrap = document.createElement("div");
+    if (label) { var l = document.createElement("span"); l.className = "addr-label"; l.textContent = label; wrap.appendChild(l); }
+    var row = document.createElement("div"); row.className = "addr";
+    var c = document.createElement("code"); c.textContent = url;
+    var b = document.createElement("button"); b.type = "button"; b.className = "quiet"; b.textContent = "Copy"; b.setAttribute("data-copy-text", url);
+    row.appendChild(c); row.appendChild(b); wrap.appendChild(row);
+    return wrap;
+  }
+
+  function setPayments(p) {
+    if (!p || p === payments) return;
+    payments = p;
+    var note = $("pay-note");
+    note.hidden = p === "open";
+    note.textContent = "";
+    if (p === "open") return;
+    var s = document.createElement("strong");
+    s.textContent = p === "paused" ? "Payments are paused." : "Not open yet.";
+    note.appendChild(s);
+    note.appendChild(document.createTextNode(p === "paused"
+      ? " The relay's wallet isn't answering right now, so it won't sell an invoice it can't check. Try again in a few minutes."
+      : " Creating speakeasies isn't open on this relay right now. You can still check a region."));
+  }
+
+  function update() {
+    var name = nameIn.value.trim();
+    var p = name ? namedPrice : price;
+    $("price").textContent = p;
+    btn.textContent = "Create speakeasy for " + p + " sats";
+    var r = st.region;
+    btn.disabled = !(payments === "open" && r && !r.speakeasy && !r.coordinate && (!name || st.nameOK));
+  }
+
+  function showSize(on) {
+    $("size-box").hidden = !on;
+    if (on) sizeOut();
+  }
+  function sizeOut() {
+    var n = prefixLen(), out = $("size-out");
+    out.textContent = "";
+    var b = document.createElement("b"); powText(b, "2^" + side(n) + " gibsons a side");
+    out.appendChild(b);
+    out.appendChild(document.createTextNode(", " + across(side(n)) + "."));
+    sizeIn.setAttribute("aria-valuetext", "2 to the " + side(n) + " gibsons a side, " + across(side(n)));
+  }
+
+  function renderRegion(r) {
+    $("rc-empty").hidden = !!r;
+    $("rc-body").hidden = !r;
+    if (!r) return;
+    $("rc-hex").textContent = r.hex;
+    var a = across(Math.max(r.heights[0], r.heights[1], r.heights[2]));
+    powText($("rc-size"), r.size + ". " + (r.cube ? a.charAt(0).toUpperCase() + a.slice(1) : "Up to " + a) + ".");
+    $("rc-planes").textContent = r.planes;
+    $("rc-map").href = r.onosendai;
+    var chip = $("rc-status"), taken = $("rc-taken"), addrs = $("rc-addrs");
+    addrs.textContent = "";
+    if (r.speakeasy) {
+      chip.className = "chip taken"; chip.textContent = "Already a speakeasy";
+      if (r.speakeasy.name_url) addrs.appendChild(addrRow(r.speakeasy.name, r.speakeasy.name_url));
+      addrs.appendChild(addrRow(r.speakeasy.name_url ? "Also at" : "", r.speakeasy.url));
+      $("rc-page").href = r.speakeasy.name ? "/" + encodeURIComponent(r.speakeasy.name) : r.page;
+      taken.hidden = false;
+    } else {
+      chip.className = "chip ok"; chip.textContent = "Free to create";
+      taken.hidden = true;
+    }
+    var inside = $("rc-inside");
+    inside.hidden = !r.inside.length;
+    if (r.inside.length) {
+      var s = r.inside[0];
+      inside.textContent = "This region sits inside the speakeasy " + (s.name || s.region) + ". Both can exist: yours is a smaller room within it.";
+    }
+  }
+
+  function renderName(n) {
+    var out = $("name-out");
+    out.className = "help";
+    st.nameOK = false;
+    if (!nameIn.value.trim()) {
+      out.textContent = "3 to 40 lowercase letters, digits and dashes. Only now: a name can't be added later.";
+      return;
+    }
+    if (!n) { out.textContent = "Checking the name…"; return; }
+    st.nameOK = n.ok;
+    if (n.ok) {
+      out.className = "help good";
+      out.textContent = "Free. Its address: wss://" + publicURL.replace(/^wss?:\/\//, "") + "/" + n.name;
+    } else {
+      out.className = "err";
+      out.textContent = n.error;
+    }
+  }
+
+  function check() {
+    var raw = st.coord ? st.coord.slice(0, prefixLen()) : regionIn.value.trim();
+    var name = nameIn.value.trim();
+    var seq = ++st.seq;
+    if (!raw && !name) {
+      st.region = null; $("region-err").textContent = "";
+      renderRegion(null); renderName(null); update();
+      return;
+    }
+    var u = checkURL + "?region=" + encodeURIComponent(raw) + (name ? "&name=" + encodeURIComponent(name) : "");
+    fetch(u, { cache: "no-store" })
+      .then(function (r) {
+        if (r.status === 429) throw "slow";
+        if (!r.ok) throw "bad";
+        return r.json();
+      })
+      .then(function (a) {
+        if (seq !== st.seq) return;
+        setPayments(a.payments);
+        if (a.region && a.region.coordinate && !st.coord) {
+          // A place: size a region around it, then ask about that.
+          st.coord = a.region.hex;
+          showSize(true);
+          check();
+          return;
+        }
+        $("region-err").textContent = raw && a.region_error ? a.region_error : "";
+        st.region = a.region || null;
+        renderRegion(st.region);
+        renderName(a.name || null);
+        update();
+      })
+      .catch(function (e) {
+        if (seq !== st.seq) return;
+        $("region-err").textContent = e === "slow" ? "Too many checks. Wait a moment, then try again." : "Couldn't reach the relay. Try again.";
+        st.region = null; update();
+      });
+  }
+  function later(ms) { clearTimeout(st.timer); st.timer = setTimeout(check, ms); }
+
+  regionIn.addEventListener("input", function () {
+    st.coord = null; showSize(false);
+    st.region = null; update();
+    later(300);
+  });
+  sizeIn.addEventListener("input", function () { sizeOut(); st.region = null; update(); later(180); });
+  nameIn.addEventListener("input", function () {
+    var v = nameIn.value, low = v.toLowerCase();
+    if (v !== low) { var at = nameIn.selectionStart; nameIn.value = low; nameIn.setSelectionRange(at, at); }
+    st.nameOK = false; renderName(null); update();
+    later(300);
+  });
+
+  // ── paying ──
+  function view(which) {
+    $("tool-form").hidden = which !== "form";
+    $("invoice").hidden = which !== "invoice";
+    $("done").hidden = which !== "done";
+  }
+  function forget(region) { S.remember(key(region), null); S.remember(LAST, null); }
+  function stopClock() { clearInterval(st.clock); st.clock = null; }
+  function showInvoice(o) {
+    view("invoice");
+    if (o.qr_svg) $("qr").innerHTML = o.qr_svg; // drawn by this relay
+    else if (o.status !== "pending") $("qr").textContent = "";
+    $("bolt11").textContent = o.invoice;
+    $("open-wallet").href = "lightning:" + o.invoice;
+    $("open-wallet").hidden = o.status !== "pending";
+    $("order-id").textContent = o.id;
+    $("payment-hash").textContent = o.payment_hash;
+    var sum = $("inv-sum"); sum.textContent = "";
+    var b = document.createElement("b"); b.textContent = group(o.amount_sats) + " sats"; sum.appendChild(b);
+    sum.appendChild(document.createTextNode(" for region " + o.region + (o.name ? ", named " + o.name : "") + "."));
+    stopClock();
+    if (o.status === "pending" && o.expires_at) {
+      var tick = function () {
+        var left = o.expires_at - Math.floor(Date.now() / 1000);
+        $("inv-expiry").textContent = left > 0
+          ? "Expires in " + Math.floor(left / 60) + ":" + ("0" + (left % 60)).slice(-2) + "."
+          : "The invoice has expired; checking with the wallet.";
+      };
+      tick(); st.clock = setInterval(tick, 1000);
+    } else {
+      $("inv-expiry").textContent = "";
+    }
+  }
+  function status(text, stopped) {
+    var s = $("pay-status");
+    s.textContent = text;
+    s.className = stopped ? "status stop" : "status";
+  }
+  function showDone(o, note) {
+    stopClock();
+    view("done");
+    $("done-title").textContent = o.name ? o.name + " is open" : "Your speakeasy is open";
+    $("done-sub").textContent = "Region " + o.region;
+    $("done-note").textContent = note || "";
+    var addrs = $("done-addrs"); addrs.textContent = "";
+    var regionURL = publicURL + "/C/" + o.region;
+    addrs.appendChild(addrRow("Its address", o.url));
+    if (o.url !== regionURL) addrs.appendChild(addrRow("Also at", regionURL));
+    $("done-map").href = mapBase + o.region;
+    $("done-page").href = o.url !== regionURL && o.name ? "/" + encodeURIComponent(o.name) : "/C/" + o.region;
+  }
+  function backToForm(msg) {
+    stopClock();
+    view("form");
+    $("create-err").textContent = msg || "";
+    check();
+  }
+  function follow(id, region) {
+    if (st.stop) st.stop();
+    st.stop = S.watch(endpoint, id, {
+      update: function (o) { if (!S.outcome(o)) showInvoice(o); },
+      paid: function () { status("Paid. Opening the speakeasy."); },
+      gone: function () { forget(region); backToForm(""); },
+      end: function (kind, o) {
+        if (kind === "made") {
+          forget(region); showDone(o, "");
+        } else if (kind === "made-without-name") {
+          // Made, but its name was taken first: the name's part is owed.
+          forget(region);
+          showDone(o, "Its name was taken first (" + o.outcome + "). The name's part is owed back: give the relay owner order " +
+            o.id + " and payment hash " + o.payment_hash + ".");
+        } else if (kind === "owed") {
+          // A refund owed, or held: never a success.
+          showInvoice(o); stopClock(); $("inv-expiry").textContent = "";
+          status("Paid, but it bought nothing (" + o.outcome + "). " + group(o.amount_sats) +
+            " sats are owed back: give the relay owner the order and payment hash below.", true);
+        } else if (kind === "expired") {
+          forget(region); backToForm("That invoice expired. Make a new one when you're ready.");
+        } else {
+          forget(region);
+          showInvoice(o); stopClock(); $("inv-expiry").textContent = "";
+          status("", true);
+          $("inv-err").textContent = "The wallet never answered about that invoice; give the relay owner the order and payment hash below.";
+        }
+      }
+    });
+  }
+
+  $("tool-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var r = st.region;
+    if (btn.disabled || !r) return;
+    var body = { region: r.hex };
+    var name = nameIn.value.trim().toLowerCase();
+    if (name) body.name = name;
+    btn.disabled = true;
+    $("create-err").textContent = "";
+    S.create(endpoint, body)
+      .then(function (x) {
+        if (!x.ok) {
+          if (x.status === 503) setPayments("paused");
+          if (x.status === 404) setPayments("off");
+          $("create-err").textContent = x.o.error || "Something went wrong. Try again.";
+          update();
+          return;
+        }
+        S.remember(key(x.o.region), x.o.id);
+        S.remember(LAST, x.o.region);
+        $("inv-err").textContent = "";
+        status("Waiting for payment");
+        showInvoice(x.o);
+        follow(x.o.id, x.o.region);
+      })
+      .catch(function () { $("create-err").textContent = "Something went wrong. Try again."; update(); });
+  });
+
+  // ── start: ?region= prefills; a reload picks up the order being paid ──
+  var pre = regionIn.value.trim();
+  var resume = pre || S.remembered(LAST);
+  var open = resume ? S.remembered(key(resume)) : null;
+  if (open) {
+    regionIn.value = resume;
+    view("invoice");
+    status("Checking your order");
+    follow(open, resume);
+    check();
+  } else if (pre) {
+    check();
+  }
+  if (pre) tool.scrollIntoView({ block: "start" });
+})();
+</script>
+</body>
+</html>

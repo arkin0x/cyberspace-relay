@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"io"
 	"math/big"
+	"regexp"
 	"time"
 
 	"github.com/0ceanslim/grain/server/regiongate"
@@ -18,7 +19,26 @@ import (
 //go:embed page.html
 var pageHTML string
 
-var pageTemplate = template.Must(template.New("region").Parse(pageHTML))
+var pageTemplate = template.Must(template.New("region").Funcs(templateFuncs).Parse(pageHTML))
+
+// checkoutJS is Create Speakeasy's browser side, shared by the region page
+// and the landing page, so both read an order the same way.
+//
+//go:embed checkout.js
+var checkoutJS string
+
+// templateFuncs are the pages' helpers: checkoutJS inlines the shared
+// script (the relay's own file, so it is trusted as JS).
+// pow raises the power in a size ("2^45" as 2<sup>45</sup>), after
+// escaping the rest.
+var templateFuncs = template.FuncMap{
+	"checkoutJS": func() template.JS { return template.JS(checkoutJS) },
+	"pow": func(s string) template.HTML {
+		return template.HTML(powRE.ReplaceAllString(template.HTMLEscapeString(s), "2<sup>$1</sup>"))
+	},
+}
+
+var powRE = regexp.MustCompile(`2\^(\d+)`)
 
 // ONOSENDAIBase is where a region is drawn: www.onosendai.tech/C/<hex> is
 // the same region as relay.onosendai.tech/<hex> (ruling D7).

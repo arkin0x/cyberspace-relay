@@ -140,8 +140,10 @@
   });
 </script>
 {{if .Create}}
+<script>{{checkoutJS}}</script>
 <script>
   (function () {
+    var S = window.SpeakeasyOrder;
     var box = document.getElementById("create-box");
     var btn = document.getElementById("create");
     var endpoint = box.getAttribute("data-endpoint");
@@ -154,8 +156,6 @@
     nameIn.addEventListener("input", function () {
       btn.textContent = "Create speakeasy for " + (nameIn.value.trim() ? nameIn.getAttribute("data-named-price") : nameIn.getAttribute("data-price")) + " sats";
     });
-    function remember(id) { try { if (id) localStorage.setItem(key, id); else localStorage.removeItem(key); } catch (e) {} }
-    function remembered() { try { return localStorage.getItem(key); } catch (e) { return null; } }
     function show(o) {
       if (o.qr_svg) document.getElementById("qr").innerHTML = o.qr_svg; // drawn by this relay
       document.getElementById("bolt11").textContent = o.invoice;
@@ -167,40 +167,32 @@
       nameIn.hidden = true;
     }
     function poll(id) {
-      fetch(endpoint + "/" + encodeURIComponent(id), { cache: "no-store" })
-        .then(function (r) { if (r.status === 404) { remember(null); throw "gone"; } return r.json(); })
-        .then(function (o) {
-          show(o);
-          if (o.applied && o.url && !o.needs_owner) {
-            remember(null);
+      S.watch(endpoint, id, {
+        update: show,
+        gone: function () { S.remember(key, null); },
+        paid: function () { status.textContent = "Paid. Opening the speakeasy."; },
+        end: function (kind, o) {
+          if (kind === "made") {
+            S.remember(key, null);
             status.textContent = o.name ? "Paid. This region is now a speakeasy named " + o.name + "." : "Paid. This region is now a speakeasy.";
             setTimeout(function () { location.href = o.name ? "/" + o.name : location.pathname; }, 1500);
-            return;
-          }
-          if (o.applied && o.url) {
+          } else if (kind === "made-without-name") {
             // Made, but its name was taken first: the name's part is owed.
-            remember(null);
+            S.remember(key, null);
             status.textContent = "Paid. This region is now a speakeasy, but its name was taken first (" + o.outcome +
               "): give the relay owner the order and payment hash below for the name's part.";
-            return;
-          }
-          if (o.applied) {
+          } else if (kind === "owed") {
             // A refund owed, or held: never a success.
             status.textContent = "Paid, but it bought nothing (" + o.outcome + "). " + o.amount_sats +
               " sats are owed back: give the relay owner the order and payment hash below.";
-            return;
-          }
-          if (o.status === "paid") status.textContent = "Paid. Opening the speakeasy.";
-          if (o.status === "expired" || o.status === "unknown") {
-            remember(null);
+          } else {
+            S.remember(key, null);
             status.textContent = "";
-            errEl.textContent = o.status === "expired" ? "That invoice expired." : "The wallet never answered about that invoice; give the relay owner the order and payment hash below.";
-            if (o.status === "expired") { inv.hidden = true; btn.hidden = false; nameIn.hidden = false; }
-            return;
+            errEl.textContent = kind === "expired" ? "That invoice expired." : "The wallet never answered about that invoice; give the relay owner the order and payment hash below.";
+            if (kind === "expired") { inv.hidden = true; btn.hidden = false; nameIn.hidden = false; }
           }
-          setTimeout(function () { poll(id); }, 3000);
-        })
-        .catch(function (e) { if (e !== "gone") setTimeout(function () { poll(id); }, 6000); });
+        }
+      });
     }
     btn.addEventListener("click", function () {
       var body = { region: region };
@@ -211,12 +203,11 @@
       }
       btn.disabled = true;
       errEl.textContent = "";
-      fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-        .then(function (r) { return r.json().then(function (o) { return { ok: r.ok, o: o }; }); })
+      S.create(endpoint, body)
         .then(function (x) {
           btn.disabled = false;
           if (!x.ok) { errEl.textContent = x.o.error || "Something went wrong. Try again."; return; }
-          remember(x.o.id);
+          S.remember(key, x.o.id);
           show(x.o);
           status.textContent = "Waiting for payment";
           poll(x.o.id);
@@ -224,7 +215,7 @@
         .catch(function () { btn.disabled = false; errEl.textContent = "Something went wrong. Try again."; });
     });
     // After a reload: pick up the order this browser was paying.
-    var last = remembered();
+    var last = S.remembered(key);
     if (last) poll(last);
   })();
 </script>
