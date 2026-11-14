@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/0ceanslim/grain/server/utils/log"
 )
@@ -516,6 +518,10 @@ func LoadRelayMetadata(filename string) error {
 	return nil
 }
 
+// ServerTimeHeader carries the relay's clock on its NIP-11 response, in Unix
+// milliseconds (see RelayInfoHandlerFor).
+const ServerTimeHeader = "X-Server-Time"
+
 func RelayInfoHandler(w http.ResponseWriter, r *http.Request) {
 	RelayInfoHandlerFor(w, r, nil)
 }
@@ -543,6 +549,14 @@ func RelayInfoHandlerFor(w http.ResponseWriter, r *http.Request, edit func(*Rela
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Access-Control-Allow-Methods", "GET")
+	// The relay's own clock, for clients that keep animated objects in step
+	// (ONOSENDAI's world clock, DECK-0003 §1.14): X-Server-Time is Unix
+	// milliseconds, and it and Date are exposed so a browser on another
+	// origin may read them (CORS hides every response header but a few
+	// safelisted ones unless named here). Like the document itself, they are
+	// sent only to a GET with Accept exactly "application/nostr+json".
+	w.Header().Set(ServerTimeHeader, strconv.FormatInt(time.Now().UnixMilli(), 10))
+	w.Header().Set("Access-Control-Expose-Headers", "Date, "+ServerTimeHeader)
 	// The relay root ("/") serves both this NIP-11 document and the HTML
 	// app shell, distinguished only by Accept. Vary: Accept stops a shared
 	// cache from returning one representation for the other. no-cache keeps
