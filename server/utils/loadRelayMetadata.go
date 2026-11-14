@@ -553,7 +553,8 @@ func RelayInfoHandlerFor(w http.ResponseWriter, r *http.Request, edit func(*Rela
 	// (ONOSENDAI's world clock, DECK-0003 §1.14): X-Server-Time is Unix
 	// milliseconds, and it and Date are exposed so a browser on another
 	// origin may read them (CORS hides every response header but a few
-	// safelisted ones unless named here).
+	// safelisted ones unless named here). Like the document itself, they are
+	// sent only to a GET with Accept exactly "application/nostr+json".
 	w.Header().Set(ServerTimeHeader, strconv.FormatInt(time.Now().UnixMilli(), 10))
 	w.Header().Set("Access-Control-Expose-Headers", "Date, "+ServerTimeHeader)
 	// The relay root ("/") serves both this NIP-11 document and the HTML
