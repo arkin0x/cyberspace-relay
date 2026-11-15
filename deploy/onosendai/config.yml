@@ -200,6 +200,12 @@ rate_limit:
     # characters of words, all of which may be ones json.Marshal escapes to six bytes.
     - kind: 33338 # TV upgrade announcement
       max_size: 8192 # 8KB - 900 characters escaped is 5,400 B, four short tags and the envelope under 1 KB
+    # ONOSENDAI hidden list record (NIP-78), 2026-11-15: a shard's sealed text is
+    # at most 40,000 base64 characters before NIP-44 (about 54,700 after), plus
+    # the wrapped record key (some 200 B), a d and a client tag. Base64 has no
+    # character json.Marshal escapes.
+    - kind: 30078 # NIP-78 app data
+      max_size: 65536 # 64KB - the client splits its record into shards under 56 KB
     # NIP-17 DMs (owner, 2026-11-13): a gift wrap holds a seal holding the
     # message, each layer NIP-44 encrypted (padded up to 1/8 more) and base64
     # encoded (4/3 the size, and no characters json.Marshal escapes): at most

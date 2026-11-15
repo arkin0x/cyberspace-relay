@@ -20,6 +20,7 @@ region.)
 | 33338 | Cyberspace TV upgrade announcements (ONOSENDAI): one per version; TV plays only the announcer key's | anyone |
 | 1738, 35129 | glyphbyte: cairns (one URL, found by event-id prefix) and the glyphbyte napplet | anyone |
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
+| 30078 | NIP-78 app data: ONOSENDAI's private record of your own hides (`d` = `onosendai/hides/<i>`), sealed to your own key | anyone |
 | 1059 | gift wraps (NIP-59), the envelope of every NIP-17 DM; only the AUTHed recipient can read or count one | anyone |
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
 
@@ -36,6 +37,12 @@ NIP-09 deletions by the author are honored. To accept a new kind, add it to
 `whitelist.yml` here and on the droplet's volume (see "Changing the config on
 the droplet"). `config/deploy_onosendai_test.go` checks that this table,
 `whitelist.yml` and the kinds clients publish agree.
+
+30078 was added on 2026-11-15 for ONOSENDAI's hidden list sync (owner ruling,
+option A): one private record of your hides, NIP-44 sealed to your own key,
+so every device signed in as you lists your bags and can open them. It is
+NIP-78 app data, not a Cyberspace kind. Anyone may publish 30078 with any `d`;
+the size cap (64 KB, config.yml) bounds what one event can hold.
 
 23334, 33340, 3367 and 10000 were added on 2026-11-05, from a kind audit of
 every client before the cutover (ONOSENDAI #606): ONOSENDAI publishes all four
