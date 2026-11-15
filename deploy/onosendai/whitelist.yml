@@ -65,6 +65,11 @@ kind_whitelist:
     - "1059"   # gift wraps (NIP-59), the envelope of every NIP-17 DM
     - "10063"  # Blossom server lists
     - "10000"  # mute lists (NIP-51): BLOCK and MUTE THIS ITEM
+    # ONOSENDAI's private record of your own hides (owner ruling, 2026-11-15,
+    # option A): NIP-78 app data, d = onosendai/hides/0 to /15, sealed to the
+    # author's own key, so every device signed in as you lists your bags.
+    # Size cap in config.yml.
+    - "30078"  # NIP-78 app data (ONOSENDAI hidden list record)
 
 domain_whitelist:
   enabled: false

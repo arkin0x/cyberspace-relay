@@ -80,7 +80,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// HOSAKA publish nothing here; glyphbyte added 2026-11-08; ONOSENDAI sealed
 	// entries, 33335, added 2026-11-09; Seeds DNA and tends, 3350 and 3352,
 	// added 2026-11-10; TV upgrade announcements, 33338, added 2026-11-12;
-	// gift wraps, 1059, added 2026-11-13 for NIP-17 DMs).
+	// gift wraps, 1059, added 2026-11-13 for NIP-17 DMs; NIP-78 app data,
+	// 30078, added 2026-11-15 for ONOSENDAI's hidden list record).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -106,6 +107,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		3352:  "Seeds tend",
 		33338: "TV upgrade announcements",
 		1059:  "gift wraps (NIP-17 DMs)",
+		30078: "ONOSENDAI hidden list record (NIP-78)",
 	}
 	for k, what := range published {
 		if !kinds[k] {
