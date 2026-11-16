@@ -202,8 +202,12 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		response.SendOK(client, evt.ID, false, dupMsg)
 		return
 	}
-	stored := false
-	defer func() { done(stored) }()
+	// kept: the event is now in the database. Kinds the store accepts but
+	// does not keep (ephemeral, kind 2) release the claim like a refusal, so
+	// a resend is broadcast again, unless the kind has a per-author limit,
+	// whose budget a fan-out of copies must not spend.
+	kept := false
+	defer func() { done(kept) }()
 
 	// Duplicate check, then the admission gate (admitNew says why in that order).
 	if ok, msg, notice := admitNew(gateContext(context.Background(), client), evt, db.CheckDuplicateEvent, gate); !ok {
@@ -286,7 +290,7 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
-	stored = true
+	kept = storesKind(evt.Kind) || config.PubkeyKindLimited(evt.Kind)
 	response.SendOK(client, evt.ID, true, "")
 	log.Event().Info("Event stored successfully",
 		"event_id", evt.ID,
@@ -392,4 +396,10 @@ func admitNew(ctx context.Context, evt nostr.Event, isDuplicate func(nostr.Event
 		}
 	}
 	return true, "", ""
+}
+
+// storesKind reports whether StoreEvent keeps an event of this kind
+// (server/db/nostrdb/store.go drops kind 2 and ephemeral kinds).
+func storesKind(kind int) bool {
+	return kind != 2 && !(kind >= 20000 && kind < 30000)
 }

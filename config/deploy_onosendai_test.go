@@ -520,7 +520,7 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 		t.Fatalf("%d of the burst of %d allowed", got, avatar.Burst)
 	}
 	ok, msg, _ := l.allow("alice", 11333)
-	if ok || !strings.HasPrefix(msg, "rate-limited: at most ") || !strings.Contains(msg, " avatars an hour per key") {
+	if ok || !strings.HasPrefix(msg, "rate-limited: avatars are limited to ") || !strings.Contains(msg, " an hour per key; try again in ") {
 		t.Fatalf("after the burst: %v %q", ok, msg)
 	}
 	if ok, _, _ := l.allow("bob", 11333); !ok {

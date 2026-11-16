@@ -263,7 +263,7 @@ rate_limit:
   # stored), an event the gate refuses, and an event the store refuses (such
   # as an older version of a replaceable event) cost nothing. Speakeasy paths
   # are not limited. `label` names the events in the refusal: "rate-limited:
-  # at most 12 avatars an hour per key; try again in 5 minutes".
+  # avatars are limited to 12 an hour per key; try again in 5 minutes".
   #
   # ONOSENDAI, 2026-11-16: avatars (11333) no longer carry proof of work
   # (owner ruling), so this limit is what stops one key from replacing its

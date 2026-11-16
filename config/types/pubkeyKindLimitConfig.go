@@ -14,7 +14,8 @@ type PubkeyKindLimitConfig struct {
 	// the most it can save up. Must be >= 1.
 	Burst int `yaml:"burst" json:"burst"`
 	// Label names the events in the refusal a person reads, e.g.
-	// "avatars" gives "rate-limited: at most 12 avatars an hour per key".
+	// "avatars" gives "rate-limited: avatars are limited to 12 an hour per
+	// key; try again in 5 minutes".
 	// Empty means "kind <n> events".
 	Label string `yaml:"label,omitempty" json:"label,omitempty"`
 }

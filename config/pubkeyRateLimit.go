@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"fmt"
 	"math"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,12 +63,12 @@ type pubkeyKindBucket struct {
 	last   time.Time
 }
 
-// pubkeyKindLimiter is safe for concurrent use; one mutex guards it all,
-// except active, which lets an event skip the lock when there are no rules.
+// pubkeyKindLimiter is safe for concurrent use. The rules are an immutable
+// map behind an atomic pointer, so an event of a kind with no rule takes no
+// lock; the mutex guards the buckets (and orders rule swaps with them).
 type pubkeyKindLimiter struct {
-	active  atomic.Bool
+	rules   atomic.Pointer[map[int]pubkeyKindRule]
 	mu      sync.Mutex
-	rules   map[int]pubkeyKindRule
 	buckets map[pubkeyKindKey]*list.Element // Value is *pubkeyKindBucket
 	lru     *list.List                      // front = most recently used
 	max     int
@@ -75,14 +76,18 @@ type pubkeyKindLimiter struct {
 }
 
 func newPubkeyKindLimiter(max int, now func() time.Time) *pubkeyKindLimiter {
-	return &pubkeyKindLimiter{
-		rules:   map[int]pubkeyKindRule{},
+	l := &pubkeyKindLimiter{
 		buckets: map[pubkeyKindKey]*list.Element{},
 		lru:     list.New(),
 		max:     max,
 		now:     now,
 	}
+	l.rules.Store(&map[int]pubkeyKindRule{})
+	return l
 }
+
+// rulesNow is the current rule map. Never modified after it is stored.
+func (l *pubkeyKindLimiter) rulesNow() map[int]pubkeyKindRule { return *l.rules.Load() }
 
 // pubkeyLimiter is the process-wide table. It outlives server instance
 // restarts (config reloads): SetRateLimit reconfigures it in place.
@@ -111,7 +116,7 @@ func (l *pubkeyKindLimiter) configure(limits []cfgType.PubkeyKindLimitConfig) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	stale := map[int]bool{}
-	for kind, old := range l.rules {
+	for kind, old := range l.rulesNow() {
 		nr, ok := rules[kind]
 		if !ok || nr.perHour != old.perHour || nr.burst != old.burst {
 			stale[kind] = true
@@ -126,8 +131,7 @@ func (l *pubkeyKindLimiter) configure(limits []cfgType.PubkeyKindLimitConfig) {
 			e = next
 		}
 	}
-	l.rules = rules
-	l.active.Store(len(rules) > 0)
+	l.rules.Store(&rules)
 }
 
 // remove drops one bucket. Caller holds l.mu.
@@ -156,7 +160,7 @@ func (l *pubkeyKindLimiter) sweepIdle(now time.Time) {
 			return
 		}
 		b := e.Value.(*pubkeyKindBucket)
-		r, ok := l.rules[b.key.kind]
+		r, ok := l.rulesNow()[b.key.kind]
 		if ok && b.tokensAt(r, now) < r.burst {
 			return
 		}
@@ -169,12 +173,14 @@ func (l *pubkeyKindLimiter) sweepIdle(now time.Time) {
 // ("rate-limited: ..."). When it allows, refund puts the event back: call it
 // if the relay then refuses the event.
 func (l *pubkeyKindLimiter) allow(pubkey string, kind int) (ok bool, msg string, refund func()) {
-	if !l.active.Load() {
+	if _, limited := l.rulesNow()[kind]; !limited {
 		return true, "", func() {}
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	r, limited := l.rules[kind]
+	// Again under the lock: configure swaps rules and drops stale buckets
+	// while holding it.
+	r, limited := l.rulesNow()[kind]
 	if !limited {
 		return true, "", func() {}
 	}
@@ -214,19 +220,16 @@ func (l *pubkeyKindLimiter) allow(pubkey string, kind int) (ok bool, msg string,
 	}
 }
 
-// pubkeyLimitMessage is the refusal a person reads, e.g.
-// "rate-limited: at most 12 avatars an hour per key; try again in 5 minutes".
+// pubkeyLimitMessage is the refusal a person reads, e.g. "rate-limited:
+// avatars are limited to 12 an hour per key; try again in 5 minutes". The
+// count follows the label, so the label stays plural whatever the number.
 func pubkeyLimitMessage(kind int, r pubkeyKindRule, wait time.Duration) string {
 	what := r.label
 	if what == "" {
 		what = fmt.Sprintf("kind %d events", kind)
 	}
-	return fmt.Sprintf("rate-limited: at most %s %s an hour per key; try again in %s",
-		formatPerHour(r.perHour), what, humanWait(wait))
-}
-
-func formatPerHour(v float64) string {
-	return fmt.Sprintf("%g", v)
+	return fmt.Sprintf("rate-limited: %s are limited to %s an hour per key; try again in %s",
+		what, strconv.FormatFloat(r.perHour, 'f', -1, 64), humanWait(wait))
 }
 
 // humanWait rounds up: "1 second", "40 seconds", "5 minutes", "2 hours".
@@ -262,6 +265,12 @@ func AllowPubkeyEvent(pubkey string, kind int) (ok bool, msg string, refund func
 	return ok, msg, refund
 }
 
+// PubkeyKindLimited reports whether rate_limit.pubkey_kind_limits lists kind.
+func PubkeyKindLimited(kind int) bool {
+	_, ok := pubkeyLimiter.rulesNow()[kind]
+	return ok
+}
+
 // configurePubkeyLimits is SetRateLimit's half for the per-author table.
 func configurePubkeyLimits(limits []cfgType.PubkeyKindLimitConfig) {
 	pubkeyLimiter.configure(limits)
@@ -276,8 +285,7 @@ func ResetPubkeyLimiterForTest() {
 	l := pubkeyLimiter
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.rules = map[int]pubkeyKindRule{}
+	l.rules.Store(&map[int]pubkeyKindRule{})
 	l.buckets = map[pubkeyKindKey]*list.Element{}
 	l.lru.Init()
-	l.active.Store(false)
 }

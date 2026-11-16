@@ -4,6 +4,8 @@ import (
 	"container/list"
 	"sync"
 	"time"
+
+	"github.com/0ceanslim/grain/server/utils/log"
 )
 
 // The duplicate check reads nostrdb, and nostrdb indexes an event a moment
@@ -14,9 +16,17 @@ import (
 // signed event could spend its author's budget by fanning it out.
 //
 // recentEvents closes that window. An event is claimed before the duplicate
-// check; while it is in flight, or for recentStoredTTL after it was stored,
-// another copy for the same database is answered as a duplicate. A copy of an
-// event that was refused is not: the claim is released.
+// check. For recentStoredTTL after it was stored, another copy for the same
+// database is a duplicate. While it is still in flight its outcome is not
+// known (the gate can refuse it for its own connection), so a copy is told to
+// try again ("error:"), never "duplicate:", which a client takes to mean the
+// relay has it. A copy of an event that was refused is judged afresh: the
+// claim is released. Kinds the store does not keep (ephemeral, kind 2) are
+// released too (event.go), so a resent ephemeral event is broadcast again.
+//
+// An event stored and then deleted (kind 5) or replaced within
+// recentStoredTTL is still answered "duplicate:" until its entry expires.
+// That is a few seconds of the answer a relay that remembers deletions gives.
 
 const (
 	// recentStoredTTL covers nostrdb's indexing delay many times over.
@@ -42,6 +52,7 @@ type recentEventSet struct {
 	order   *list.List               // by expiry, soonest at the front
 	max     int
 	now     func() time.Time
+	warned  time.Time // last "table full" warning
 }
 
 func newRecentEventSet(max int, now func() time.Time) *recentEventSet {
@@ -82,9 +93,14 @@ func (s *recentEventSet) claim(key string) (ok bool, msg string, done func(store
 		if e.Value.(*recentEntry).stored {
 			return false, "duplicate: already have this event", nil
 		}
-		return false, "duplicate: this event is already being stored", nil
+		return false, "error: this event is already being processed; try again shortly", nil
 	}
 	if s.order.Len() >= s.max {
+		if now.Sub(s.warned) >= time.Minute {
+			s.warned = now
+			log.Event().Warn("In-flight event table full: copies of new events are not tracked until entries expire",
+				"entries", s.order.Len())
+		}
 		return true, "", func(bool) {}
 	}
 	ent := &recentEntry{key: key, expires: now.Add(recentInFlightTTL)}

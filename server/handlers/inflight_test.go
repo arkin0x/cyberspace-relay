@@ -23,7 +23,7 @@ func TestRecentEventsClaim(t *testing.T) {
 	if !ok {
 		t.Fatal("first claim refused")
 	}
-	if ok, msg, _ := s.claim(root); ok || msg != "duplicate: this event is already being stored" {
+	if ok, msg, _ := s.claim(root); ok || msg != "error: this event is already being processed; try again shortly" {
 		t.Fatalf("a copy in flight: %v %q", ok, msg)
 	}
 	if ok, _, d := s.claim(other); !ok {
@@ -100,7 +100,7 @@ func TestRecentEventsConcurrentCopies(t *testing.T) {
 			if ok {
 				won++
 				done(true)
-			} else if strings.HasPrefix(msg, "duplicate:") {
+			} else if strings.HasPrefix(msg, "error: this event is already being processed") || strings.HasPrefix(msg, "duplicate:") {
 				dup++
 			}
 		}()
@@ -108,5 +108,13 @@ func TestRecentEventsConcurrentCopies(t *testing.T) {
 	wg.Wait()
 	if won != 1 || dup != 31 {
 		t.Fatalf("won %d, duplicates %d; want 1 and 31", won, dup)
+	}
+}
+
+func TestStoresKind(t *testing.T) {
+	for kind, want := range map[int]bool{0: true, 1: true, 2: false, 5: true, 3333: true, 11333: true, 19999: true, 20000: false, 23330: false, 29999: false, 30000: true, 33331: true} {
+		if got := storesKind(kind); got != want {
+			t.Errorf("storesKind(%d) = %v, want %v", kind, got, want)
+		}
 	}
 }

@@ -19,20 +19,6 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 	alice, bob := newKey(t), newKey(t)
 	now := time.Now().Unix()
 
-	// stored waits for nostrdb's writer, which indexes after the OK.
-	stored := func(id string) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			if got, _ := r.db.Query([]nostr.Filter{{IDs: []string{id}}}, 1); len(got) == 1 {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("event %s was never stored", id)
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
 	avatar := func(k key, at int64) nostr.Event {
 		return k.signAt(t, at, 11333, `{"v":1}`, []string{"name", "shape"})
 	}
@@ -43,7 +29,7 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 			t.Fatalf("event at %d: got %v %q, want %v %q...", evt.CreatedAt, ok, msg, wantOK, wantPrefix)
 		}
 		if ok {
-			stored(evt.ID)
+			waitStored(t, r, evt.ID)
 		}
 	}
 
@@ -71,7 +57,7 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 	}
 	// The 7th, on a third connection: the limit is per key, not per socket.
 	c3 := mustDial(t, r.wsRoot)
-	publish(c3, avatar(alice, now-50), false, "rate-limited: at most 12 avatars an hour per key; try again in ")
+	publish(c3, avatar(alice, now-50), false, "rate-limited: avatars are limited to 12 an hour per key; try again in ")
 
 	// Another key is untouched, and alice's other kinds are not limited.
 	publish(c3, avatar(bob, now-10), true, "")
@@ -81,8 +67,8 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 // Regression (review of #40): copies of one avatar sent at the same moment on
 // many connections all passed the duplicate check (nostrdb indexes after the
 // OK), each spent a token, and the author's next avatars were refused. Now
-// exactly one copy is taken, the rest are duplicates, and the author keeps
-// the rest of the burst.
+// exactly one copy is taken, the rest are told it is a duplicate or already
+// being processed, and the author keeps the rest of the burst.
 func TestAvatarFanOutCannotSpendItsAuthorsBudget(t *testing.T) {
 	r := startRelay(t, speakeasyRegionPath, webYML)
 	owner := newKey(t)
@@ -125,8 +111,8 @@ func TestAvatarFanOutCannotSpendItsAuthorsBudget(t *testing.T) {
 		switch {
 		case a.ok:
 			accepted++
-		case !strings.HasPrefix(a.msg, "duplicate:"):
-			t.Fatalf("a copy was refused as %q, want duplicate:", a.msg)
+		case !strings.HasPrefix(a.msg, "duplicate:") && !strings.HasPrefix(a.msg, "error: this event is already being processed"):
+			t.Fatalf("a copy was refused as %q, want duplicate: or the in-flight error", a.msg)
 		}
 	}
 	if accepted != 1 {
@@ -227,5 +213,20 @@ func waitStored(t *testing.T, r *relayUnderTest, id string) {
 			t.Fatalf("event %s was never stored", id)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// An ephemeral event is not kept, so a resend is not a duplicate: it is
+// accepted and broadcast again (review of #40; the in-flight table releases
+// kinds the store does not keep).
+func TestEphemeralResendIsNotADuplicate(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	k := newKey(t)
+	evt := k.sign(t, 23330, "hi")
+	c := mustDial(t, r.wsRoot)
+	for i := 0; i < 2; i++ {
+		if ok, msg := c.publish(evt); !ok {
+			t.Fatalf("ephemeral send %d refused: %q", i+1, msg)
+		}
 	}
 }

@@ -48,7 +48,7 @@ func TestPubkeyLimiterBurstThenRefuses(t *testing.T) {
 	if ok || refund != nil {
 		t.Fatal("the 7th avatar in a burst of 6 was allowed")
 	}
-	want := "rate-limited: at most 12 avatars an hour per key; try again in 5 minutes"
+	want := "rate-limited: avatars are limited to 12 an hour per key; try again in 5 minutes"
 	if msg != want {
 		t.Fatalf("refusal: got %q, want %q", msg, want)
 	}
@@ -93,7 +93,7 @@ func TestPubkeyLimiterKeysAndKindsAreSeparate(t *testing.T) {
 	if ok, _, _ := l.allow("alice", 3367); !ok {
 		t.Fatal("alice's avatar budget spent her kind 3367 budget")
 	}
-	if ok, msg, _ := l.allow("alice", 3367); ok || !strings.Contains(msg, "at most 1 kind 3367 events an hour") {
+	if ok, msg, _ := l.allow("alice", 3367); ok || !strings.Contains(msg, "kind 3367 events are limited to 1 an hour") {
 		t.Fatalf("kind 3367 has a burst of 1: got %v %q", ok, msg)
 	}
 	// A kind with no rule is never limited.
@@ -189,7 +189,7 @@ func TestPubkeyLimiterReconfigure(t *testing.T) {
 	relabeled := avatarLimit
 	relabeled.Label = "shapes"
 	l.configure([]cfgType.PubkeyKindLimitConfig{relabeled, {Kind: 3367, PerHour: 2, Burst: 3}})
-	if ok, msg, _ := l.allow("alice", 11333); ok || !strings.Contains(msg, "12 shapes") {
+	if ok, msg, _ := l.allow("alice", 11333); ok || !strings.Contains(msg, "shapes are limited to 12") {
 		t.Fatalf("an unchanged limit lost its bucket on reload: %v %q", ok, msg)
 	}
 	if got := take(l, "alice", 3367, 5); got != 3 {
@@ -254,8 +254,7 @@ func TestPubkeyLimiterWaitNeverOverflows(t *testing.T) {
 		l, _ := testLimiter(10)
 		// configure skips a rule under the minimum; install it directly to
 		// test the cap itself.
-		l.rules[1] = pubkeyKindRule{perHour: perHour, perSecond: perHour / 3600, burst: 1}
-		l.active.Store(true)
+		l.rules.Store(&map[int]pubkeyKindRule{1: {perHour: perHour, perSecond: perHour / 3600, burst: 1}})
 		take(l, "alice", 1, 1)
 		ok, msg, _ := l.allow("alice", 1)
 		if ok || !strings.HasSuffix(msg, " hours") {
@@ -264,22 +263,38 @@ func TestPubkeyLimiterWaitNeverOverflows(t *testing.T) {
 	}
 }
 
-// With no rules, an event takes no lock and leaves no trace.
-func TestPubkeyLimiterNoRulesFastPath(t *testing.T) {
+// A kind with no rule takes no lock and leaves no trace, rules or not.
+func TestPubkeyLimiterUnlimitedKindsSkipTheLock(t *testing.T) {
 	l, _ := testLimiter(10)
-	if l.active.Load() {
-		t.Fatal("active with no rules")
-	}
 	if got := take(l, "alice", 11333, 100); got != 100 || l.lru.Len() != 0 {
 		t.Fatalf("no rules: %d of 100 allowed, %d buckets", got, l.lru.Len())
 	}
 	l.configure([]cfgType.PubkeyKindLimitConfig{avatarLimit})
-	if !l.active.Load() {
-		t.Fatal("not active with a rule")
+	// Held by another goroutine: an unlimited kind must not wait for it.
+	l.mu.Lock()
+	done := make(chan struct{})
+	go func() { l.allow("alice", 1); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		l.mu.Unlock()
+		t.Fatal("an unlimited kind waited for the limiter's lock")
 	}
-	l.configure(nil)
-	if l.active.Load() {
-		t.Fatal("still active after the rules were removed")
+	l.mu.Unlock()
+	if l.lru.Len() != 0 {
+		t.Fatalf("an unlimited kind left %d buckets", l.lru.Len())
+	}
+}
+
+func TestPubkeyKindLimited(t *testing.T) {
+	ResetPubkeyLimiterForTest()
+	t.Cleanup(ResetPubkeyLimiterForTest)
+	if PubkeyKindLimited(11333) {
+		t.Fatal("limited with no rules")
+	}
+	configurePubkeyLimits([]cfgType.PubkeyKindLimitConfig{avatarLimit})
+	if !PubkeyKindLimited(11333) || PubkeyKindLimited(23330) {
+		t.Fatal("PubkeyKindLimited does not follow the rules")
 	}
 }
 
@@ -414,8 +429,9 @@ func TestUpdateRateLimitConfigKeepsPubkeyKindLimits(t *testing.T) {
 		return back.RateLimit
 	}
 
-	// The dashboard's blob: the hidden input sends null when it has no list,
-	// and an older dashboard leaves the key out; both decode to nil.
+	// The dashboard's blob: the section has no field for the list, so the
+	// key is absent; a hand-made NIP-86 call may send null. Both decode to
+	// nil.
 	if err := UpdateRateLimitConfig(cfgType.RateLimitConfig{EventLimit: 20}); err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +478,7 @@ func TestSetRateLimitConfiguresPubkeyLimits(t *testing.T) {
 			t.Fatalf("avatar %d refused", i+1)
 		}
 	}
-	if ok, msg, _ := AllowPubkeyEvent("alice", 11333); ok || !strings.HasPrefix(msg, "rate-limited: at most 12 avatars an hour per key") {
+	if ok, msg, _ := AllowPubkeyEvent("alice", 11333); ok || !strings.HasPrefix(msg, "rate-limited: avatars are limited to 12 an hour per key") {
 		t.Fatalf("the 3rd: %v %q", ok, msg)
 	}
 	// A reload with the same numbers keeps alice's spent bucket.
