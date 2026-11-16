@@ -16,4 +16,9 @@ type RateLimitConfig struct {
 	KindSizeLimits   []KindSizeLimitConfig      `yaml:"kind_size_limits" json:"kind_size_limits"`
 	CategoryLimits   map[string]KindLimitConfig `yaml:"category_limits" json:"category_limits"`
 	KindLimits       []KindLimitConfig          `yaml:"kind_limits" json:"kind_limits"`
+	// PubkeyKindLimits are per-author limits for the listed kinds, across
+	// connections (see PubkeyKindLimitConfig). Empty or absent = none. In
+	// an admin write (grain_updateratelimit), an absent or null value
+	// keeps the current list; send [] to clear it.
+	PubkeyKindLimits []PubkeyKindLimitConfig `yaml:"pubkey_kind_limits,omitempty" json:"pubkey_kind_limits"`
 }

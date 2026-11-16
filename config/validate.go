@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	cfgType "github.com/0ceanslim/grain/config/types"
@@ -104,6 +105,36 @@ func ValidateAndApplyDefaults(cfg *cfgType.ServerConfig) (warnings []string, err
 	if err == nil && cfg.RateLimit.MaxContentLength < 0 {
 		err = fmt.Errorf("rate_limit.max_content_length %d is invalid: must be >= 0 (0 = no limit)", cfg.RateLimit.MaxContentLength)
 	}
+	if err == nil {
+		err = validatePubkeyKindLimits(cfg.RateLimit.PubkeyKindLimits)
+	}
 
 	return warnings, err
+}
+
+// minPubkeyPerHour is the smallest per_hour accepted: one event in about 41
+// days. Lower is a ban by another name (use the kind whitelist for that).
+const minPubkeyPerHour = 0.001
+
+// validatePubkeyKindLimits checks rate_limit.pubkey_kind_limits: every entry
+// needs per_hour >= minPubkeyPerHour and burst >= 1 (a zero burst would
+// refuse every event of the kind), and a kind may be listed once.
+func validatePubkeyKindLimits(limits []cfgType.PubkeyKindLimitConfig) error {
+	seen := map[int]bool{}
+	for _, l := range limits {
+		if l.Kind < 0 || l.Kind > 65535 {
+			return fmt.Errorf("rate_limit.pubkey_kind_limits: kind %d is invalid: must be 0 to 65535", l.Kind)
+		}
+		if seen[l.Kind] {
+			return fmt.Errorf("rate_limit.pubkey_kind_limits: kind %d is listed twice", l.Kind)
+		}
+		seen[l.Kind] = true
+		if !(l.PerHour >= minPubkeyPerHour) || math.IsInf(l.PerHour, 0) {
+			return fmt.Errorf("rate_limit.pubkey_kind_limits: kind %d per_hour %v is invalid: must be at least %v (one event in about 41 days)", l.Kind, l.PerHour, minPubkeyPerHour)
+		}
+		if l.Burst < 1 {
+			return fmt.Errorf("rate_limit.pubkey_kind_limits: kind %d burst %d is invalid: must be >= 1", l.Kind, l.Burst)
+		}
+	}
+	return nil
 }

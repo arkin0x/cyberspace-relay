@@ -254,3 +254,31 @@ rate_limit:
   #     limit: 1
   #     burst: 3
   kind_limits: []
+
+  # Per-author limits: events of a kind each pubkey may publish, counted
+  # across every connection and kept across reconnects (kind_limits above
+  # are per connection and start over on a reconnect). A token bucket: a key
+  # starts with `burst` and earns `per_hour` more an hour, holding at most
+  # `burst`. A duplicate (also a copy sent while the first is still being
+  # stored), an event the gate refuses, and an event the store refuses (such
+  # as an older version of a replaceable event) cost nothing. Speakeasy paths
+  # are not limited. `label` names the events in the refusal: "rate-limited:
+  # avatars are limited to 12 an hour per key; try again in 5 minutes".
+  #
+  # ONOSENDAI, 2026-11-16: avatars (11333) no longer carry proof of work
+  # (owner ruling), so this limit is what stops one key from replacing its
+  # avatar over and over. Without it a key could replace its avatar at the
+  # replaceable category rate, 5 a second, and every replacement goes live to
+  # every client watching avatars and is a "new avatar" moment on Cyberspace
+  # TV. New keys are free, so it is not a general spam guard (viewers can
+  # mute a key). Honest use: a person adopting a few shapes in a row while
+  # trying them in the workshop (the burst of 6), and an agent
+  # (cyberspace-mcp set_avatar) setting one now and then. After the burst a
+  # key gets one more every 5 minutes: at most 18 in its first hour, 12 an
+  # hour after that.
+  # config/deploy_onosendai_test.go checks this entry.
+  pubkey_kind_limits:
+    - kind: 11333 # Cyberspace avatar (replaceable, one per pubkey)
+      per_hour: 12
+      burst: 6
+      label: avatars

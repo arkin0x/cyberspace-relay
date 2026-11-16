@@ -133,6 +133,14 @@ func UpdateRateLimitConfig(rl cfgType.RateLimitConfig) error {
 	if c == nil {
 		return fmt.Errorf("config not loaded")
 	}
+	// pubkey_kind_limits has no editor in /admin: a blob without it (nil)
+	// keeps the current list instead of wiping it. [] clears it.
+	if rl.PubkeyKindLimits == nil {
+		rl.PubkeyKindLimits = c.RateLimit.PubkeyKindLimits
+	}
+	if err := validatePubkeyKindLimits(rl.PubkeyKindLimits); err != nil {
+		return err
+	}
 	c.RateLimit = rl
 	return saveServerConfig(*c)
 }

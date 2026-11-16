@@ -339,6 +339,7 @@ func startRelay(t *testing.T, parse speakeasy.RegionPath, speakeasiesYML string)
 		config.ResetConfig()
 		config.ResetWhitelistConfig()
 		config.ResetSizeLimiter()
+		config.ResetPubkeyLimiterForTest()
 	})
 	if _, err := config.LoadWhitelistConfig(config.ConfigPath("whitelist.yml")); err != nil {
 		t.Fatal(err)

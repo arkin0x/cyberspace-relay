@@ -237,6 +237,29 @@
     </div>
     <input type="hidden" name="kind_limits" data-shape="json" value="" />
   </fieldset>
+
+  <!-- ─── Per-author rate limits (read only) ──────────────────── -->
+  <fieldset class="p-3 rounded bg-surface-elevated">
+    <legend class="px-2 text-sm font-medium text-text">Per-author rates</legend>
+    <p class="mt-1 mb-3 text-xs text-text-secondary">
+      How many events of a kind each pubkey may publish, across every
+      connection and kept across reconnects. Edit
+      <code>rate_limit.pubkey_kind_limits</code> in config.yml; saving
+      this section keeps them as they are.
+    </p>
+    {{if .PubkeyKindLimits}}
+    <ul class="flex flex-col gap-1 text-sm font-mono text-text">
+      {{range .PubkeyKindLimits}}
+      <li>kind {{.Kind}}{{with .Label}} ({{.}}){{end}}: {{.PerHour}} an hour, burst {{.Burst}}</li>
+      {{end}}
+    </ul>
+    {{else}}
+    <p class="text-sm text-text-secondary">None.</p>
+    {{end}}
+    <!-- No form field on purpose: a save without pubkey_kind_limits keeps
+         the list on disk (UpdateRateLimitConfig), so a page left open
+         cannot write back a list someone has since edited by hand. -->
+  </fieldset>
 </form>
 
 <!-- Bootstrap data. CategoryDefaults is the pre-fill on enable. -->

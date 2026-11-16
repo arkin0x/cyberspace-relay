@@ -124,6 +124,14 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	// NIP-01 encoding: id, pubkey and sig in lower-case hex, so a key has
+	// one spelling (CheckSignature refuses the others too; this says why).
+	if ok, msg := validation.CheckEventEncoding(evt); !ok {
+		log.Event().Info("EVENT rejected: bad encoding", "event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
+		response.SendOK(client, evt.ID, false, msg)
+		return
+	}
+
 	// Signature check
 	if !validation.CheckSignature(evt) {
 		log.Event().Error("Signature verification failed", "event_id", evt.ID)
@@ -182,6 +190,25 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		gate = func(ctx context.Context, evt nostr.Event) (bool, string) { return scope.Admit(ctx, authed, evt) }
 	}
 
+	// A copy of an event in flight, or stored a moment ago and not yet
+	// indexed, is a duplicate the database cannot see yet (inflight.go).
+	scopePath := ""
+	if scope != nil {
+		scopePath = scope.Path
+	}
+	claimed, dupMsg, done := recentEvents.claim(recentKey(scopePath, evt.ID))
+	if !claimed {
+		log.Event().Info("Duplicate event detected (in flight or just stored)", "event_id", evt.ID)
+		response.SendOK(client, evt.ID, false, dupMsg)
+		return
+	}
+	// kept: the event is now in the database. Kinds the store accepts but
+	// does not keep (ephemeral, kind 2) release the claim like a refusal, so
+	// a resend is broadcast again, unless the kind has a per-author limit,
+	// whose budget a fan-out of copies must not spend.
+	kept := false
+	defer func() { done(kept) }()
+
 	// Duplicate check, then the admission gate (admitNew says why in that order).
 	if ok, msg, notice := admitNew(gateContext(context.Background(), client), evt, db.CheckDuplicateEvent, gate); !ok {
 		response.SendOK(client, evt.ID, false, msg)
@@ -191,12 +218,37 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	// Per-author limits (rate_limit.pubkey_kind_limits), across connections.
+	// Here, not with the per-connection limits above: after the encoding and
+	// signature checks, so a forged event cannot spend another key's budget
+	// and a key has one spelling; after the in-flight claim, the duplicate
+	// check and the gate, so a copy of an event already taken, or one the
+	// gate refuses, costs nothing. When the store then refuses the event
+	// (database full, or an error such as a replayed older version of a
+	// replaceable event, "blocked:"), the token is given back (refund), so a
+	// replay of a key's old events does not use up its budget. Speakeasy
+	// events skip it: they never leave the speakeasy (no root broadcast, no
+	// TV), and each speakeasy has its own database and duplicate check.
+	allowed, limitMsg, refund := true, "", func() {}
+	if scope == nil {
+		allowed, limitMsg, refund = config.AllowPubkeyEvent(evt.PubKey, evt.Kind)
+	}
+	if !allowed {
+		log.Event().Info("Event rejected by per-author rate limit",
+			"event_id", evt.ID,
+			"kind", evt.Kind,
+			"pubkey", evt.PubKey)
+		response.SendOK(client, evt.ID, false, limitMsg)
+		return
+	}
+
 	// Reject new writes before the map fills. A full LMDB map makes nostrdb's
 	// writer thread fail silently (MDB_MAP_FULL) while the event is still
 	// acked OK — the RC's silent data loss. Deletes (kind 5) are allowed
 	// through: they reduce data and are the way back under the ceiling.
 	if evt.Kind != 5 {
 		if frac := db.MapUsageFraction(); frac >= nostrdb.MapUsageRejectFraction {
+			refund()
 			log.Event().Error("Rejecting event: database near capacity",
 				"event_id", evt.ID, "used_pct", int(frac*100))
 			response.SendOK(client, evt.ID, false, "error: relay storage unavailable")
@@ -214,6 +266,7 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 	}
 
 	if storeErr != nil {
+		refund()
 		// Storage layer returns errors prefixed with NIP-01 OK reasons
 		// (`blocked:`, `duplicate:`, `invalid:`) for normal client-facing
 		// rejections. Pass those through verbatim and log at INFO — the
@@ -237,6 +290,7 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	kept = storesKind(evt.Kind) || config.PubkeyKindLimited(evt.Kind)
 	response.SendOK(client, evt.ID, true, "")
 	log.Event().Info("Event stored successfully",
 		"event_id", evt.ID,
@@ -342,4 +396,10 @@ func admitNew(ctx context.Context, evt nostr.Event, isDuplicate func(nostr.Event
 		}
 	}
 	return true, "", ""
+}
+
+// storesKind reports whether StoreEvent keeps an event of this kind
+// (server/db/nostrdb/store.go drops kind 2 and ephemeral kinds).
+func storesKind(kind int) bool {
+	return kind != 2 && !(kind >= 20000 && kind < 30000)
 }
