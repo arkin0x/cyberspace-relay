@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cfgType "github.com/0ceanslim/grain/config/types"
@@ -25,13 +26,18 @@ import (
 // the cap the least recently used bucket goes, which can only hand that
 // author a fresh burst early. The cap is far above honest use (an author
 // keeps a bucket only until it refills, 30 minutes at 12 an hour with a burst
-// of 6); an attacker with that many keys is past what a per-key limit can
-// stop anyway, and is bounded by the per-connection and per-IP limits.
+// of 6). This limits what one key can do; new keys are free, so many keys
+// are past what a per-key limit can stop, and are left to the
+// per-connection and per-IP limits.
 
 // maxPubkeyKindBuckets caps the table. Each bucket costs about 250 bytes
 // (the pubkey, the bucket, its list element and map slot), so the cap is
 // about 12 MB.
 const maxPubkeyKindBuckets = 50000
+
+// maxWaitSeconds caps the wait a refusal names (a year), far below where
+// seconds overflow a time.Duration.
+const maxWaitSeconds = 365 * 24 * 3600
 
 // idleSweepPerCall bounds how many refilled buckets one call may drop from
 // the cold end of the table. More than one, so idle buckets drain faster
@@ -56,8 +62,10 @@ type pubkeyKindBucket struct {
 	last   time.Time
 }
 
-// pubkeyKindLimiter is safe for concurrent use; one mutex guards it all.
+// pubkeyKindLimiter is safe for concurrent use; one mutex guards it all,
+// except active, which lets an event skip the lock when there are no rules.
 type pubkeyKindLimiter struct {
+	active  atomic.Bool
 	mu      sync.Mutex
 	rules   map[int]pubkeyKindRule
 	buckets map[pubkeyKindKey]*list.Element // Value is *pubkeyKindBucket
@@ -89,7 +97,7 @@ var pubkeyLimiter = newPubkeyKindLimiter(maxPubkeyKindBuckets, time.Now)
 func (l *pubkeyKindLimiter) configure(limits []cfgType.PubkeyKindLimitConfig) {
 	rules := make(map[int]pubkeyKindRule, len(limits))
 	for _, c := range limits {
-		if c.PerHour <= 0 || c.Burst < 1 {
+		if !(c.PerHour >= minPubkeyPerHour) || c.Burst < 1 {
 			continue
 		}
 		rules[c.Kind] = pubkeyKindRule{
@@ -119,6 +127,7 @@ func (l *pubkeyKindLimiter) configure(limits []cfgType.PubkeyKindLimitConfig) {
 		}
 	}
 	l.rules = rules
+	l.active.Store(len(rules) > 0)
 }
 
 // remove drops one bucket. Caller holds l.mu.
@@ -158,8 +167,11 @@ func (l *pubkeyKindLimiter) sweepIdle(now time.Time) {
 // allow takes one event from the author's bucket for this kind. It returns
 // true for a kind with no rule. When it refuses, msg is a NIP-01 OK message
 // ("rate-limited: ..."). When it allows, refund puts the event back: call it
-// if the event is then not stored, so only stored events count.
+// if the relay then refuses the event.
 func (l *pubkeyKindLimiter) allow(pubkey string, kind int) (ok bool, msg string, refund func()) {
+	if !l.active.Load() {
+		return true, "", func() {}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	r, limited := l.rules[kind]
@@ -185,7 +197,9 @@ func (l *pubkeyKindLimiter) allow(pubkey string, kind int) (ok bool, msg string,
 	}
 
 	if b.tokens < 1 {
-		wait := time.Duration(math.Ceil((1-b.tokens)/r.perSecond)) * time.Second
+		// Capped before the conversion, so a tiny per_hour cannot overflow it.
+		secs := math.Min(math.Ceil((1-b.tokens)/r.perSecond), maxWaitSeconds)
+		wait := time.Duration(secs) * time.Second
 		return false, pubkeyLimitMessage(kind, r, wait), nil
 	}
 	b.tokens--
@@ -265,4 +279,5 @@ func ResetPubkeyLimiterForTest() {
 	l.rules = map[int]pubkeyKindRule{}
 	l.buckets = map[pubkeyKindKey]*list.Element{}
 	l.lru.Init()
+	l.active.Store(false)
 }

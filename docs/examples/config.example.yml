@@ -210,7 +210,8 @@ rate_limit:
   # Per-author limits: events of a kind each pubkey may publish, across
   # every connection and kept across reconnects (kind_limits above are per
   # connection). A token bucket: `burst` back to back, then `per_hour` an
-  # hour. Only stored events count. Default empty: no per-author limits.
+  # hour. Duplicates and events the relay refuses cost nothing. Default
+  # empty: no per-author limits.
   #
   # pubkey_kind_limits:
   #   - kind: 0       # Profile metadata

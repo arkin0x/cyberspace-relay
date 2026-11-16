@@ -256,7 +256,9 @@
     {{else}}
     <p class="text-sm text-text-secondary">None.</p>
     {{end}}
-    <input type="hidden" name="pubkey_kind_limits" data-shape="json" value="{{.PubkeyKindLimits | rateLimitJSON}}" />
+    <!-- No form field on purpose: a save without pubkey_kind_limits keeps
+         the list on disk (UpdateRateLimitConfig), so a page left open
+         cannot write back a list someone has since edited by hand. -->
   </fieldset>
 </form>
 

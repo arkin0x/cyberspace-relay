@@ -482,10 +482,11 @@ func TestOnosendaiDMInboxConfig(t *testing.T) {
 	}
 }
 
-// Avatars (owner, 2026-11-16): with the proof-of-work floor down from 16 to
-// 10 bits, the per-author limit on 11333 is their spam guard. It must be
-// there, leave room for a person trying a few shapes in a row and an agent
-// setting one now and then, and still stop one key from churning avatars.
+// Avatars (owner, 2026-11-16): avatars no longer carry proof of work, so the
+// per-author limit on 11333 is what stops one key from replacing its avatar
+// over and over. It must be there, leave room for a person trying a few
+// shapes in a row and an agent setting one now and then, and still stop one
+// key from churning avatars.
 func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 	cfg := onosendaiConfig(t)
 	var avatar *cfgType.PubkeyKindLimitConfig
@@ -504,7 +505,7 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 		t.Errorf("avatar per_hour %v: under one every 15 minutes is too tight for honest use", avatar.PerHour)
 	}
 	if avatar.PerHour > 60 || avatar.Burst > 20 {
-		t.Errorf("avatar per_hour %v burst %d: too loose to be a spam guard", avatar.PerHour, avatar.Burst)
+		t.Errorf("avatar per_hour %v burst %d: too loose to stop one key churning avatars", avatar.PerHour, avatar.Burst)
 	}
 	if avatar.Label == "" {
 		t.Error("the avatar limit has no label: its refusal would say \"kind 11333 events\"")

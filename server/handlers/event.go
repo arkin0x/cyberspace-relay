@@ -124,6 +124,14 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	// NIP-01 encoding: id, pubkey and sig in lower-case hex, so a key has
+	// one spelling (CheckSignature refuses the others too; this says why).
+	if ok, msg := validation.CheckEventEncoding(evt); !ok {
+		log.Event().Info("EVENT rejected: bad encoding", "event_id", evt.ID, "pubkey", evt.PubKey, "reason", msg)
+		response.SendOK(client, evt.ID, false, msg)
+		return
+	}
+
 	// Signature check
 	if !validation.CheckSignature(evt) {
 		log.Event().Error("Signature verification failed", "event_id", evt.ID)
@@ -182,6 +190,21 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		gate = func(ctx context.Context, evt nostr.Event) (bool, string) { return scope.Admit(ctx, authed, evt) }
 	}
 
+	// A copy of an event in flight, or stored a moment ago and not yet
+	// indexed, is a duplicate the database cannot see yet (inflight.go).
+	scopePath := ""
+	if scope != nil {
+		scopePath = scope.Path
+	}
+	claimed, dupMsg, done := recentEvents.claim(recentKey(scopePath, evt.ID))
+	if !claimed {
+		log.Event().Info("Duplicate event detected (in flight or just stored)", "event_id", evt.ID)
+		response.SendOK(client, evt.ID, false, dupMsg)
+		return
+	}
+	stored := false
+	defer func() { done(stored) }()
+
 	// Duplicate check, then the admission gate (admitNew says why in that order).
 	if ok, msg, notice := admitNew(gateContext(context.Background(), client), evt, db.CheckDuplicateEvent, gate); !ok {
 		response.SendOK(client, evt.ID, false, msg)
@@ -192,14 +215,20 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 	}
 
 	// Per-author limits (rate_limit.pubkey_kind_limits), across connections.
-	// Here, not with the per-connection limits above: after the signature
-	// check, so a forged event cannot spend another key's budget; after the
-	// duplicate check and the gate, so re-sending a stored event or one the
-	// gate refuses costs nothing. Anything below that keeps the event out of
-	// the store gives the event back (refund), so only stored events count:
-	// a replayed old version of a replaceable event, refused as older than
-	// the stored one, does not use up its author's budget.
-	allowed, limitMsg, refund := config.AllowPubkeyEvent(evt.PubKey, evt.Kind)
+	// Here, not with the per-connection limits above: after the encoding and
+	// signature checks, so a forged event cannot spend another key's budget
+	// and a key has one spelling; after the in-flight claim, the duplicate
+	// check and the gate, so a copy of an event already taken, or one the
+	// gate refuses, costs nothing. When the store then refuses the event
+	// (database full, or an error such as a replayed older version of a
+	// replaceable event, "blocked:"), the token is given back (refund), so a
+	// replay of a key's old events does not use up its budget. Speakeasy
+	// events skip it: they never leave the speakeasy (no root broadcast, no
+	// TV), and each speakeasy has its own database and duplicate check.
+	allowed, limitMsg, refund := true, "", func() {}
+	if scope == nil {
+		allowed, limitMsg, refund = config.AllowPubkeyEvent(evt.PubKey, evt.Kind)
+	}
 	if !allowed {
 		log.Event().Info("Event rejected by per-author rate limit",
 			"event_id", evt.ID,
@@ -257,6 +286,7 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	stored = true
 	response.SendOK(client, evt.ID, true, "")
 	log.Event().Info("Event stored successfully",
 		"event_id", evt.ID,

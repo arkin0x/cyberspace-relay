@@ -64,7 +64,9 @@ func TestPubkeyLimiterRefillsAtPerHour(t *testing.T) {
 	} else if !strings.HasSuffix(msg, "try again in 1 second") {
 		t.Fatalf("refusal at 4m59s: %q", msg)
 	}
-	clk.advance(time.Second)
+	// A millisecond past the 5 minutes, so the test does not hang on how
+	// 300 x 12/3600 rounds.
+	clk.advance(time.Second + time.Millisecond)
 	if ok, _, _ := l.allow("alice", 11333); !ok {
 		t.Fatal("refused after 5 minutes")
 	}
@@ -245,6 +247,42 @@ func TestPubkeyLimiterConcurrent(t *testing.T) {
 	}
 }
 
+// The smallest per_hour validation allows names a wait in hours, and the
+// cap keeps any rule from overflowing the conversion to a time.Duration.
+func TestPubkeyLimiterWaitNeverOverflows(t *testing.T) {
+	for _, perHour := range []float64{minPubkeyPerHour, 1e-9} {
+		l, _ := testLimiter(10)
+		// configure skips a rule under the minimum; install it directly to
+		// test the cap itself.
+		l.rules[1] = pubkeyKindRule{perHour: perHour, perSecond: perHour / 3600, burst: 1}
+		l.active.Store(true)
+		take(l, "alice", 1, 1)
+		ok, msg, _ := l.allow("alice", 1)
+		if ok || !strings.HasSuffix(msg, " hours") {
+			t.Errorf("per_hour %v: got %v %q, want a wait in hours", perHour, ok, msg)
+		}
+	}
+}
+
+// With no rules, an event takes no lock and leaves no trace.
+func TestPubkeyLimiterNoRulesFastPath(t *testing.T) {
+	l, _ := testLimiter(10)
+	if l.active.Load() {
+		t.Fatal("active with no rules")
+	}
+	if got := take(l, "alice", 11333, 100); got != 100 || l.lru.Len() != 0 {
+		t.Fatalf("no rules: %d of 100 allowed, %d buckets", got, l.lru.Len())
+	}
+	l.configure([]cfgType.PubkeyKindLimitConfig{avatarLimit})
+	if !l.active.Load() {
+		t.Fatal("not active with a rule")
+	}
+	l.configure(nil)
+	if l.active.Load() {
+		t.Fatal("still active after the rules were removed")
+	}
+}
+
 func TestHumanWait(t *testing.T) {
 	for d, want := range map[time.Duration]string{
 		0:                       "1 second",
@@ -334,6 +372,7 @@ func TestPubkeyKindLimitsValidation(t *testing.T) {
 		"burst 0":           {{Kind: 11333, PerHour: 12, Burst: 0}},
 		"kind negative":     {{Kind: -1, PerHour: 12, Burst: 6}},
 		"kind too big":      {{Kind: 70000, PerHour: 12, Burst: 6}},
+		"per_hour tiny":     {{Kind: 11333, PerHour: 0.0001, Burst: 6}},
 		"kind twice":        {avatarLimit, avatarLimit},
 	} {
 		if err := validatePubkeyKindLimits(limits); err == nil {
@@ -405,6 +444,14 @@ func TestUpdateRateLimitConfigKeepsPubkeyKindLimits(t *testing.T) {
 // SetRateLimit, which every server instance start (and so every config
 // reload) calls, installs the list in the process-wide table.
 func TestSetRateLimitConfiguresPubkeyLimits(t *testing.T) {
+	rateLimitCfgMu.RLock()
+	oldRateLimitCfg := rateLimitCfg
+	rateLimitCfgMu.RUnlock()
+	t.Cleanup(func() {
+		rateLimitCfgMu.Lock()
+		rateLimitCfg = oldRateLimitCfg
+		rateLimitCfgMu.Unlock()
+	})
 	ResetPubkeyLimiterForTest()
 	t.Cleanup(ResetPubkeyLimiterForTest)
 	c := &cfgType.ServerConfig{}

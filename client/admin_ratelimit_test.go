@@ -1,7 +1,6 @@
 package client
 
 import (
-	"html"
 	"html/template"
 	"os"
 	"strings"
@@ -11,9 +10,10 @@ import (
 )
 
 // The rate-limit section has no editor for pubkey_kind_limits: it shows the
-// list and carries it, as JSON in a hidden input, so a save of the section
-// sends it back unchanged (the server also keeps it when the blob lacks it).
-func TestAdminRateLimitSectionCarriesPubkeyKindLimits(t *testing.T) {
+// list and sends no field for it, so a save keeps what is on disk
+// (UpdateRateLimitConfig keeps the list when the blob lacks it). A field
+// filled at page load would write a stale list back over a hand edit.
+func TestAdminRateLimitSectionShowsPubkeyKindLimits(t *testing.T) {
 	prevFS := wwwFS
 	t.Cleanup(func() { wwwFS = prevFS })
 	SetEmbeddedWWW(os.DirFS(".."))
@@ -35,13 +35,10 @@ func TestAdminRateLimitSectionCarriesPubkeyKindLimits(t *testing.T) {
 	if !strings.Contains(out, "kind 11333 (avatars): 12 an hour, burst 6") {
 		t.Errorf("the list is not shown:\n%s", out)
 	}
-	want := `name="pubkey_kind_limits" data-shape="json" value="` + html.EscapeString(`[{"kind":11333,"per_hour":12,"burst":6,"label":"avatars"}]`) + `"`
-	if !strings.Contains(out, want) {
-		t.Errorf("the hidden input does not carry the list; want %s", want)
+	if strings.Contains(out, `name="pubkey_kind_limits"`) {
+		t.Error("the section sends a pubkey_kind_limits field; a page left open would write a stale list back")
 	}
-
-	out = render(cfgType.RateLimitConfig{})
-	if !strings.Contains(out, `name="pubkey_kind_limits" data-shape="json" value="null"`) {
-		t.Error("with no list, the hidden input must send null (the server then keeps what it has)")
+	if out := render(cfgType.RateLimitConfig{}); !strings.Contains(out, "None.") {
+		t.Error("with no list, the section should say None.")
 	}
 }

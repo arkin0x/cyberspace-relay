@@ -11,8 +11,18 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
-// CheckSignature verifies the event's signature and ID
+// CheckSignature verifies the event's signature and ID. It refuses an id,
+// pubkey or sig that is not lower-case hex of its length (CheckEventEncoding),
+// so a pubkey has one spelling for every caller.
 func CheckSignature(evt nostr.Event) bool {
+	if ok, msg := CheckEventEncoding(evt); !ok {
+		log.Validation().Info("Event encoding refused",
+			"event_id", evt.ID,
+			"pubkey", evt.PubKey,
+			"reason", msg)
+		return false
+	}
+
 	// Serialize event correctly
 	serializedEvent := core.SerializeEvent(evt)
 	if serializedEvent == "" {

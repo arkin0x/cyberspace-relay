@@ -8,7 +8,7 @@ package config
 // or opens a second socket, starts those over.
 type PubkeyKindLimitConfig struct {
 	Kind int `yaml:"kind" json:"kind"`
-	// PerHour is the sustained rate, in events an hour. Must be > 0.
+	// PerHour is the sustained rate, in events an hour. At least 0.001.
 	PerHour float64 `yaml:"per_hour" json:"per_hour"`
 	// Burst is how many events an author may publish back to back, and
 	// the most it can save up. Must be >= 1.
