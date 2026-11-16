@@ -481,3 +481,54 @@ func TestOnosendaiDMInboxConfig(t *testing.T) {
 		}
 	}
 }
+
+// Avatars (owner, 2026-11-16): with the proof-of-work floor down from 16 to
+// 10 bits, the per-author limit on 11333 is their spam guard. It must be
+// there, leave room for a person trying a few shapes in a row and an agent
+// setting one now and then, and still stop one key from churning avatars.
+func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
+	cfg := onosendaiConfig(t)
+	var avatar *cfgType.PubkeyKindLimitConfig
+	for i, l := range cfg.RateLimit.PubkeyKindLimits {
+		if l.Kind == 11333 {
+			avatar = &cfg.RateLimit.PubkeyKindLimits[i]
+		}
+	}
+	if avatar == nil {
+		t.Fatal("rate_limit.pubkey_kind_limits has no entry for avatars (11333)")
+	}
+	if avatar.Burst < 3 {
+		t.Errorf("avatar burst %d: a person trying shapes in the workshop needs a few in a row", avatar.Burst)
+	}
+	if avatar.PerHour < 4 {
+		t.Errorf("avatar per_hour %v: under one every 15 minutes is too tight for honest use", avatar.PerHour)
+	}
+	if avatar.PerHour > 60 || avatar.Burst > 20 {
+		t.Errorf("avatar per_hour %v burst %d: too loose to be a spam guard", avatar.PerHour, avatar.Burst)
+	}
+	if avatar.Label == "" {
+		t.Error("the avatar limit has no label: its refusal would say \"kind 11333 events\"")
+	}
+
+	// The limit as the relay builds it: the burst passes, the next is refused
+	// with a message a person reads, another key is untouched.
+	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	l := newPubkeyKindLimiter(maxPubkeyKindBuckets, clk.now)
+	l.configure(cfg.RateLimit.PubkeyKindLimits)
+	if got := take(l, "alice", 11333, avatar.Burst); got != avatar.Burst {
+		t.Fatalf("%d of the burst of %d allowed", got, avatar.Burst)
+	}
+	ok, msg, _ := l.allow("alice", 11333)
+	if ok || !strings.HasPrefix(msg, "rate-limited: at most ") || !strings.Contains(msg, " avatars an hour per key") {
+		t.Fatalf("after the burst: %v %q", ok, msg)
+	}
+	if ok, _, _ := l.allow("bob", 11333); !ok {
+		t.Fatal("alice's spent budget refused bob")
+	}
+	// Other kinds are not limited per author: movement chains, bags, objects.
+	for _, kind := range []int{3333, 33330, 33331, 0, 7} {
+		if got := take(l, "alice", kind, 200); got != 200 {
+			t.Errorf("kind %d is limited per author (%d of 200)", kind, got)
+		}
+	}
+}

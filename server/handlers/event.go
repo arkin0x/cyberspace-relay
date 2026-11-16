@@ -191,12 +191,31 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 		return
 	}
 
+	// Per-author limits (rate_limit.pubkey_kind_limits), across connections.
+	// Here, not with the per-connection limits above: after the signature
+	// check, so a forged event cannot spend another key's budget; after the
+	// duplicate check and the gate, so re-sending a stored event or one the
+	// gate refuses costs nothing. Anything below that keeps the event out of
+	// the store gives the event back (refund), so only stored events count:
+	// a replayed old version of a replaceable event, refused as older than
+	// the stored one, does not use up its author's budget.
+	allowed, limitMsg, refund := config.AllowPubkeyEvent(evt.PubKey, evt.Kind)
+	if !allowed {
+		log.Event().Info("Event rejected by per-author rate limit",
+			"event_id", evt.ID,
+			"kind", evt.Kind,
+			"pubkey", evt.PubKey)
+		response.SendOK(client, evt.ID, false, limitMsg)
+		return
+	}
+
 	// Reject new writes before the map fills. A full LMDB map makes nostrdb's
 	// writer thread fail silently (MDB_MAP_FULL) while the event is still
 	// acked OK — the RC's silent data loss. Deletes (kind 5) are allowed
 	// through: they reduce data and are the way back under the ceiling.
 	if evt.Kind != 5 {
 		if frac := db.MapUsageFraction(); frac >= nostrdb.MapUsageRejectFraction {
+			refund()
 			log.Event().Error("Rejecting event: database near capacity",
 				"event_id", evt.ID, "used_pct", int(frac*100))
 			response.SendOK(client, evt.ID, false, "error: relay storage unavailable")
@@ -214,6 +233,7 @@ func HandleEvent(client nostr.ClientInterface, message []interface{}) {
 	}
 
 	if storeErr != nil {
+		refund()
 		// Storage layer returns errors prefixed with NIP-01 OK reasons
 		// (`blocked:`, `duplicate:`, `invalid:`) for normal client-facing
 		// rejections. Pass those through verbatim and log at INFO — the

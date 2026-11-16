@@ -23,12 +23,13 @@ type RateLimitConfigResponse struct {
 	KindSizeLimits   []cfgType.KindSizeLimitConfig      `json:"kind_size_limits"`
 	CategoryLimits   map[string]cfgType.KindLimitConfig `json:"category_limits"`
 	KindLimits       []cfgType.KindLimitConfig          `json:"kind_limits"`
+	PubkeyKindLimits []cfgType.PubkeyKindLimitConfig    `json:"pubkey_kind_limits"`
 }
 
 // GetRateLimitConfig handles the request to return rate limiting configuration
 //
 // @Summary      Get rate limit config
-// @Description  Returns the rate-limit settings (ws/event/req limits and bursts, kind/category overrides, max event size).
+// @Description  Returns the rate-limit settings (ws/event/req limits and bursts, kind/category overrides, per-author kind limits, max event size).
 // @Tags         relay-config
 // @Produce      json
 // @Success      200  {object}  RateLimitConfigResponse
@@ -61,6 +62,7 @@ func GetRateLimitConfig(w http.ResponseWriter, r *http.Request) {
 		KindSizeLimits:   cfg.RateLimit.KindSizeLimits,
 		CategoryLimits:   cfg.RateLimit.CategoryLimits,
 		KindLimits:       cfg.RateLimit.KindLimits,
+		PubkeyKindLimits: cfg.RateLimit.PubkeyKindLimits,
 	}
 
 	// Set response headers

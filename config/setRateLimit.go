@@ -58,6 +58,10 @@ func SetRateLimit(cfg *cfgType.ServerConfig) {
 	for category, categoryLimit := range cfg.RateLimit.CategoryLimits {
 		log.Config().Debug("Category rate limiter configured", "category", category, "limit", categoryLimit.Limit, "burst", categoryLimit.Burst)
 	}
+
+	// Per-author limits are process-wide, not per client: reconfigure the
+	// one table in place (pubkeyRateLimit.go).
+	configurePubkeyLimits(cfg.RateLimit.PubkeyKindLimits)
 }
 
 // NewClientRateLimiter creates a fresh RateLimiter from the stored config.

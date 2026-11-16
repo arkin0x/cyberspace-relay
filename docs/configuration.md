@@ -619,6 +619,21 @@ rate_limit:
 
 > **Note**:this can be used to effectively blacklist by event kind by setting the rate limit to 0
 
+### Per-Author Rate Limiting
+
+The limits above belong to a connection: a client that reconnects, or opens a second socket, starts them over. `pubkey_kind_limits` counts events of a kind per author (the event's pubkey) across every connection, kept across reconnects and across config reloads that leave that kind's numbers alone.
+
+```yaml
+rate_limit:
+  pubkey_kind_limits:
+    - kind: 11333 # The kind to limit
+      per_hour: 12 # Events an hour each author earns
+      burst: 6 # Events an author may publish back to back, and the most it can save up
+      label: avatars # Names the events in the refusal (default "kind <n> events")
+```
+
+Each author has a token bucket per listed kind. Over it, the relay answers `["OK", <id>, false, "rate-limited: at most 12 avatars an hour per key; try again in 5 minutes"]`. The check runs after the signature check (a forged event cannot spend another key's budget) and after the duplicate check, and only stored events count: an event the store then refuses, such as an older version of a replaceable event, gives its token back. `per_hour` must be above 0 and `burst` at least 1. The table is bounded (50,000 author and kind pairs; a bucket is dropped once it has refilled). The admin dashboard shows the list read only and keeps it on save; a `grain_updateratelimit` call without the field keeps it, and `[]` clears it.
+
 ### Size Limiting
 
 Control event sizes to prevent abuse and manage memory usage.

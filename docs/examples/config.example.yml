@@ -206,3 +206,14 @@ rate_limit:
   #     limit: 1
   #     burst: 3
   kind_limits: []
+
+  # Per-author limits: events of a kind each pubkey may publish, across
+  # every connection and kept across reconnects (kind_limits above are per
+  # connection). A token bucket: `burst` back to back, then `per_hour` an
+  # hour. Only stored events count. Default empty: no per-author limits.
+  #
+  # pubkey_kind_limits:
+  #   - kind: 0       # Profile metadata
+  #     per_hour: 12
+  #     burst: 6
+  #     label: profile updates   # names them in the refusal
