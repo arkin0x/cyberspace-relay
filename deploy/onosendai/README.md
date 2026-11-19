@@ -22,6 +22,7 @@ region.)
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
 | 30078 | NIP-78 app data: ONOSENDAI's private record of your own hides (`d` = `onosendai/hides/<i>`), sealed to your own key | anyone |
 | 1059 | gift wraps (NIP-59), the envelope of every NIP-17 DM; only the AUTHed recipient can read or count one | anyone |
+| 24133 | Nostr Connect (NIP-46) requests and responses between ONOSENDAI and a signer app (ephemeral, never stored) | anyone |
 | everything else | refused: `not allowed: event kind is not whitelisted` | |
 
 Refused on purpose: 1, 4 (legacy NIP-04 DMs), 9735 and 30023. NIP-17 DMs
@@ -37,6 +38,28 @@ NIP-09 deletions by the author are honored. To accept a new kind, add it to
 `whitelist.yml` here and on the droplet's volume (see "Changing the config on
 the droplet"). `config/deploy_onosendai_test.go` checks that this table,
 `whitelist.yml` and the kinds clients publish agree.
+
+24133 was added on 2026-11-19 (owner go: "allow bunker messages (kind 24133)
+on relay.onosendai.tech and deploy it"). ONOSENDAI's "sign in with a signer
+app" QR (Nostr Connect, NIP-46) lists this relay first and
+bucket.coracle.social second; the app and the signer (nsec.app, Amber) pass
+requests and responses as kind 24133 events through it. How the relay treats
+them:
+
+- Anyone may publish one, with no AUTH: signer apps do not AUTH.
+- Reads are open, also without AUTH: each side subscribes to
+  `{"kinds":[24133],"#p":[<its own key>]}`. The content is NIP-44 encrypted to
+  the other side, so only the two ends can read it. The gift wrap rules
+  (1059 only) do not touch it.
+- It is ephemeral (20000-29999): grain sends it live to the matching
+  subscriptions and never stores it, so a REQ made after it was sent does
+  not return it.
+- Size cap 96 KB (`kind_size_limits`): the largest payload NIP-44 can make is
+  87,472 bytes of base64, so every request a signer could answer fits.
+- Per-author limit (`pubkey_kind_limits`): 60 at once and 18,000 an hour per
+  key, across connections. A WALK signs about 8 hops at a time, a few a
+  second; this leaves wide room and only stops one key from flooding its
+  `#p` subscribers from many connections.
 
 30078 was added on 2026-11-15 for ONOSENDAI's hidden list sync (owner ruling,
 option A): one private record of your hides, NIP-44 sealed to your own key,

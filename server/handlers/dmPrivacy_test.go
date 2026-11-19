@@ -152,3 +152,29 @@ func TestCountPrivately(t *testing.T) {
 		t.Errorf("capped kindless count: got %d approx %v, want the cap", got, approx)
 	}
 }
+
+// Nostr Connect (24133, NIP-46) on the ONOSENDAI relay: each side subscribes
+// to its own #p without AUTH. The gift wrap rules (1059 only) must leave that
+// filter as it is, serve the event live to an unauthenticated subscriber,
+// and keep it out of the store (ephemeral).
+func TestNostrConnectIsNotProtected(t *testing.T) {
+	req := nostr.Event{Kind: 24133, Tags: [][]string{{"p", recipientPK}}}
+	if !CanServeProtectedEvent(req, "") {
+		t.Error("a Nostr Connect message must reach an unauthenticated subscriber")
+	}
+	f := nostr.Filter{Kinds: []int{24133}, Tags: map[string][]string{"p": {recipientPK}}}
+	if FilterRequestsProtectedKind(f) {
+		t.Error("a Nostr Connect REQ would be told to AUTH")
+	}
+	exact, gated := PrivateFilters([]nostr.Filter{f}, "", nil)
+	if len(gated) != 0 || len(exact) != 1 || len(exact[0].Kinds) != 1 || exact[0].Kinds[0] != 24133 ||
+		len(exact[0].Tags["p"]) != 1 || exact[0].Tags["p"][0] != recipientPK {
+		t.Fatalf("Nostr Connect filter rewritten: exact %+v gated %+v", exact, gated)
+	}
+	if !f.MatchesEvent(req) {
+		t.Fatal("the #p filter does not match the request")
+	}
+	if storesKind(24133) {
+		t.Error("kind 24133 is stored; Nostr Connect messages are ephemeral")
+	}
+}

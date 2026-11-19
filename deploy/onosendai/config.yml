@@ -213,6 +213,14 @@ rate_limit:
     # lives elsewhere) is a few KB even with many tags.
     - kind: 1059 # Gift wrap (NIP-59)
       max_size: 65536 # 64KB - a message of about 25 KB still fits
+    # Nostr Connect (NIP-46), 2026-11-19: content is one NIP-44 v2 payload.
+    # NIP-44 encrypts at most 65,535 bytes, padded to 65,536, so the longest
+    # payload is 1 + 32 + 2 + 65,536 + 32 = 65,603 bytes, 87,472 in base64
+    # (no character json.Marshal escapes). The cap lets every payload NIP-44
+    # can make through, so a sign_event request for a large event (a bag, an
+    # object) is never cut off here; NIP-44 itself refuses the rest.
+    - kind: 24133 # Nostr Connect request or response (NIP-46)
+      max_size: 98304 # 96KB - the largest NIP-44 payload (87,472 B) plus tags and the envelope
 
   # Rate limits for different event categories
   category_limits:
@@ -276,9 +284,23 @@ rate_limit:
   # (cyberspace-mcp set_avatar) setting one now and then. After the burst a
   # key gets one more every 5 minutes: at most 18 in its first hour, 12 an
   # hour after that.
-  # config/deploy_onosendai_test.go checks this entry.
+  #
+  # ONOSENDAI, 2026-11-19: Nostr Connect (24133, NIP-46). Each key is one side
+  # of one pairing: the app's throwaway client key sends requests, the
+  # signer's key sends the responses. A WALK signs its hops through the
+  # signer, about 8 requests in flight and a few a second, and the app also
+  # asks for NIP-44 encrypts and decrypts. The burst of 60 holds several WALK
+  # bursts back to back, and 18,000 an hour (5 a second) stays above a
+  # steady stream of signing. It only stops one key from flooding the
+  # subscribers on its #p from many connections at once; one connection is
+  # held to event_limit (10 a second) anyway.
+  # config/deploy_onosendai_test.go checks these entries.
   pubkey_kind_limits:
     - kind: 11333 # Cyberspace avatar (replaceable, one per pubkey)
       per_hour: 12
       burst: 6
       label: avatars
+    - kind: 24133 # Nostr Connect request or response (NIP-46, ephemeral)
+      per_hour: 18000
+      burst: 60
+      label: Nostr Connect messages

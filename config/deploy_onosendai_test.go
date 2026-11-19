@@ -81,7 +81,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// entries, 33335, added 2026-11-09; Seeds DNA and tends, 3350 and 3352,
 	// added 2026-11-10; TV upgrade announcements, 33338, added 2026-11-12;
 	// gift wraps, 1059, added 2026-11-13 for NIP-17 DMs; NIP-78 app data,
-	// 30078, added 2026-11-15 for ONOSENDAI's hidden list record).
+	// 30078, added 2026-11-15 for ONOSENDAI's hidden list record; Nostr
+	// Connect, 24133, added 2026-11-19 for ONOSENDAI's signer app login).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -108,6 +109,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		33338: "TV upgrade announcements",
 		1059:  "gift wraps (NIP-17 DMs)",
 		30078: "ONOSENDAI hidden list record (NIP-78)",
+		24133: "Nostr Connect (NIP-46)",
 	}
 	for k, what := range published {
 		if !kinds[k] {
@@ -531,5 +533,96 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 		if got := take(l, "alice", kind, 200); got != 200 {
 			t.Errorf("kind %d is limited per author (%d of 200)", kind, got)
 		}
+	}
+}
+
+// Nostr Connect (owner go, 2026-11-19): ONOSENDAI's signer app QR lists this
+// relay first, so kind 24133 must be accepted, never stored, capped so that
+// every payload NIP-44 can make fits, and limited per author loosely enough
+// that a WALK signing its hops through the signer is never refused.
+func TestOnosendaiNostrConnect(t *testing.T) {
+	if !onosendaiKinds(t)[24133] {
+		t.Fatal("whitelist.yml refuses kind 24133 (Nostr Connect)")
+	}
+	// grain stores no kind from 20000 to 29999 (server/db/nostrdb/store.go):
+	// the request goes live to subscribers and is gone.
+	if 24133 < 20000 || 24133 >= 30000 {
+		t.Fatal("24133 is not in the ephemeral range")
+	}
+
+	cfg := onosendaiConfig(t)
+	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
+	limiter.maxContentLength = cfg.RateLimit.MaxContentLength
+	cap := 0
+	for _, l := range cfg.RateLimit.KindSizeLimits {
+		limiter.AddKindSizeLimit(l.Kind, l.MaxSize)
+		if l.Kind == 24133 {
+			cap = l.MaxSize
+		}
+	}
+	if cap == 0 {
+		t.Fatal("kind 24133 has no kind_size_limits entry")
+	}
+	if cap > cfg.RateLimit.MaxEventSize {
+		t.Errorf("kind 24133 is capped at %d B, over max_event_size %d, so the cap does nothing", cap, cfg.RateLimit.MaxEventSize)
+	}
+	// The largest NIP-44 v2 payload: version, nonce, a 2-byte length and
+	// 65,536 padded bytes (NIP-44 encrypts at most 65,535), MAC; base64.
+	payload := base64.StdEncoding.EncodeToString(make([]byte, 1+32+2+65536+32))
+	if len(payload) != 87472 {
+		t.Fatalf("largest NIP-44 payload is %d base64 characters, want 87,472", len(payload))
+	}
+	size := grainEventSize(t, 24133, payload, [][]string{{"p", strings.Repeat("a", 64)}})
+	if ok, msg := limiter.AllowSize(24133, size); !ok {
+		t.Errorf("the largest NIP-44 request (%d B) is refused: %s (cap %d B)", size, msg, cap)
+	}
+	if size2 := grainEventSize(t, 24133, payload+strings.Repeat("A", cap), nil); func() bool { ok, _ := limiter.AllowSize(24133, size2); return ok }() {
+		t.Error("the 24133 cap does not bind")
+	}
+
+	var rule *cfgType.PubkeyKindLimitConfig
+	for i, l := range cfg.RateLimit.PubkeyKindLimits {
+		if l.Kind == 24133 {
+			rule = &cfg.RateLimit.PubkeyKindLimits[i]
+		}
+	}
+	if rule == nil {
+		t.Fatal("rate_limit.pubkey_kind_limits has no entry for Nostr Connect (24133)")
+	}
+	if rule.Label == "" {
+		t.Error("the Nostr Connect limit has no label: its refusal would say \"kind 24133 events\"")
+	}
+	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	l := newPubkeyKindLimiter(maxPubkeyKindBuckets, clk.now)
+	l.configure(cfg.RateLimit.PubkeyKindLimits)
+	// A WALK through a signer, from either side of the pairing: 8 requests
+	// in flight at once, then 4 a second for ten minutes, plus three more
+	// WALK bursts along the way. None may be refused.
+	sent, refused := 0, 0
+	send := func(n int) {
+		for i := 0; i < n; i++ {
+			sent++
+			if ok, _, _ := l.allow("walker", 24133); !ok {
+				refused++
+			}
+		}
+	}
+	send(8)
+	for s := 0; s < 600; s++ {
+		clk.advance(time.Second)
+		send(4)
+		if s%150 == 0 {
+			send(8)
+		}
+	}
+	if refused > 0 {
+		t.Errorf("a WALK through a signer: %d of %d Nostr Connect messages refused (per_hour %v, burst %d)", refused, sent, rule.PerHour, rule.Burst)
+	}
+	// One key flooding from many connections is stopped.
+	if got := take(l, "flooder", 24133, 10_000); got >= 10_000 {
+		t.Error("the Nostr Connect limit never refuses one key")
+	}
+	if ok, _, _ := l.allow("other", 24133); !ok {
+		t.Error("one key's spent budget refused another")
 	}
 }
