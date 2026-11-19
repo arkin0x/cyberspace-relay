@@ -54,11 +54,12 @@ them:
 - It is ephemeral (20000-29999): grain sends it live to the matching
   subscriptions and never stores it, so a REQ made after it was sent does
   not return it.
-- Size cap 96 KB (`kind_size_limits`): the largest payload NIP-44 can make is
-  87,472 bytes of base64, so the relay never refuses a request the two sides
-  could encrypt. NIP-44 itself limits what goes through a signer app: an event
-  over about 60 KB (a large bag or object), escaped inside the request, is too
-  long to encrypt, whatever the relay allows.
+- Size cap 512 KB, the relay's `max_event_size` (`kind_size_limits`). NIP-44
+  now encrypts more than 65,535 bytes, so a `sign_event` request carries the
+  whole event: a 96 KB cap refused the request to sign a large shard hidden by
+  reference (109,742 bytes, 2026-11-19). The largest bag (240,000 bytes) is a
+  349,620-byte request, padded and in base64; the largest object seen
+  (277,795 bytes) about 437,000.
 - No per-author limit, on purpose. Reads are open and the relay keeps no copy
   of an ephemeral event, so anyone could collect a key's old messages and
   replay them once the 30-second duplicate window has passed; under a
