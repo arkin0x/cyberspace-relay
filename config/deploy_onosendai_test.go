@@ -81,7 +81,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// entries, 33335, added 2026-11-09; Seeds DNA and tends, 3350 and 3352,
 	// added 2026-11-10; TV upgrade announcements, 33338, added 2026-11-12;
 	// gift wraps, 1059, added 2026-11-13 for NIP-17 DMs; NIP-78 app data,
-	// 30078, added 2026-11-15 for ONOSENDAI's hidden list record).
+	// 30078, added 2026-11-15 for ONOSENDAI's hidden list record; Nostr
+	// Connect, 24133, added 2026-11-19 for ONOSENDAI's signer app login).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -108,6 +109,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		33338: "TV upgrade announcements",
 		1059:  "gift wraps (NIP-17 DMs)",
 		30078: "ONOSENDAI hidden list record (NIP-78)",
+		24133: "Nostr Connect (NIP-46)",
 	}
 	for k, what := range published {
 		if !kinds[k] {
@@ -530,6 +532,56 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 	for _, kind := range []int{3333, 33330, 33331, 0, 7} {
 		if got := take(l, "alice", kind, 200); got != 200 {
 			t.Errorf("kind %d is limited per author (%d of 200)", kind, got)
+		}
+	}
+}
+
+// Nostr Connect (owner go, 2026-11-19): ONOSENDAI's signer app QR lists this
+// relay first, so kind 24133 must be accepted, capped so that every payload
+// NIP-44 can make fits, and left without a per-author limit (see below).
+func TestOnosendaiNostrConnect(t *testing.T) {
+	if !onosendaiKinds(t)[24133] {
+		t.Fatal("whitelist.yml refuses kind 24133 (Nostr Connect)")
+	}
+
+	cfg := onosendaiConfig(t)
+	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
+	limiter.maxContentLength = cfg.RateLimit.MaxContentLength
+	cap := 0
+	for _, l := range cfg.RateLimit.KindSizeLimits {
+		limiter.AddKindSizeLimit(l.Kind, l.MaxSize)
+		if l.Kind == 24133 {
+			cap = l.MaxSize
+		}
+	}
+	if cap == 0 {
+		t.Fatal("kind 24133 has no kind_size_limits entry")
+	}
+	if cap > cfg.RateLimit.MaxEventSize {
+		t.Errorf("kind 24133 is capped at %d B, over max_event_size %d, so the cap does nothing", cap, cfg.RateLimit.MaxEventSize)
+	}
+	// The largest NIP-44 v2 payload: version, nonce, a 2-byte length and
+	// 65,536 padded bytes (NIP-44 encrypts at most 65,535), MAC; base64.
+	payload := base64.StdEncoding.EncodeToString(make([]byte, 1+32+2+65536+32))
+	if len(payload) != 87472 {
+		t.Fatalf("largest NIP-44 payload is %d base64 characters, want 87,472", len(payload))
+	}
+	size := grainEventSize(t, 24133, payload, [][]string{{"p", strings.Repeat("a", 64)}})
+	if ok, msg := limiter.AllowSize(24133, size); !ok {
+		t.Errorf("the largest NIP-44 request (%d B) is refused: %s (cap %d B)", size, msg, cap)
+	}
+	over := grainEventSize(t, 24133, payload+strings.Repeat("A", cap), nil)
+	if ok, _ := limiter.AllowSize(24133, over); ok {
+		t.Error("the 24133 cap does not bind")
+	}
+
+	// No per-author limit: reads are open and an ephemeral event is never
+	// stored, so anyone can replay a key's old 24133 events once the
+	// 30-second duplicate window has passed, and under a per-author limit
+	// each replay would spend that key's budget and lock its signer out.
+	for _, l := range cfg.RateLimit.PubkeyKindLimits {
+		if l.Kind == 24133 {
+			t.Error("rate_limit.pubkey_kind_limits limits 24133: replays of a key's old Nostr Connect messages would lock its signer out")
 		}
 	}
 }

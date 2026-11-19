@@ -70,6 +70,14 @@ kind_whitelist:
     # author's own key, so every device signed in as you lists your bags.
     # Size cap in config.yml.
     - "30078"  # NIP-78 app data (ONOSENDAI hidden list record)
+    # Nostr Connect (NIP-46), owner go 2026-11-19: ONOSENDAI's "sign in with a
+    # signer app" QR lists this relay first, so a remote signer (nsec.app,
+    # Amber) and the app talk through it. Ephemeral: delivered live to
+    # subscribers on #p and never stored (grain drops 20000-29999 at the
+    # store). The content is NIP-44 encrypted to the other side, so reads stay
+    # open and no AUTH is asked of either side; signers do not AUTH. Size cap
+    # in config.yml; no per-author limit, on purpose (config.yml says why).
+    - "24133"  # Nostr Connect (NIP-46) requests and responses
 
 domain_whitelist:
   enabled: false

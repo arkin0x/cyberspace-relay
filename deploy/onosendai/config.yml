@@ -213,6 +213,16 @@ rate_limit:
     # lives elsewhere) is a few KB even with many tags.
     - kind: 1059 # Gift wrap (NIP-59)
       max_size: 65536 # 64KB - a message of about 25 KB still fits
+    # Nostr Connect (NIP-46), 2026-11-19: content is one NIP-44 v2 payload.
+    # NIP-44 encrypts at most 65,535 bytes, padded to 65,536, so the longest
+    # payload is 1 + 32 + 2 + 65,536 + 32 = 65,603 bytes, 87,472 in base64
+    # (no character json.Marshal escapes). The cap lets every payload NIP-44
+    # can make through, so this relay never refuses a request the two sides
+    # could encrypt. (An event too large for NIP-44 once escaped inside the
+    # request, a bag or an object over about 60 KB, cannot be signed through
+    # a signer app at all; that limit is NIP-44's, not this relay's.)
+    - kind: 24133 # Nostr Connect request or response (NIP-46)
+      max_size: 98304 # 96KB - the largest NIP-44 payload (87,472 B) plus tags and the envelope
 
   # Rate limits for different event categories
   category_limits:
@@ -276,7 +286,17 @@ rate_limit:
   # (cyberspace-mcp set_avatar) setting one now and then. After the burst a
   # key gets one more every 5 minutes: at most 18 in its first hour, 12 an
   # hour after that.
-  # config/deploy_onosendai_test.go checks this entry.
+  #
+  # ONOSENDAI, 2026-11-19: no entry for Nostr Connect (24133, NIP-46), on
+  # purpose. Reads of 24133 are open and the relay keeps no copy of an
+  # ephemeral event, so anyone can collect a key's old requests or responses
+  # and replay them after the 30-second duplicate window: each replay would
+  # spend that key's budget, and a few a second would lock a user's signer
+  # out of this relay. A per-key limit would not stop a flood either: a
+  # Nostr Connect client key is a throwaway by design. Floods stay bounded per
+  # connection (event_limit, 10 a second), per IP (connection_rate_limit_per_ip)
+  # and in all (max_connections).
+  # config/deploy_onosendai_test.go checks this list.
   pubkey_kind_limits:
     - kind: 11333 # Cyberspace avatar (replaceable, one per pubkey)
       per_hour: 12
