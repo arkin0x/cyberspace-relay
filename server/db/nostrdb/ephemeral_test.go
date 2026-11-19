@@ -13,9 +13,14 @@ func TestEphemeralKindsAreNotStored(t *testing.T) {
 	k := newUntilKey(t)
 	ctx := context.Background()
 
-	ephemeral := signEvent(t, k.priv, k.pub, 24133, "nip44 payload", [][]string{{"p", k.pub}}, untilT)
-	if err := db.StoreEvent(ctx, ephemeral); err != nil {
-		t.Fatalf("store 24133: %v", err)
+	// 24133, and the edges of the range.
+	var ephemeral []string
+	for _, kind := range []int{24133, 20000, 29999} {
+		e := signEvent(t, k.priv, k.pub, kind, "nip44 payload", [][]string{{"p", k.pub}}, untilT)
+		if err := db.StoreEvent(ctx, e); err != nil {
+			t.Fatalf("store %d: %v", kind, err)
+		}
+		ephemeral = append(ephemeral, e.ID)
 	}
 	// nostrdb ingests in order on one writer: once a regular event stored
 	// after it is in, the ephemeral one would be too, had it been kept.
@@ -29,12 +34,14 @@ func TestEphemeralKindsAreNotStored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin query: %v", err)
 	}
-	got, err := txn.GetNoteByID(ephemeral.ID)
-	txn.EndQuery()
-	if err != nil {
-		t.Fatalf("get by id: %v", err)
-	}
-	if got != nil {
-		t.Fatal("kind 24133 was stored; ephemeral events must never be")
+	defer txn.EndQuery()
+	for _, id := range ephemeral {
+		got, err := txn.GetNoteByID(id)
+		if err != nil {
+			t.Fatalf("get by id: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("ephemeral event %s (kind %d) was stored; ephemeral events must never be", id, got.Kind)
+		}
 	}
 }
