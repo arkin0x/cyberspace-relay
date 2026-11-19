@@ -55,11 +55,16 @@ them:
   subscriptions and never stores it, so a REQ made after it was sent does
   not return it.
 - Size cap 96 KB (`kind_size_limits`): the largest payload NIP-44 can make is
-  87,472 bytes of base64, so every request a signer could answer fits.
-- Per-author limit (`pubkey_kind_limits`): 60 at once and 18,000 an hour per
-  key, across connections. A WALK signs about 8 hops at a time, a few a
-  second; this leaves wide room and only stops one key from flooding its
-  `#p` subscribers from many connections.
+  87,472 bytes of base64, so the relay never refuses a request the two sides
+  could encrypt. NIP-44 itself limits what goes through a signer app: an event
+  over about 60 KB (a large bag or object), escaped inside the request, is too
+  long to encrypt, whatever the relay allows.
+- No per-author limit, on purpose. Reads are open and the relay keeps no copy
+  of an ephemeral event, so anyone could collect a key's old messages and
+  replay them once the 30-second duplicate window has passed; under a
+  per-author limit every replay would spend that key's budget and could lock a
+  user's signer out. A flood stays bounded per connection (`event_limit`, 10
+  a second), per IP and in all (`max_connections`).
 
 30078 was added on 2026-11-15 for ONOSENDAI's hidden list sync (owner ruling,
 option A): one private record of your hides, NIP-44 sealed to your own key,

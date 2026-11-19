@@ -217,8 +217,10 @@ rate_limit:
     # NIP-44 encrypts at most 65,535 bytes, padded to 65,536, so the longest
     # payload is 1 + 32 + 2 + 65,536 + 32 = 65,603 bytes, 87,472 in base64
     # (no character json.Marshal escapes). The cap lets every payload NIP-44
-    # can make through, so a sign_event request for a large event (a bag, an
-    # object) is never cut off here; NIP-44 itself refuses the rest.
+    # can make through, so this relay never refuses a request the two sides
+    # could encrypt. (An event too large for NIP-44 once escaped inside the
+    # request, a bag or an object over about 60 KB, cannot be signed through
+    # a signer app at all; that limit is NIP-44's, not this relay's.)
     - kind: 24133 # Nostr Connect request or response (NIP-46)
       max_size: 98304 # 96KB - the largest NIP-44 payload (87,472 B) plus tags and the envelope
 
@@ -285,22 +287,18 @@ rate_limit:
   # key gets one more every 5 minutes: at most 18 in its first hour, 12 an
   # hour after that.
   #
-  # ONOSENDAI, 2026-11-19: Nostr Connect (24133, NIP-46). Each key is one side
-  # of one pairing: the app's throwaway client key sends requests, the
-  # signer's key sends the responses. A WALK signs its hops through the
-  # signer, about 8 requests in flight and a few a second, and the app also
-  # asks for NIP-44 encrypts and decrypts. The burst of 60 holds several WALK
-  # bursts back to back, and 18,000 an hour (5 a second) stays above a
-  # steady stream of signing. It only stops one key from flooding the
-  # subscribers on its #p from many connections at once; one connection is
-  # held to event_limit (10 a second) anyway.
-  # config/deploy_onosendai_test.go checks these entries.
+  # ONOSENDAI, 2026-11-19: no entry for Nostr Connect (24133, NIP-46), on
+  # purpose. Reads of 24133 are open and the relay keeps no copy of an
+  # ephemeral event, so anyone can collect a key's old requests or responses
+  # and replay them after the 30-second duplicate window: each replay would
+  # spend that key's budget, and a few a second would lock a user's signer
+  # out of this relay. A per-key limit would not stop a flood either: a
+  # Nostr Connect client key is a throwaway by design. Floods stay bounded per
+  # connection (event_limit, 10 a second), per IP (connection_rate_limit_per_ip)
+  # and in all (max_connections).
+  # config/deploy_onosendai_test.go checks this list.
   pubkey_kind_limits:
     - kind: 11333 # Cyberspace avatar (replaceable, one per pubkey)
       per_hour: 12
       burst: 6
       label: avatars
-    - kind: 24133 # Nostr Connect request or response (NIP-46, ephemeral)
-      per_hour: 18000
-      burst: 60
-      label: Nostr Connect messages

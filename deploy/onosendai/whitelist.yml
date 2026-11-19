@@ -76,7 +76,7 @@ kind_whitelist:
     # subscribers on #p and never stored (grain drops 20000-29999 at the
     # store). The content is NIP-44 encrypted to the other side, so reads stay
     # open and no AUTH is asked of either side; signers do not AUTH. Size cap
-    # and a per-author rate limit in config.yml.
+    # in config.yml; no per-author limit, on purpose (config.yml says why).
     - "24133"  # Nostr Connect (NIP-46) requests and responses
 
 domain_whitelist:

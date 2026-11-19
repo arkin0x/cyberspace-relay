@@ -156,7 +156,8 @@ func TestCountPrivately(t *testing.T) {
 // Nostr Connect (24133, NIP-46) on the ONOSENDAI relay: each side subscribes
 // to its own #p without AUTH. The gift wrap rules (1059 only) must leave that
 // filter as it is, serve the event live to an unauthenticated subscriber,
-// and keep it out of the store (ephemeral).
+// and the event handler must treat it as a kind the store does not keep
+// (server/db/nostrdb ephemeral_test.go checks the store itself).
 func TestNostrConnectIsNotProtected(t *testing.T) {
 	req := nostr.Event{Kind: 24133, Tags: [][]string{{"p", recipientPK}}}
 	if !CanServeProtectedEvent(req, "") {

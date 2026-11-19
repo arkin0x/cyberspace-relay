@@ -537,17 +537,11 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 }
 
 // Nostr Connect (owner go, 2026-11-19): ONOSENDAI's signer app QR lists this
-// relay first, so kind 24133 must be accepted, never stored, capped so that
-// every payload NIP-44 can make fits, and limited per author loosely enough
-// that a WALK signing its hops through the signer is never refused.
+// relay first, so kind 24133 must be accepted, capped so that every payload
+// NIP-44 can make fits, and left without a per-author limit (see below).
 func TestOnosendaiNostrConnect(t *testing.T) {
 	if !onosendaiKinds(t)[24133] {
 		t.Fatal("whitelist.yml refuses kind 24133 (Nostr Connect)")
-	}
-	// grain stores no kind from 20000 to 29999 (server/db/nostrdb/store.go):
-	// the request goes live to subscribers and is gone.
-	if 24133 < 20000 || 24133 >= 30000 {
-		t.Fatal("24133 is not in the ephemeral range")
 	}
 
 	cfg := onosendaiConfig(t)
@@ -576,53 +570,18 @@ func TestOnosendaiNostrConnect(t *testing.T) {
 	if ok, msg := limiter.AllowSize(24133, size); !ok {
 		t.Errorf("the largest NIP-44 request (%d B) is refused: %s (cap %d B)", size, msg, cap)
 	}
-	if size2 := grainEventSize(t, 24133, payload+strings.Repeat("A", cap), nil); func() bool { ok, _ := limiter.AllowSize(24133, size2); return ok }() {
+	over := grainEventSize(t, 24133, payload+strings.Repeat("A", cap), nil)
+	if ok, _ := limiter.AllowSize(24133, over); ok {
 		t.Error("the 24133 cap does not bind")
 	}
 
-	var rule *cfgType.PubkeyKindLimitConfig
-	for i, l := range cfg.RateLimit.PubkeyKindLimits {
+	// No per-author limit: reads are open and an ephemeral event is never
+	// stored, so anyone can replay a key's old 24133 events once the
+	// 30-second duplicate window has passed, and under a per-author limit
+	// each replay would spend that key's budget and lock its signer out.
+	for _, l := range cfg.RateLimit.PubkeyKindLimits {
 		if l.Kind == 24133 {
-			rule = &cfg.RateLimit.PubkeyKindLimits[i]
+			t.Error("rate_limit.pubkey_kind_limits limits 24133: replays of a key's old Nostr Connect messages would lock its signer out")
 		}
-	}
-	if rule == nil {
-		t.Fatal("rate_limit.pubkey_kind_limits has no entry for Nostr Connect (24133)")
-	}
-	if rule.Label == "" {
-		t.Error("the Nostr Connect limit has no label: its refusal would say \"kind 24133 events\"")
-	}
-	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
-	l := newPubkeyKindLimiter(maxPubkeyKindBuckets, clk.now)
-	l.configure(cfg.RateLimit.PubkeyKindLimits)
-	// A WALK through a signer, from either side of the pairing: 8 requests
-	// in flight at once, then 4 a second for ten minutes, plus three more
-	// WALK bursts along the way. None may be refused.
-	sent, refused := 0, 0
-	send := func(n int) {
-		for i := 0; i < n; i++ {
-			sent++
-			if ok, _, _ := l.allow("walker", 24133); !ok {
-				refused++
-			}
-		}
-	}
-	send(8)
-	for s := 0; s < 600; s++ {
-		clk.advance(time.Second)
-		send(4)
-		if s%150 == 0 {
-			send(8)
-		}
-	}
-	if refused > 0 {
-		t.Errorf("a WALK through a signer: %d of %d Nostr Connect messages refused (per_hour %v, burst %d)", refused, sent, rule.PerHour, rule.Burst)
-	}
-	// One key flooding from many connections is stopped.
-	if got := take(l, "flooder", 24133, 10_000); got >= 10_000 {
-		t.Error("the Nostr Connect limit never refuses one key")
-	}
-	if ok, _, _ := l.allow("other", 24133); !ok {
-		t.Error("one key's spent budget refused another")
 	}
 }
