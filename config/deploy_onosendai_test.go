@@ -536,9 +536,27 @@ func TestOnosendaiAvatarPerAuthorLimit(t *testing.T) {
 	}
 }
 
+// nip44PaddedLen is NIP-44 v2's calc_padded_len: 32 up to 32 bytes, then
+// chunks of an eighth of the next power of two (32 up to 256).
+func nip44PaddedLen(n int) int {
+	if n <= 32 {
+		return 32
+	}
+	next := 1
+	for next < n {
+		next <<= 1
+	}
+	chunk := 32
+	if next > 256 {
+		chunk = next / 8
+	}
+	return chunk * ((n-1)/chunk + 1)
+}
+
 // Nostr Connect (owner go, 2026-11-19): ONOSENDAI's signer app QR lists this
-// relay first, so kind 24133 must be accepted, capped so that every payload
-// NIP-44 can make fits, and left without a per-author limit (see below).
+// relay first, so kind 24133 must be accepted, capped so that a request to
+// sign the largest bag or object fits, and left without a per-author limit
+// (see below).
 func TestOnosendaiNostrConnect(t *testing.T) {
 	if !onosendaiKinds(t)[24133] {
 		t.Fatal("whitelist.yml refuses kind 24133 (Nostr Connect)")
@@ -560,19 +578,22 @@ func TestOnosendaiNostrConnect(t *testing.T) {
 	if cap > cfg.RateLimit.MaxEventSize {
 		t.Errorf("kind 24133 is capped at %d B, over max_event_size %d, so the cap does nothing", cap, cfg.RateLimit.MaxEventSize)
 	}
-	// The largest NIP-44 v2 payload: version, nonce, a 2-byte length and
-	// 65,536 padded bytes (NIP-44 encrypts at most 65,535), MAC; base64.
-	payload := base64.StdEncoding.EncodeToString(make([]byte, 1+32+2+65536+32))
-	if len(payload) != 87472 {
-		t.Fatalf("largest NIP-44 payload is %d base64 characters, want 87,472", len(payload))
+	// A sign_event request for the events ONOSENDAI signs through a signer
+	// app: the largest bag (signBag's cap, 240,000 B) and the largest object
+	// seen on the relay (277,795 B). NIP-44 v2 with its 4-byte length for
+	// more than 65,535 bytes: version, nonce, length, padded plaintext, MAC;
+	// base64. The request is the event's JSON inside the JSON-RPC, a few
+	// hundred bytes more.
+	for _, event := range []int{240000, 277795} {
+		req := event + 400
+		payload := base64.StdEncoding.EncodeToString(make([]byte, 1+32+6+nip44PaddedLen(req)+32))
+		size := grainEventSize(t, 24133, payload, [][]string{{"p", strings.Repeat("a", 64)}})
+		if ok, msg := limiter.AllowSize(24133, size); !ok {
+			t.Errorf("a request to sign a %d B event (%d B) is refused: %s (cap %d B)", event, size, msg, cap)
+		}
 	}
-	size := grainEventSize(t, 24133, payload, [][]string{{"p", strings.Repeat("a", 64)}})
-	if ok, msg := limiter.AllowSize(24133, size); !ok {
-		t.Errorf("the largest NIP-44 request (%d B) is refused: %s (cap %d B)", size, msg, cap)
-	}
-	over := grainEventSize(t, 24133, payload+strings.Repeat("A", cap), nil)
-	if ok, _ := limiter.AllowSize(24133, over); ok {
-		t.Error("the 24133 cap does not bind")
+	if got := len(base64.StdEncoding.EncodeToString(make([]byte, 1+32+6+nip44PaddedLen(240400)+32))); got != 349620 {
+		t.Errorf("request for a 240,000 B bag is %d B of base64, want 349,620 (README and config.yml say so)", got)
 	}
 
 	// No per-author limit: reads are open and an ephemeral event is never

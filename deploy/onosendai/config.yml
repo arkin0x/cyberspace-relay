@@ -214,15 +214,15 @@ rate_limit:
     - kind: 1059 # Gift wrap (NIP-59)
       max_size: 65536 # 64KB - a message of about 25 KB still fits
     # Nostr Connect (NIP-46), 2026-11-19: content is one NIP-44 v2 payload.
-    # NIP-44 encrypts at most 65,535 bytes, padded to 65,536, so the longest
-    # payload is 1 + 32 + 2 + 65,536 + 32 = 65,603 bytes, 87,472 in base64
-    # (no character json.Marshal escapes). The cap lets every payload NIP-44
-    # can make through, so this relay never refuses a request the two sides
-    # could encrypt. (An event too large for NIP-44 once escaped inside the
-    # request, a bag or an object over about 60 KB, cannot be signed through
-    # a signer app at all; that limit is NIP-44's, not this relay's.)
+    # NIP-44 now encrypts more than 65,535 bytes (a 4-byte length; nostr-tools
+    # 2.24 does), so a sign_event request carries the whole event to be
+    # signed. A 96 KB cap refused ONOSENDAI's request to sign a large shard
+    # hidden by reference (109,742 B, the owner, 2026-11-19 03:47Z). Capped at
+    # max_event_size, like every kind: the largest bag (240,000 B, ONOSENDAI's
+    # signBag cap) is a 349,620 B request and the largest object seen
+    # (277,795 B) about 437,000 B, padded and in base64.
     - kind: 24133 # Nostr Connect request or response (NIP-46)
-      max_size: 98304 # 96KB - the largest NIP-44 payload (87,472 B) plus tags and the envelope
+      max_size: 524288 # 512KB - max_event_size: a request to sign any event this relay takes up to about 340 KB
 
   # Rate limits for different event categories
   category_limits:
