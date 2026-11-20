@@ -243,6 +243,44 @@
       </svg>
     </button>
 
+    <!-- Speakeasy button: the speakeasy landing page, beside the login
+         button and the same size and shape (px-3 py-2 text-sm, 1px border,
+         rounded), dark purple with lucide's "box" icon in ONOSENDAI yellow.
+         Rendered only while the relay serves that page (speakeasyLink is ""
+         otherwise), so it never leads to a 404. The page is its own document,
+         so hx-boost is off: a boosted swap would drop its styles. A link, so
+         the base link styles (underline, link colors, focus halo) are undone
+         here; focus shows a yellow ring on a purple halo, visible on light
+         and dark headers alike. On mobile the label hides like
+         the login button's and aria-label names it. -->
+    {{with speakeasyLink}}<a
+      id="speakeasy-nav"
+      href="{{.}}"
+      hx-boost="false"
+      aria-label="Speakeasy"
+      title="Speakeasy"
+      class="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white no-underline border rounded bg-[#4c1d95] border-[#4c1d95] hover:bg-[#5b21b6] hover:border-[#5b21b6] hover:text-white visited:text-white transition-colors focus-visible:[box-shadow:0_0_0_6px_#4c1d95] focus-visible:[outline:2px_solid_#ffe94a] focus-visible:[outline-offset:2px]"
+    >
+      <span class="inline-flex items-center h-5 gap-2">
+        <svg
+          class="w-4 h-4 shrink-0 text-[#ffe94a]"
+          aria-hidden="true"
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+          <path d="m3.3 7 8.7 5 8.7-5" />
+          <path d="M12 22V12" />
+        </svg>
+        <span class="hidden sm:inline">Speakeasy</span>
+      </span>
+    </a>{{end}}
+
     <!-- Login / profile button. Always present; content updated by
          navigation.js. -->
     <div id="profile-nav">{{template "login-button"}}</div>

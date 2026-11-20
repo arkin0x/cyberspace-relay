@@ -1,4 +1,4 @@
-const CACHE_NAME = "grain-v7"; // Bumped so activate purges older caches (v7: the manifest is no longer cached; it follows the relay's icon and name)
+const CACHE_NAME = "grain-v8"; // Bumped so activate purges older caches (v7: the manifest is no longer cached; it follows the relay's icon and name. v8: a non-shell page, e.g. /speakeasy, could have been stored as the shell)
 const STATIC_CACHE_URLS = [
   "/",
   "/static/js/navigation.js",
@@ -131,12 +131,15 @@ self.addEventListener("fetch", (event) => {
   // App shell (navigations to "/") is network-first: the HTML references
   // version-stamped asset URLs, so the shell itself must stay fresh
   // across releases or it keeps pointing at old ?v= URLs. Fall back to
-  // the cached shell only when offline.
+  // the cached shell only when offline. Only "/" itself refreshes the
+  // cached shell: other paths can be pages of their own (the header's
+  // Speakeasy link to /speakeasy, region dashboards), which must never
+  // become the offline app.
   if (request.mode === "navigate") {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          if (response && response.status === 200 && response.type === "basic") {
+          if (url.pathname === "/" && response && response.status === 200 && response.type === "basic") {
             const copy = response.clone();
             caches.open(CACHE_NAME).then((cache) => cache.put("/", copy));
           }

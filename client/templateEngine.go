@@ -46,6 +46,25 @@ var relayBranding func() RelayBranding
 // after relay metadata is loaded.
 func SetRelayBranding(fn func() RelayBranding) { relayBranding = fn }
 
+// speakeasyLanding, when wired by startup via SetSpeakeasyLanding, returns
+// the path of the speakeasy landing page while it is served, or "" while it
+// is not (no speakeasies.yml, disabled, or closed). Read on every render, so
+// the header's Speakeasy button follows the relay without a restart.
+var speakeasyLanding func() string
+
+// SetSpeakeasyLanding wires the speakeasy landing page's path for the
+// header's Speakeasy button. Called once at startup.
+func SetSpeakeasyLanding(fn func() string) { speakeasyLanding = fn }
+
+// speakeasyLink is the header's Speakeasy button target; "" hides the
+// button, so a relay without speakeasies never links to a 404.
+func speakeasyLink() string {
+	if speakeasyLanding == nil {
+		return ""
+	}
+	return speakeasyLanding()
+}
+
 // currentBranding is the trimmed branding for one render; zero when unwired.
 func currentBranding() RelayBranding {
 	if relayBranding == nil {
@@ -110,6 +129,8 @@ var baseTemplateFuncs = template.FuncMap{
 	"relayLogo": brandingLogo,
 	// relayLogoLight: the header logo under light themes (optional).
 	"relayLogoLight": brandingLogoLight,
+	// speakeasyLink: the header's Speakeasy button target, "" to hide it.
+	"speakeasyLink": speakeasyLink,
 }
 
 // Define the base directories for views and templates within the embedded FS

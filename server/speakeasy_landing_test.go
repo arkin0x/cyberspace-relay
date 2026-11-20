@@ -143,6 +143,45 @@ func TestLandingPage(t *testing.T) {
 	}
 }
 
+// TestSpeakeasyNavLink: the web header's Speakeasy button links to the
+// landing page exactly while speakeasyRoutes serves it, and hides (empty)
+// otherwise, so it never leads to a 404.
+func TestSpeakeasyNavLink(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	if got := speakeasyLandingLink(); got != LandingPath {
+		t.Fatalf("open: %q, want %q", got, LandingPath)
+	}
+	code, _, _ := get(t, http.MethodGet, r.root+speakeasyLandingLink(), "Accept", browser)
+	if code != 200 {
+		t.Fatalf("the link answers %d", code)
+	}
+	passed := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) })
+	rt := speakeasyState.Load()
+	defer speakeasyState.Store(rt)
+	for _, c := range []struct {
+		name  string
+		state *speakeasyRuntime
+	}{
+		{"closed (invalid speakeasies.yml)", &speakeasyRuntime{}},
+		{"disabled", &speakeasyRuntime{cfg: rt.cfg}},
+		{"no speakeasies.yml", nil},
+	} {
+		speakeasyState.Store(c.state)
+		if got := speakeasyLandingLink(); got != "" {
+			t.Errorf("%s: link %q, want none", c.name, got)
+		}
+		// And the page is not served: the request goes on to grain's
+		// own handlers, which answer 404 for /speakeasy.
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, LandingPath, nil)
+		req.Header.Set("Accept", browser)
+		speakeasyRoutes(passed).ServeHTTP(w, req)
+		if w.Code != 299 {
+			t.Errorf("%s: /speakeasy answered %d, want it passed on", c.name, w.Code)
+		}
+	}
+}
+
 // TestCheckEndpoint: the tool's question about a region and a name,
 // answered by the relay's own rules and registry.
 func TestCheckEndpoint(t *testing.T) {

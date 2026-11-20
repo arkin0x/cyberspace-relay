@@ -302,7 +302,7 @@ func speakeasyRoutes(next http.Handler) http.Handler {
 		// browser: link-preview crawlers often ask with Accept */* or none,
 		// and they must see the page's card. Matched before the name paths:
 		// "speakeasy" is a reserved name, so none can be there.
-		if p := r.URL.EscapedPath(); (p == LandingPath || p == LandingPath+"/") && rt != nil && rt.reg != nil &&
+		if p := r.URL.EscapedPath(); (p == LandingPath || p == LandingPath+"/") && rt.landingServed() &&
 			wantsLanding(r) {
 			if p != LandingPath {
 				w.Header().Add("Vary", "Accept")

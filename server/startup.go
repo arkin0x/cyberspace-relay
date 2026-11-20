@@ -369,6 +369,11 @@ func initializeSubsystems(ctx context.Context, cfg *cfgType.ServerConfig) error 
 		return client.RelayBranding{Name: m.Name, Icon: m.Icon, Logo: m.Logo, LogoLight: m.LogoLight}
 	})
 
+	// The header's Speakeasy button links to the landing page only while
+	// speakeasies are open, the same test speakeasyRoutes uses to serve it,
+	// so the button never leads to a 404.
+	client.SetSpeakeasyLanding(speakeasyLandingLink)
+
 	// First-run owner provisioning. GRAIN_OWNER_PUBKEY is the
 	// declarative path — wins over whatever the JSON says and is
 	// re-applied every startup (never written to disk). If the var
