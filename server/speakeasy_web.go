@@ -308,11 +308,16 @@ func (rt *speakeasyRuntime) createOrder(w http.ResponseWriter, r *http.Request) 
 // ever be at this path.
 const LandingPath = "/speakeasy"
 
+// landingServed reports whether speakeasyRoutes serves the landing page:
+// while speakeasies are open. The header's Speakeasy button uses the same
+// test, so the two never disagree. Safe on a nil runtime.
+func (rt *speakeasyRuntime) landingServed() bool { return rt != nil && rt.reg != nil }
+
 // speakeasyLandingLink is LandingPath while speakeasyRoutes serves the
-// landing page (speakeasies open), else "". The web header's Speakeasy
-// button links here, and hides on "".
+// landing page, else "". The web header's Speakeasy button links here, and
+// hides on "".
 func speakeasyLandingLink() string {
-	if rt := speakeasyState.Load(); rt != nil && rt.reg != nil {
+	if speakeasyState.Load().landingServed() {
 		return LandingPath
 	}
 	return ""

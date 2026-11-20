@@ -155,15 +155,30 @@ func TestSpeakeasyNavLink(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("the link answers %d", code)
 	}
+	passed := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(299) })
 	rt := speakeasyState.Load()
 	defer speakeasyState.Store(rt)
-	speakeasyState.Store(&speakeasyRuntime{}) // closed or disabled
-	if got := speakeasyLandingLink(); got != "" {
-		t.Errorf("closed: %q, want none", got)
-	}
-	speakeasyState.Store(nil) // no speakeasies.yml
-	if got := speakeasyLandingLink(); got != "" {
-		t.Errorf("no speakeasies: %q, want none", got)
+	for _, c := range []struct {
+		name  string
+		state *speakeasyRuntime
+	}{
+		{"closed (invalid speakeasies.yml)", &speakeasyRuntime{}},
+		{"disabled", &speakeasyRuntime{cfg: rt.cfg}},
+		{"no speakeasies.yml", nil},
+	} {
+		speakeasyState.Store(c.state)
+		if got := speakeasyLandingLink(); got != "" {
+			t.Errorf("%s: link %q, want none", c.name, got)
+		}
+		// And the page is not served: the request goes on to grain's
+		// own handlers, which answer 404 for /speakeasy.
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, LandingPath, nil)
+		req.Header.Set("Accept", browser)
+		speakeasyRoutes(passed).ServeHTTP(w, req)
+		if w.Code != 299 {
+			t.Errorf("%s: /speakeasy answered %d, want it passed on", c.name, w.Code)
+		}
 	}
 }
 

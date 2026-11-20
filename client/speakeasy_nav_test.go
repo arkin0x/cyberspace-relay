@@ -1,9 +1,12 @@
 package client
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
+
+var htmlComment = regexp.MustCompile(`(?s)<!--.*?-->`)
 
 // renderWithSpeakeasy renders the homepage shell with the speakeasy landing
 // link set to link ("" = speakeasies not served).
@@ -37,6 +40,7 @@ func TestSpeakeasyNavButtonShownWhenServed(t *testing.T) {
 		`bg-[#4c1d95]`,
 		`text-[#ffe94a]`,
 		`focus-visible:[outline:2px_solid_#ffe94a]`,
+		`focus-visible:[box-shadow:0_0_0_6px_#4c1d95]`,
 		`M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z`,
 		`>Speakeasy</span>`,
 	} {
@@ -44,10 +48,15 @@ func TestSpeakeasyNavButtonShownWhenServed(t *testing.T) {
 			t.Errorf("Speakeasy button lacks %q", want)
 		}
 	}
-	// Right next to the login button, inside the header nav.
-	login := strings.Index(page, `id="profile-nav"`)
-	if login < 0 || login < i || strings.Contains(page[i+end:login], "<button") {
-		t.Error("Speakeasy button is not directly before the login button")
+	// Right next to the login button: nothing but whitespace and comments
+	// between the button and the login slot.
+	login := strings.Index(page, `<div id="profile-nav">`)
+	if login < i+end {
+		t.Fatal("Speakeasy button is not before the login button")
+	}
+	between := htmlComment.ReplaceAllString(page[i+end+len("</a>"):login], "")
+	if strings.TrimSpace(between) != "" {
+		t.Errorf("something sits between the Speakeasy and login buttons: %q", between)
 	}
 }
 

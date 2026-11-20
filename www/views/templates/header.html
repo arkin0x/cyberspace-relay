@@ -250,7 +250,8 @@
          otherwise), so it never leads to a 404. The page is its own document,
          so hx-boost is off: a boosted swap would drop its styles. A link, so
          the base link styles (underline, link colors, focus halo) are undone
-         here; focus shows a yellow outline. On mobile the label hides like
+         here; focus shows a yellow ring on a purple halo, visible on light
+         and dark headers alike. On mobile the label hides like
          the login button's and aria-label names it. -->
     {{with speakeasyLink}}<a
       id="speakeasy-nav"
@@ -258,7 +259,7 @@
       hx-boost="false"
       aria-label="Speakeasy"
       title="Speakeasy"
-      class="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white no-underline border rounded bg-[#4c1d95] border-[#4c1d95] hover:bg-[#5b21b6] hover:border-[#5b21b6] hover:text-white visited:text-white transition-colors focus-visible:shadow-none focus-visible:[outline:2px_solid_#ffe94a] focus-visible:[outline-offset:2px]"
+      class="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white no-underline border rounded bg-[#4c1d95] border-[#4c1d95] hover:bg-[#5b21b6] hover:border-[#5b21b6] hover:text-white visited:text-white transition-colors focus-visible:[box-shadow:0_0_0_6px_#4c1d95] focus-visible:[outline:2px_solid_#ffe94a] focus-visible:[outline-offset:2px]"
     >
       <span class="inline-flex items-center h-5 gap-2">
         <svg
