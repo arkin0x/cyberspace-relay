@@ -143,6 +143,30 @@ func TestLandingPage(t *testing.T) {
 	}
 }
 
+// TestSpeakeasyNavLink: the web header's Speakeasy button links to the
+// landing page exactly while speakeasyRoutes serves it, and hides (empty)
+// otherwise, so it never leads to a 404.
+func TestSpeakeasyNavLink(t *testing.T) {
+	r := startRelay(t, speakeasyRegionPath, webYML)
+	if got := speakeasyLandingLink(); got != LandingPath {
+		t.Fatalf("open: %q, want %q", got, LandingPath)
+	}
+	code, _, _ := get(t, http.MethodGet, r.root+speakeasyLandingLink(), "Accept", browser)
+	if code != 200 {
+		t.Fatalf("the link answers %d", code)
+	}
+	rt := speakeasyState.Load()
+	defer speakeasyState.Store(rt)
+	speakeasyState.Store(&speakeasyRuntime{}) // closed or disabled
+	if got := speakeasyLandingLink(); got != "" {
+		t.Errorf("closed: %q, want none", got)
+	}
+	speakeasyState.Store(nil) // no speakeasies.yml
+	if got := speakeasyLandingLink(); got != "" {
+		t.Errorf("no speakeasies: %q, want none", got)
+	}
+}
+
 // TestCheckEndpoint: the tool's question about a region and a name,
 // answered by the relay's own rules and registry.
 func TestCheckEndpoint(t *testing.T) {

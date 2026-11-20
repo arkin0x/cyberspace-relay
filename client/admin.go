@@ -45,6 +45,8 @@ var adminTemplateFuncs = template.FuncMap{
 	"relayLogo": brandingLogo,
 	// relayLogoLight: the header logo under light themes (optional).
 	"relayLogoLight": brandingLogoLight,
+	// speakeasyLink: the header's Speakeasy button target, "" to hide it.
+	"speakeasyLink": speakeasyLink,
 	// toJS marshals any value to JSON and returns it as
 	// template.JS so the renderer doesn't HTML-escape the
 	// resulting literal. Safe for inline <script> use because the

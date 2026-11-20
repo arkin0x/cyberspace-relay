@@ -308,6 +308,16 @@ func (rt *speakeasyRuntime) createOrder(w http.ResponseWriter, r *http.Request) 
 // ever be at this path.
 const LandingPath = "/speakeasy"
 
+// speakeasyLandingLink is LandingPath while speakeasyRoutes serves the
+// landing page (speakeasies open), else "". The web header's Speakeasy
+// button links here, and hides on "".
+func speakeasyLandingLink() string {
+	if rt := speakeasyState.Load(); rt != nil && rt.reg != nil {
+		return LandingPath
+	}
+	return ""
+}
+
 // CheckPath answers the landing page's tool:
 //
 //	GET CheckPath?region=<input>&name=<name>
