@@ -367,7 +367,8 @@ server:
   waiting for events, and a remote signer (NIP-46) or a live reader may send
   nothing for minutes. The relay pings every connection every 30 seconds;
   every client answers on its own (RFC 6455), and a connection that answers
-  nothing for 75 seconds (two pings and 15 seconds) is gone and is closed.
+  nothing for 75 seconds (two pings and 15 seconds) is gone and is closed at
+  the next ping, 75 to 90 seconds after it went quiet.
 - Tuning: Lower for faster client detection, higher for slow connections
 
 **Write Timeout (`write_timeout`)**
