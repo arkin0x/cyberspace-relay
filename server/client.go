@@ -71,6 +71,19 @@ type Client struct {
 	// scope is the speakeasy this connection reached, or nil for the root
 	// relay. Set before the connection's first message and never changed.
 	scope *handlers.Scope
+
+	// live is the accepted connection under ws, which knows when the peer
+	// last sent a byte (a pong counts), or nil when unknown (liveconn.go).
+	live *liveConn
+	// handling is true while the reader handles a message and so reads
+	// nothing; the peer is not called silent meanwhile.
+	handling atomic.Bool
+
+	// Taken from pingInterval, pongGrace and minIdleCheckInterval when the
+	// connection opens.
+	pingEvery    time.Duration
+	silentAfter  time.Duration
+	idleCheckMin time.Duration
 }
 
 // Scope is the connection's speakeasy, or nil for the root relay
@@ -209,6 +222,11 @@ func clientHandler(ws *websocket.Conn, scope *handlers.Scope) {
 		connectedAt: time.Now(),
 
 		scope: scope,
+		live:  liveConnOf(ws.Request()),
+
+		pingEvery:    pingInterval,
+		silentAfter:  2*pingInterval + pongGrace,
+		idleCheckMin: minIdleCheckInterval,
 	}
 
 	clientsMu.Lock()
@@ -250,8 +268,8 @@ func clientHandler(ws *websocket.Conn, scope *handlers.Scope) {
 func (c *Client) monitorIdleTimeout() {
 	// Check every 1/4 of the idle timeout period
 	checkInterval := c.idleTimeout / 4
-	if checkInterval < minIdleCheckInterval {
-		checkInterval = minIdleCheckInterval
+	if checkInterval < c.idleCheckMin {
+		checkInterval = c.idleCheckMin
 	}
 
 	ticker := time.NewTicker(checkInterval)
@@ -293,10 +311,10 @@ func (c *Client) waitingForEvents() bool {
 }
 
 // pingInterval is how often the relay sends a websocket ping frame. Every
-// client answers with a pong on its own (RFC 6455), so the ping keeps NAT
-// and proxy mappings of a quiet connection warm, and a write to a peer that
-// is gone fails, which closes the connection. A ping is not activity: the
-// idle monitor ignores it.
+// client answers with a pong on its own (RFC 6455): the ping keeps NAT and
+// proxy mappings of a quiet connection warm, and a peer that answers none
+// for two intervals and pongGrace is gone and is closed (liveconn.go). A
+// ping is not activity: the idle monitor ignores it.
 var pingInterval = 30 * time.Second
 
 // pingCodec sends an empty ping frame under the connection's write lock
@@ -444,7 +462,11 @@ func (c *Client) writeLoop() {
 		log.RelayClient().Debug("Write loop exited", "client_id", c.id)
 	}()
 
-	ping := time.NewTicker(pingInterval)
+	every := c.pingEvery
+	if every <= 0 {
+		every = pingInterval
+	}
+	ping := time.NewTicker(every)
 	defer ping.Stop()
 
 	for {
@@ -452,6 +474,14 @@ func (c *Client) writeLoop() {
 		case <-c.ctx.Done():
 			return
 		case <-ping.C:
+			if c.silentTooLong() {
+				log.RelayClient().Info("Closing connection: no answer to pings",
+					"client_id", c.id,
+					"silent_sec", int(c.silentAfter.Seconds()))
+				c.markDisconnected()
+				go c.CloseClient()
+				return
+			}
 			if err := c.writePing(); err != nil {
 				go c.CloseClient()
 				return
@@ -773,6 +803,10 @@ func clientReader(client *Client) {
 		default:
 		}
 
+		// The reader is free again: the peer's silence counts from here, not
+		// while a message was being handled (a long REQ reads nothing).
+		client.markReading()
+
 		// Set read deadline if timeout is configured. A connection that
 		// holds a subscription is waiting for events, not idle: a remote
 		// signer (NIP-46) or a reader of a live chain may send nothing for
@@ -794,6 +828,7 @@ func clientReader(client *Client) {
 
 		var chunk string
 		err := websocket.Message.Receive(ws, &chunk)
+		client.handling.Store(true)
 
 		// Clear read deadline after operation
 		if client.readTimeout > 0 {

@@ -73,9 +73,11 @@ them:
   a request sent in the second or two before Amber reconnected was lost, since
   the relay keeps no copy. On 2026-11-22 ONOSENDAI's once-a-minute request
   fell on that second again and again. Now a connection that holds a
-  subscription has no read deadline and is never closed as idle; the relay
-  pings every connection every 30 s, so a peer that is gone is still found
-  and closed. A connection that holds nothing is closed as before.
+  subscription has no read deadline and is never closed as idle. The relay
+  pings every connection every 30 s and every client answers on its own; a
+  connection that answers nothing for 75 s (two pings and 15 s) is gone and is
+  closed. Behind Caddy that answer is the only way to tell: a write to Caddy
+  never fails. A connection that holds nothing is closed as before.
 
 30078 was added on 2026-11-15 for ONOSENDAI's hidden list sync (owner ruling,
 option A): one private record of your hides, NIP-44 sealed to your own key,

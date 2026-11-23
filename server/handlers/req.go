@@ -148,6 +148,7 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 			return
 		}
 		log.Req().Error("Database not available", "sub_id", subID)
+		client.DeleteSubscription(subID)
 		response.SendClosed(client, subID, "error: database not available")
 		return
 	}
@@ -200,6 +201,7 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 			log.Req().Error("Error querying events",
 				"sub_id", subID,
 				"error", err)
+			client.DeleteSubscription(subID)
 			response.SendClosed(client, subID, "error: could not query events")
 			return
 		}
@@ -214,6 +216,7 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 			log.Req().Error("Error querying events",
 				"sub_id", subID,
 				"error", err)
+			client.DeleteSubscription(subID)
 			response.SendClosed(client, subID, "error: could not query events")
 			return
 		}
@@ -231,6 +234,7 @@ func HandleReq(client nostr.ClientInterface, message []interface{}) {
 			log.Req().Error("Error executing search",
 				"sub_id", subID,
 				"error", err)
+			client.DeleteSubscription(subID)
 			response.SendClosed(client, subID, "error: could not run search")
 			return
 		}

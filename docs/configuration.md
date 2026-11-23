@@ -365,8 +365,9 @@ server:
 - Default: 60 seconds
 - A connection that holds a subscription waits without this deadline: it is
   waiting for events, and a remote signer (NIP-46) or a live reader may send
-  nothing for minutes. The relay pings every connection every 30 seconds, so a
-  peer that is gone is still found when the ping cannot be written.
+  nothing for minutes. The relay pings every connection every 30 seconds;
+  every client answers on its own (RFC 6455), and a connection that answers
+  nothing for 75 seconds (two pings and 15 seconds) is gone and is closed.
 - Tuning: Lower for faster client detection, higher for slow connections
 
 **Write Timeout (`write_timeout`)**
