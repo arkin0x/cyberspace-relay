@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -435,6 +436,9 @@ func setupHTTPServer(cfg *cfgType.ServerConfig) *http.Server {
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
 		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
+		// Each connection is a liveConn, so a websocket knows when its peer
+		// last answered a ping (liveconn.go).
+		ConnContext: withLiveConn,
 	}
 
 	go func() {
@@ -445,7 +449,16 @@ func setupHTTPServer(cfg *cfgType.ServerConfig) *http.Server {
 			"write_timeout", cfg.Server.WriteTimeout,
 			"idle_timeout", cfg.Server.IdleTimeout)
 
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		addr := server.Addr
+		if addr == "" {
+			addr = ":http"
+		}
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Startup().Error("HTTP server error", "error", err)
+			return
+		}
+		if err := server.Serve(liveListener{ln}); err != nil && err != http.ErrServerClosed {
 			log.Startup().Error("HTTP server error", "error", err)
 		}
 	}()

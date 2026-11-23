@@ -77,9 +77,9 @@ client:
 
 server:
   port: :8181
-  read_timeout: 60 # Timeout for reading a single WebSocket message from client
+  read_timeout: 60 # Closes a connection that sends nothing for this long, unless it holds a subscription (a signer waiting for 24133 requests, a reader of a live chain): those wait without a deadline (README, 24133)
   write_timeout: 20 # Timeout for writing a single WebSocket message to client
-  idle_timeout: 1200 # Connection-level timeout for inactive clients (in seconds); 0 disables.
+  idle_timeout: 1200 # Connection-level timeout for inactive clients (in seconds); 0 disables. A connection holding a subscription is never idle. The relay pings every connection every 30 s (a ping is not activity) and closes one that answers nothing for 75 s (found at the next ping, so 75 to 90 s).
   max_connections: 1000 # ONOSENDAI: was 100. Hard cap on concurrent WebSocket clients. 0 disables the gate. Without this set, the relay accepts unlimited connections — set it on every production deployment.
   max_subscriptions_per_client: 50 # ONOSENDAI: was 10; the client opens several REQs per relay (chain, bags, objects, avatars, chat, comments). Measured 2026-11-05: at most 21 open at once (/tv, logged out). At the cap a new REQ closes the OLDEST, which is a live one (chat, a spectated chain).
   implicit_req_limit: 500 # Default limit applied to REQ when no limit is specified

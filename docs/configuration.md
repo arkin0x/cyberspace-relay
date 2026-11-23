@@ -361,8 +361,14 @@ server:
 
 **Read Timeout (`read_timeout`)**
 
-- Purpose: Maximum time to wait for a message from client
+- Purpose: Maximum time to wait for a message from a client that holds no subscription
 - Default: 60 seconds
+- A connection that holds a subscription waits without this deadline: it is
+  waiting for events, and a remote signer (NIP-46) or a live reader may send
+  nothing for minutes. The relay pings every connection every 30 seconds;
+  every client answers on its own (RFC 6455), and a connection that answers
+  nothing for 75 seconds (two pings and 15 seconds) is gone and is closed at
+  the next ping, 75 to 90 seconds after it went quiet.
 - Tuning: Lower for faster client detection, higher for slow connections
 
 **Write Timeout (`write_timeout`)**
@@ -373,7 +379,8 @@ server:
 
 **Idle Timeout (`idle_timeout`)**
 
-- Purpose: Close connections with no activity
+- Purpose: Close connections with no activity (messages in or out; the relay's pings do not count)
+- A connection that holds a subscription is never idle
 - Default: 1200 seconds (20 minutes)
 - Special: Set to 0 to disable idle timeout completely
 

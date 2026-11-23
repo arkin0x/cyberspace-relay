@@ -66,6 +66,18 @@ them:
   per-author limit every replay would spend that key's budget and could lock a
   user's signer out. A flood stays bounded per connection (`event_limit`, 10
   a second), per IP and in all (`max_connections`).
+- A signer's connection stays open while it is quiet (2026-11-23). A signer
+  holds one subscription and may send nothing for minutes. Until then the
+  relay closed any connection that sent nothing for `read_timeout` (60 s):
+  98% of Amber's connections ended that way, a minute after they opened, and
+  a request sent in the second or two before Amber reconnected was lost, since
+  the relay keeps no copy. On 2026-11-22 ONOSENDAI's once-a-minute request
+  fell on that second again and again. Now a connection that holds a
+  subscription has no read deadline and is never closed as idle. The relay
+  pings every connection every 30 s and every client answers on its own; a
+  connection that answers nothing for 75 s (two pings and 15 s) is gone and is
+  closed at the next ping, 75 to 90 s after it went quiet. Behind Caddy that answer is the only way to tell: a write to Caddy
+  never fails. A connection that holds nothing is closed as before.
 
 30078 was added on 2026-11-15 for ONOSENDAI's hidden list sync (owner ruling,
 option A): one private record of your hides, NIP-44 sealed to your own key,
