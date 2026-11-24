@@ -45,6 +45,10 @@ kind_whitelist:
     # TV plays only those signed by the announcer key it pins
     # (npub1sawgaw2k750pgkpkd2tqderxxtj37h4xvhzlc9vrvzsgjftpvlesmh030p). Size cap in config.yml.
     - "33338"  # TV upgrade announcements
+    # TERRAIN (DECK-0009 §5, owner go 2026-11-24): one layer per builder key
+    # per 32^3 chunk, d = the chunk's lookup id, the plaintext sealed with the
+    # chunk's region key. Size cap in config.yml.
+    - "33339"  # TERRAIN block layers, DECK-0009, addressable, sealed
     # glyphbyte (owner, 2026-11-08: "make sure the onosendai relay accepts glyphbyte event kinds")
     - "1738"   # cairns: one URL, found by event-id prefix (glyphbyte spec/CAIRN.md)
     - "35129"  # the glyphbyte napplet (its HTML lives on Blossom; the event points to it)

@@ -82,7 +82,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// added 2026-11-10; TV upgrade announcements, 33338, added 2026-11-12;
 	// gift wraps, 1059, added 2026-11-13 for NIP-17 DMs; NIP-78 app data,
 	// 30078, added 2026-11-15 for ONOSENDAI's hidden list record; Nostr
-	// Connect, 24133, added 2026-11-19 for ONOSENDAI's signer app login).
+	// Connect, 24133, added 2026-11-19 for ONOSENDAI's signer app login;
+	// TERRAIN block layers, 33339, added 2026-11-24, DECK-0009).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -110,6 +111,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		1059:  "gift wraps (NIP-17 DMs)",
 		30078: "ONOSENDAI hidden list record (NIP-78)",
 		24133: "Nostr Connect (NIP-46)",
+		33339: "TERRAIN block layers",
 	}
 	for k, what := range published {
 		if !kinds[k] {
@@ -231,6 +233,30 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 	return len(out)
 }
 
+// nip01EventSize is the size DECK-0009 §5.6 limits: the event as compact
+// JSON with its keys in NIP-01's order, with <, > and & left as one byte each,
+// as NIP-01 leaves them. (json.Encoder still escapes control characters and
+// U+2028/U+2029, which NIP-01 does not; the inputs here hold none.)
+func nip01EventSize(t *testing.T, kind int, content string, tags [][]string) int {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(struct {
+		ID        string     `json:"id"`
+		Pubkey    string     `json:"pubkey"`
+		CreatedAt int64      `json:"created_at"`
+		Kind      int        `json:"kind"`
+		Tags      [][]string `json:"tags"`
+		Content   string     `json:"content"`
+		Sig       string     `json:"sig"`
+	}{strings.Repeat("f", 64), strings.Repeat("f", 64), 1_800_000_000, kind, tags, content, strings.Repeat("f", 128)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
+}
+
 // TestOnosendaiCapsFitAnUpperBound builds an upper bound for the Seeds DNA
 // and tend (DECK-0008 §8) and checks it against their caps: every tag the
 // DECK allows at once, even ones it
@@ -241,6 +267,15 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 // script sends: its four tags, the longest simple version, and six pages
 // joined by one blank line, 900 counted characters in all (the script sends
 // the whitespace-normalized text it counted).
+// For a TERRAIN block layer (33339), the bound is the largest layer DECK-0009
+// lets a writer sign (§5.6: 240,000 bytes serialized as NIP-01 does), with
+// every tag §5.1 allows (two reach events with long hints holding an &, 32
+// settles) and a content sentence and alt of 1,000 characters each, all of
+// them ones json.Marshal escapes; the sealed payload fills the rest. The DECK
+// does not bound content, alt or hints, so 1,000 is this profile's assumption
+// (ONOSENDAI's content is empty): past about 4,428 escaped characters in a
+// 240,000 B layer grain measures more than the cap, and no cap can cover a
+// layer made mostly of them (it would pass max_event_size too).
 func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 	cfg := onosendaiConfig(t)
 	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
@@ -306,6 +341,31 @@ func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 		{"alt", "ONOSENDAI version " + version + ": an upgrade announcement for Cyberspace TV"},
 	}
 
+	// TERRAIN block layer (DECK-0009 §5.1, §5.6).
+	layerHint := hint + "?a=1&b=2"
+	layerContent := strings.Repeat("&", 1000)
+	layerTags := [][]string{
+		{"d", hex64},
+		{"p", hex64},
+		{"e", hex64, layerHint, "reach"},
+		{"e", hex64, layerHint, "reach"},
+	}
+	for i := 0; i < 32; i++ {
+		layerTags = append(layerTags, []string{"settle", hex64})
+	}
+	layerTags = append(layerTags,
+		[]string{"encrypted", "aes-256-gcm", ""},
+		[]string{"version", "1"},
+		[]string{"alt", strings.Repeat("<", 1000)},
+	)
+	sealedAt := len(layerTags) - 3
+	// Fill the payload with whole base64 quads up to the DECK's limit.
+	room := 240_000 - nip01EventSize(t, 33339, layerContent, layerTags)
+	layerTags[sealedAt][2] = strings.Repeat("A", room/4*4)
+	if n := nip01EventSize(t, 33339, layerContent, layerTags); n > 240_000 || n < 240_000-3 {
+		t.Fatalf("the TERRAIN layer bound is %d B as NIP-01 serializes it, not the DECK's 240,000", n)
+	}
+
 	for _, c := range []struct {
 		kind    int
 		what    string
@@ -315,6 +375,7 @@ func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 		{3350, "DNA", dnaText, dnaTags},
 		{3352, "tend", placeholder, tendTags},
 		{33338, "TV upgrade announcement", words, announceTags},
+		{33339, "TERRAIN block layer", layerContent, layerTags},
 	} {
 		limit, ok := caps[c.kind]
 		if !ok {
