@@ -18,6 +18,7 @@ region.)
 | 33340, 3367 | item listings (the ITEM FEED, DECK-0004 §4), color palettes objects name by nevent (DECK-0003 §1.3b) | anyone |
 | 3350, 3352 | Seeds (DECK-0008): DNA and tends (a seed, 3351, rides inside bags and is refused alone) | anyone |
 | 33338 | Cyberspace TV upgrade announcements (ONOSENDAI): one per version; TV plays only the announcer key's | anyone |
+| 33339 | TERRAIN block layers (DECK-0009): one per builder key per chunk, replaced by `d`, sealed with the chunk's region key; at most 256 KB | anyone |
 | 1738, 35129 | glyphbyte: cairns (one URL, found by event-id prefix) and the glyphbyte napplet | anyone |
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
 | 30078 | NIP-78 app data: ONOSENDAI's private record of your own hides (`d` = `onosendai/hides/<i>`), sealed to your own key | anyone |

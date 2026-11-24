@@ -200,6 +200,15 @@ rate_limit:
     # characters of words, all of which may be ones json.Marshal escapes to six bytes.
     - kind: 33338 # TV upgrade announcement
       max_size: 8192 # 8KB - 900 characters escaped is 5,400 B, four short tags and the envelope under 1 KB
+    # TERRAIN block layers (DECK-0009 §5.6), 2026-11-24: a writer never signs
+    # a layer whose NIP-01 serialization is over 240,000 bytes, and readers
+    # drop longer ones. grain measures json.Marshal instead, where each <, >
+    # or & costs six bytes; in a layer only content, alt and relay hints can
+    # hold one (the sealed payload is base64, the rest hex and digits;
+    # ONOSENDAI's content is empty). 256 KB leaves 22,144 B for that: a
+    # 240,000 B layer with up to 4,428 such characters still fits.
+    - kind: 33339 # TERRAIN block layer
+      max_size: 262144 # 256KB - the DECK's 240,000 B limit plus room for json.Marshal escapes
     # ONOSENDAI hidden list record (NIP-78), 2026-11-15: a shard's sealed text is
     # at most 40,000 base64 characters before NIP-44 (about 54,700 after), plus
     # the wrapped record key (some 200 B), a d and a client tag. Base64 has no
