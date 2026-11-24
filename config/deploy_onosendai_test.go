@@ -234,8 +234,9 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 }
 
 // nip01EventSize is the size DECK-0009 §5.6 limits: the event as compact
-// JSON with its keys in NIP-01's order, escaping only what NIP-01 escapes
-// (so <, > and & stay one byte each).
+// JSON with its keys in NIP-01's order, with <, > and & left as one byte each,
+// as NIP-01 leaves them. (json.Encoder still escapes control characters and
+// U+2028/U+2029, which NIP-01 does not; the inputs here hold none.)
 func nip01EventSize(t *testing.T, kind int, content string, tags [][]string) int {
 	t.Helper()
 	var buf bytes.Buffer
@@ -268,9 +269,13 @@ func nip01EventSize(t *testing.T, kind int, content string, tags [][]string) int
 // the whitespace-normalized text it counted).
 // For a TERRAIN block layer (33339), the bound is the largest layer DECK-0009
 // lets a writer sign (§5.6: 240,000 bytes serialized as NIP-01 does), with
-// every tag §5.1 allows at its most (two reach events with long hints holding
-// an &, 32 settles) and a content sentence and alt of 1,000 characters each,
-// all of them ones json.Marshal escapes; the sealed payload fills the rest.
+// every tag §5.1 allows (two reach events with long hints holding an &, 32
+// settles) and a content sentence and alt of 1,000 characters each, all of
+// them ones json.Marshal escapes; the sealed payload fills the rest. The DECK
+// does not bound content, alt or hints, so 1,000 is this profile's assumption
+// (ONOSENDAI's content is empty): past about 4,428 escaped characters in a
+// 240,000 B layer grain measures more than the cap, and no cap can cover a
+// layer made mostly of them (it would pass max_event_size too).
 func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 	cfg := onosendaiConfig(t)
 	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
