@@ -43,11 +43,16 @@
     cursor: pointer; text-decoration: none; display: inline-block;
   }
   button:disabled { opacity: 0.5; cursor: default; }
+  /* `hidden` wins over the display above: the Create button (and its pay terms) go while its invoice is up. */
+  [hidden] { display: none !important; }
   button.quiet { background: transparent; color: var(--color-text-secondary, #8ea882); border: 1px solid var(--color-border, #2c3226); }
   ol, ul { margin: 0; padding-left: 1.25rem; }
   li { margin: 0.25rem 0; }
   a { color: var(--color-link, var(--color-accent, #9ad04a)); }
   .muted { color: var(--color-text-muted, #506048); }
+  /* Beside every pay button (owner, 2026-11-23): one small dim line, no checkbox. */
+  .payterms { margin: 0.4rem 0 0; font-size: 0.78rem; color: var(--color-text-muted, #506048); }
+  .payterms a { color: var(--color-text-secondary, #8ea882); text-underline-offset: 2px; }
   .err { color: var(--color-danger, #e0606a); }
   .create { margin-top: 1rem; }
   .facts { margin-bottom: 1rem; color: var(--color-text-secondary, #8ea882); }
@@ -102,11 +107,13 @@
         <li>Optional: a name for a short address (relay.onosendai.tech/your-name), {{.NamePrice}} sats more. 3 to 40 lowercase letters, digits and dashes; first paid wins; bound to this region for life. A name can only be bought now, with the speakeasy.</li>
       </ul>
       <div class="addr"><input id="create-name" type="text" autocomplete="off" spellcheck="false" maxlength="40" placeholder="name (optional)" aria-label="Name (optional)" data-price="{{.Price}}" data-named-price="{{.NamedPrice}}"><button type="button" id="create">Create speakeasy for {{.Price}} sats</button></div>
+      <p class="payterms" id="create-terms">Payments are final. <a href="https://www.onosendai.tech/terms" target="_blank" rel="noopener noreferrer">TERMS</a></p>
       <p class="err" id="create-error" role="alert"></p>
       <div id="invoice" hidden>
         <div class="qr" id="qr"></div>
         <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
         <p><a class="button" id="open-wallet" href="#">Open in wallet</a></p>
+        <p class="payterms">Payments are final. <a href="https://www.onosendai.tech/terms" target="_blank" rel="noopener noreferrer">TERMS</a></p>
         <p id="pay-status" role="status">Waiting for payment</p>
         <p class="muted mono">Order <span id="order-id"></span> · payment hash <span id="payment-hash"></span></p>
       </div>
@@ -153,6 +160,8 @@
     var status = document.getElementById("pay-status");
     var key = "speakeasy-order:" + region;
     var nameIn = document.getElementById("create-name");
+    // The create button's pay terms go and come back with the button: the invoice has its own.
+    var terms = document.getElementById("create-terms");
     nameIn.addEventListener("input", function () {
       btn.textContent = "Create speakeasy for " + (nameIn.value.trim() ? nameIn.getAttribute("data-named-price") : nameIn.getAttribute("data-price")) + " sats";
     });
@@ -165,6 +174,7 @@
       inv.hidden = false;
       btn.hidden = true;
       nameIn.hidden = true;
+      terms.hidden = true;
     }
     function poll(id) {
       S.watch(endpoint, id, {
@@ -189,7 +199,7 @@
             S.remember(key, null);
             status.textContent = "";
             errEl.textContent = kind === "expired" ? "That invoice expired." : "The wallet never answered about that invoice; give the relay owner the order and payment hash below.";
-            if (kind === "expired") { inv.hidden = true; btn.hidden = false; nameIn.hidden = false; }
+            if (kind === "expired") { inv.hidden = true; btn.hidden = false; nameIn.hidden = false; terms.hidden = false; }
           }
         }
       });

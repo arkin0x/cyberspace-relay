@@ -247,6 +247,10 @@
   .status.stop::before { animation: none; background: var(--mute); box-shadow: none; }
   @keyframes blink { 50% { opacity: 0.25; } }
   .meta { margin: 12px 0 0; font-size: 0.78rem; color: var(--mute); overflow-wrap: anywhere; }
+  /* Beside every pay button (owner, 2026-11-23): one small dim line, no checkbox. */
+  .payterms { margin: 8px 0 0; font-size: 0.78rem; color: var(--mute); }
+  .payterms a { color: var(--dim); text-underline-offset: 2px; }
+  .payterms a:hover { color: var(--text); }
   .done-head { display: flex; gap: 14px; align-items: center; margin-bottom: 10px; }
   .done-head svg { flex: none; width: 52px; height: 52px; }
   .tick { stroke-dasharray: 40; stroke-dashoffset: 40; animation: draw 0.7s 0.2s ease-out forwards; }
@@ -512,6 +516,7 @@
               <div class="total"><span>Total</span><span class="amount"><span id="price">{{.Price}}</span> <small>sats</small></span></div>
               <button class="btn primary" id="create-btn" type="submit" disabled>Create speakeasy for {{.Price}} sats</button>
             </div>
+            <p class="payterms">Payments are final. <a href="https://www.onosendai.tech/terms" target="_blank" rel="noopener noreferrer">TERMS</a></p>
             <p class="err" id="create-err" role="alert"></p>
           </div>
         </div>
@@ -525,6 +530,7 @@
             <p class="inv-sum" id="inv-sum"></p>
             <div class="addr"><code id="bolt11"></code><button type="button" class="quiet" data-copy="bolt11">Copy</button></div>
             <a class="btn primary" id="open-wallet" href="#">Open in wallet</a>
+            <p class="payterms" id="inv-terms">Payments are final. <a href="https://www.onosendai.tech/terms" target="_blank" rel="noopener noreferrer">TERMS</a></p>
             <p class="status" id="pay-status" role="status">Waiting for payment</p>
             <p class="help" id="inv-expiry"></p>
             <p class="err" id="inv-err" role="alert"></p>
@@ -834,6 +840,7 @@
     $("bolt11").textContent = o.invoice;
     $("open-wallet").href = "lightning:" + o.invoice;
     $("open-wallet").hidden = o.status !== "pending";
+    $("inv-terms").hidden = o.status !== "pending"; // with the pay button: nothing left to pay, no terms line
     $("order-id").textContent = o.id;
     $("payment-hash").textContent = o.payment_hash;
     var sum = $("inv-sum"); sum.textContent = "";

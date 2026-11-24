@@ -132,3 +132,44 @@ func TestPublicURLIsChecked(t *testing.T) {
 		}
 	}
 }
+
+// TestPayTermsBesideEveryPayButton: the region page's Create Speakeasy and
+// the landing page's checkout each carry the one small line beside their pay
+// buttons (owner, 2026-11-23): payments are final, and the Terms open in a
+// new tab. Twice on each page: under the create button and under Open in
+// wallet.
+func TestPayTermsBesideEveryPayButton(t *testing.T) {
+	const line = `Payments are final. <a href="https://www.onosendai.tech/terms" target="_blank" rel="noopener noreferrer">TERMS</a></p>`
+	r, err := regiongate.ParseRegionPath("/abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewPage(r, []uint{0, 1}, nil, "")
+	p.Create = &PageCreate{Sats: 1000, NameSats: 7000, Endpoint: "/api/speakeasies/orders"}
+	var buf bytes.Buffer
+	if err := RenderPage(&buf, p); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(buf.String(), line); n != 2 {
+		t.Errorf("region page: %d pay terms lines, want 2 (create, invoice)", n)
+	}
+	// The create button's line is hidden with the button once the invoice is up, and back with it.
+	for _, want := range []string{`<p class="payterms" id="create-terms">`, "terms.hidden = true;", "terms.hidden = false;", "[hidden] { display: none !important; }"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("region page lacks %q", want)
+		}
+	}
+	l := Landing{RelayName: "R", Host: "relay.example", PublicURL: "wss://relay.example", Sats: 1000, NameSats: 7000,
+		Payments: PaymentsOpen, Endpoint: "/api/speakeasies/orders", CheckEndpoint: "/api/speakeasies/check", BothPlanes: true}
+	buf.Reset()
+	if err := RenderLanding(&buf, l); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(buf.String(), line); n != 2 {
+		t.Errorf("landing: %d pay terms lines, want 2 (create, invoice)", n)
+	}
+	// The invoice's line goes with Open in wallet when nothing is left to pay.
+	if !strings.Contains(buf.String(), `$("inv-terms").hidden = o.status !== "pending";`) {
+		t.Error("landing: the invoice's terms line does not follow Open in wallet")
+	}
+}
