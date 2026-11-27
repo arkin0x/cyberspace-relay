@@ -389,6 +389,10 @@ func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 	}
 
 	recordContent, recordTags := largestBlueprintRecord(t, "<", "&")
+	// DECK-0010 §10: a relay SHOULD cap the kind no lower than 106,496 B.
+	if c, ok := caps[33343]; ok && c < 106_496 {
+		t.Errorf("kind 33343 is capped at %d B, under the 106,496 B DECK-0010 §10 asks for", c)
+	}
 
 	for _, c := range []struct {
 		kind    int
@@ -452,10 +456,11 @@ func largestBlueprintRecord(t *testing.T, free, alt string) (string, [][]string)
 		Prize  prize          `json:"prize"`
 	}{
 		Size: map[string]int{"x": 16, "y": 16, "z": 16},
-		// Empty, hidden and the highest block id, in the order §5.3 asks.
-		Pal: []any{0, nil, 65535},
+		// Hidden and the highest block id, in the order §5.3 asks; every
+		// entry used (§5.4 check 6).
+		Pal: []any{nil, 65535},
 		// The shortest runs for a box of hidden cells with one revealed corner.
-		Cells:  []int{2, 1, -4094},
+		Cells:  []int{1, 0, -4094},
 		Lock:   "location",
 		Height: 85,
 		Prize: prize{
@@ -494,11 +499,14 @@ func largestBlueprintRecord(t *testing.T, free, alt string) (string, [][]string)
 // it alone, so it reaches the relay only sealed inside a bag, a chest or a
 // sealed entry (33335). The card embeds its creator's signed record whole, so
 // it is bigger than the record: every quote and backslash inside the record
-// is escaped once more. The largest card, carrying the largest record with
-// its free text made of quotes (each one doubles), sealed in a sealed entry
+// is escaped once more. The largest card a JSON.stringify writer makes,
+// carrying the largest record with its free text made of quotes (each one
+// doubles), sealed in a sealed entry
 // as CYBERSPACE_V2.md §7.6 says (AES-GCM, base64), stays under ONOSENDAI's
 // 240,000 B bag guard and under this relay's max_event_size, as grain
-// measures it.
+// measures it. (A writer that spells JSON with extra escapes, or adds a tag
+// readers ignore full of backslashes, can make a bigger card; any card is at
+// most about twice its record, under max_event_size either way.)
 func TestOnosendaiBlueprintCardsFitInsideBags(t *testing.T) {
 	cfg := onosendaiConfig(t)
 	content, tags := largestBlueprintRecord(t, `"`, `"`)
