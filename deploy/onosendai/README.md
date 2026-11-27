@@ -19,6 +19,7 @@ region.)
 | 3350, 3352 | Seeds (DECK-0008): DNA and tends (a seed, 3351, rides inside bags and is refused alone) | anyone |
 | 33338 | Cyberspace TV upgrade announcements (ONOSENDAI): one per version; TV plays only the announcer key's | anyone |
 | 33339 | TERRAIN block layers (DECK-0009): one per builder key per chunk, replaced by `d`, sealed with the chunk's region key; at most 256 KB | anyone |
+| 33343 | blueprint records (DECK-0010): one per creator per lookup, replaced by `d`, the prize sealed with the key the arrangement makes; at most 104 KB. The card (3343) rides inside bags and chests and is refused alone | anyone |
 | 1738, 35129 | glyphbyte: cairns (one URL, found by event-id prefix) and the glyphbyte napplet | anyone |
 | 0, 5, 7, 1111, 10000, 10002, 10050, 10063 | profiles, deletions, reactions, comments, mute lists, relay lists, DM inbox lists, Blossom lists | anyone |
 | 30078 | NIP-78 app data: ONOSENDAI's private record of your own hides (`d` = `onosendai/hides/<i>`), sealed to your own key | anyone |
@@ -29,6 +30,8 @@ region.)
 Refused on purpose: 1, 4 (legacy NIP-04 DMs), 9735 and 30023. NIP-17 DMs
 (1059) are accepted since 2026-11-13; see below.
 3351, a Seeds seed, is refused too: it is an item inside a bag (DECK-0008 §8.2).
+So is 3343, a blueprint card: it rides inside a bag, room bag, chest or sealed
+entry and is never published on its own (DECK-0010 §7.1, §10).
 RULED (arkinox, 2026-11-05): "ALL cyberspace and onosendai events must be
 accepted by our relay. Add them. But, we never want to accept bare kind 1s."
 A kind a Cyberspace or ONOSENDAI client starts publishing is added to

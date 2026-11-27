@@ -83,7 +83,8 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 	// gift wraps, 1059, added 2026-11-13 for NIP-17 DMs; NIP-78 app data,
 	// 30078, added 2026-11-15 for ONOSENDAI's hidden list record; Nostr
 	// Connect, 24133, added 2026-11-19 for ONOSENDAI's signer app login;
-	// TERRAIN block layers, 33339, added 2026-11-24, DECK-0009).
+	// TERRAIN block layers, 33339, added 2026-11-24, DECK-0009; blueprint
+	// records, 33343, added 2026-11-27, DECK-0010).
 	published := map[int]string{
 		3333:  "movement chain",
 		33330: "hidden bags",
@@ -112,6 +113,7 @@ func TestOnosendaiWhitelistAcceptsWhatClientsPublish(t *testing.T) {
 		30078: "ONOSENDAI hidden list record (NIP-78)",
 		24133: "Nostr Connect (NIP-46)",
 		33339: "TERRAIN block layers",
+		33343: "blueprint records",
 	}
 	for k, what := range published {
 		if !kinds[k] {
@@ -146,6 +148,12 @@ func TestOnosendaiWhitelistRefusesWhatTheOwnerRefused(t *testing.T) {
 	// own (DECK-0008 §8.2): its C is the place the bag protects.
 	if kinds[3351] {
 		t.Error("whitelist.yml accepts kind 3351; a seed only rides inside a bag")
+	}
+	// A blueprint card rides inside a bag, room bag, chest or sealed entry and
+	// MUST NOT be published on its own (DECK-0010 §7.1, §10): its C says where
+	// it stands.
+	if kinds[3343] {
+		t.Error("whitelist.yml accepts kind 3343; a blueprint card only rides inside a bag or chest")
 	}
 }
 
@@ -239,6 +247,12 @@ func grainEventSize(t *testing.T, kind int, content string, tags [][]string) int
 // U+2028/U+2029, which NIP-01 does not; the inputs here hold none.)
 func nip01EventSize(t *testing.T, kind int, content string, tags [][]string) int {
 	t.Helper()
+	return len(nip01Event(t, kind, content, tags))
+}
+
+// nip01Event is the event nip01EventSize measures, as bytes.
+func nip01Event(t *testing.T, kind int, content string, tags [][]string) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -254,7 +268,7 @@ func nip01EventSize(t *testing.T, kind int, content string, tags [][]string) int
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }
 
 // TestOnosendaiCapsFitAnUpperBound builds an upper bound for the Seeds DNA
@@ -276,6 +290,14 @@ func nip01EventSize(t *testing.T, kind int, content string, tags [][]string) int
 // (ONOSENDAI's content is empty): past about 4,428 escaped characters in a
 // 240,000 B layer grain measures more than the cap, and no cap can cover a
 // layer made mostly of them (it would pass max_event_size too).
+// For a blueprint record (33343), the bound is the largest record DECK-0010
+// lets a writer sign (§5.2: 98,304 bytes serialized as NIP-01 does), with
+// every tag §5.1 allows, a 16 by 16 by 16 location-locked sheet, a render
+// prize with all four views at 16,384 characters, and every free-text field
+// at its longest in characters json.Marshal escapes: title and prize name 64,
+// alt and prize text 280. The sealed prize fills the rest. The DECK bounds
+// nothing else that can hold such a character, except fields and tags a
+// reader ignores; the cap is the 106,496 B §10 asks for.
 func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 	cfg := onosendaiConfig(t)
 	limiter := NewSizeLimiter(cfg.RateLimit.MaxEventSize)
@@ -366,6 +388,8 @@ func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 		t.Fatalf("the TERRAIN layer bound is %d B as NIP-01 serializes it, not the DECK's 240,000", n)
 	}
 
+	recordContent, recordTags := largestBlueprintRecord(t, "<", "&")
+
 	for _, c := range []struct {
 		kind    int
 		what    string
@@ -376,6 +400,7 @@ func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 		{3352, "tend", placeholder, tendTags},
 		{33338, "TV upgrade announcement", words, announceTags},
 		{33339, "TERRAIN block layer", layerContent, layerTags},
+		{33343, "blueprint record", recordContent, recordTags},
 	} {
 		limit, ok := caps[c.kind]
 		if !ok {
@@ -398,6 +423,111 @@ func TestOnosendaiCapsFitAnUpperBound(t *testing.T) {
 		}
 		t.Logf("kind %d (%s): upper bound %d B, cap %d B", c.kind, c.what, size, limit)
 	}
+}
+
+// largestBlueprintRecord is the content and tags of the largest blueprint
+// record DECK-0010 lets a writer sign: exactly 98,304 bytes (less up to 3, a
+// base64 quad) as NIP-01 serializes it (§5.2). Every tag §5.1 allows is
+// there; the sheet (§5.3) is a full 16 by 16 by 16 box, location-locked at
+// the greatest height, with a render prize of all four views at 16,384
+// characters each. Every free-text field is at its longest, made of free
+// (title, prize text, prize name) or alt (alt), and the sealed prize fills the
+// rest with base64.
+func largestBlueprintRecord(t *testing.T, free, alt string) (string, [][]string) {
+	t.Helper()
+	view := "data:image/png;base64,"
+	view += strings.Repeat("A", 16_384-len(view))
+	type prize struct {
+		Reveal string            `json:"reveal"`
+		Text   string            `json:"text"`
+		Name   string            `json:"name"`
+		Views  map[string]string `json:"views"`
+	}
+	sheet := struct {
+		Size   map[string]int `json:"size"`
+		Pal    []any          `json:"pal"`
+		Cells  []int          `json:"cells"`
+		Lock   string         `json:"lock"`
+		Height int            `json:"height"`
+		Prize  prize          `json:"prize"`
+	}{
+		Size: map[string]int{"x": 16, "y": 16, "z": 16},
+		// Empty, hidden and the highest block id, in the order §5.3 asks.
+		Pal: []any{0, nil, 65535},
+		// The shortest runs for a box of hidden cells with one revealed corner.
+		Cells:  []int{2, 1, -4094},
+		Lock:   "location",
+		Height: 85,
+		Prize: prize{
+			Reveal: "render",
+			Text:   strings.Repeat(free, 280),
+			Name:   strings.Repeat(free, 64),
+			Views:  map[string]string{"x": view, "y": view, "z": view, "iso": view},
+		},
+	}
+	// The sheet as a JavaScript writer serializes it: <, > and & as they are.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(sheet); err != nil {
+		t.Fatal(err)
+	}
+	content := string(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
+	tags := [][]string{
+		{"d", strings.Repeat("a", 64)},
+		{"version", "1"},
+		{"encrypted", "aes-256-gcm", "", "cyberspace:blueprint"},
+		{"title", strings.Repeat(free, 64)},
+		{"alt", strings.Repeat(alt, 280)},
+		{"no-broadcast"},
+	}
+	room := 98_304 - nip01EventSize(t, 33343, content, tags)
+	tags[2][2] = strings.Repeat("A", room/4*4)
+	if n := nip01EventSize(t, 33343, content, tags); n > 98_304 || n < 98_304-3 {
+		t.Fatalf("the blueprint record bound is %d B as NIP-01 serializes it, not the DECK's 98,304", n)
+	}
+	return content, tags
+}
+
+// TestOnosendaiBlueprintCardsFitInsideBags checks the card side of DECK-0010
+// (§7.1): a card (3343) is never published on its own, and this relay refuses
+// it alone, so it reaches the relay only sealed inside a bag, a chest or a
+// sealed entry (33335). The card embeds its creator's signed record whole, so
+// it is bigger than the record: every quote and backslash inside the record
+// is escaped once more. The largest card, carrying the largest record with
+// its free text made of quotes (each one doubles), sealed in a sealed entry
+// as CYBERSPACE_V2.md §7.6 says (AES-GCM, base64), stays under ONOSENDAI's
+// 240,000 B bag guard and under this relay's max_event_size, as grain
+// measures it.
+func TestOnosendaiBlueprintCardsFitInsideBags(t *testing.T) {
+	cfg := onosendaiConfig(t)
+	content, tags := largestBlueprintRecord(t, `"`, `"`)
+	record := nip01Event(t, 33343, content, tags)
+	cardTags := [][]string{
+		{"C", strings.Repeat("a", 64)},
+		{"-"},
+		{"d", strings.Repeat("a", 64)},
+	}
+	card := nip01Event(t, 3343, string(record), cardTags)
+	if grain := grainEventSize(t, 3343, string(record), cardTags); grain > cfg.RateLimit.MaxEventSize {
+		t.Errorf("the largest card is %d B as grain measures it, over max_event_size %d", grain, cfg.RateLimit.MaxEventSize)
+	}
+	// A sealed entry: a fresh d, a fixed preview, and the card sealed with
+	// the bag's key: nonce || ciphertext || tag in base64.
+	payload := base64.StdEncoding.EncodeToString(make([]byte, 12+len(card)+16))
+	entryTags := [][]string{
+		{"d", strings.Repeat("a", 32)},
+		{"alt", "Something is hidden in cyberspace: https://onosendai.tech"},
+		{"encrypted", "aes-256-gcm", payload, "cyberspace:region"},
+	}
+	entry := nip01EventSize(t, 33335, "", entryTags)
+	if entry > 240_000 {
+		t.Errorf("a sealed entry holding the largest card is %d B, over the 240,000 B bag guard", entry)
+	}
+	if grain := grainEventSize(t, 33335, "", entryTags); grain > cfg.RateLimit.MaxEventSize {
+		t.Errorf("a sealed entry holding the largest card is %d B as grain measures it, over max_event_size %d", grain, cfg.RateLimit.MaxEventSize)
+	}
+	t.Logf("largest record %d B, its card %d B, a sealed entry holding the card %d B (NIP-01)", len(record), len(card), entry)
 }
 
 type measuredLoad struct {
