@@ -8,7 +8,10 @@
 # at its line below. glyphbyte's link-less notes are kind 1, so they
 # are refused here too; its cairns (1738) are accepted. 3351 (a Seeds seed)
 # is refused: it is an item inside a bag, never published on its own (DECK-0008
-# §8.2), like the other bag items (3330, 3340, 3341, 1063).
+# §8.2), like the other bag items (3330, 3340, 3341, 1063). 3343 (a
+# blueprint card) is refused for the same reason: it rides inside a bag, room
+# bag, chest or sealed entry and MUST NOT be published on its own (DECK-0010
+# §7.1, §10); its C says where it stands.
 # config/deploy_onosendai_test.go checks this file.
 
 pubkey_whitelist:
@@ -49,6 +52,12 @@ kind_whitelist:
     # per 32^3 chunk, d = the chunk's lookup id, the plaintext sealed with the
     # chunk's region key. Size cap in config.yml.
     - "33339"  # TERRAIN block layers, DECK-0009, addressable, sealed
+    # Blueprints (DECK-0010 §5, owner go 2026-11-27): the public record of a
+    # blueprint, signed by its creator, d = the lookup (SHA-256 of the key the
+    # arrangement makes), the prize sealed with that key. Smashers read it by
+    # #d with no AUTH (§10). Its card, 3343, only rides inside bags and chests
+    # and stays refused (header). Size cap in config.yml.
+    - "33343"  # blueprint records, DECK-0010, addressable
     # glyphbyte (owner, 2026-11-08: "make sure the onosendai relay accepts glyphbyte event kinds")
     - "1738"   # cairns: one URL, found by event-id prefix (glyphbyte spec/CAIRN.md)
     - "35129"  # the glyphbyte napplet (its HTML lives on Blossom; the event points to it)

@@ -209,6 +209,19 @@ rate_limit:
     # 240,000 B layer with up to 4,428 such characters still fits.
     - kind: 33339 # TERRAIN block layer
       max_size: 262144 # 256KB - the DECK's 240,000 B limit plus room for json.Marshal escapes
+    # Blueprint records (DECK-0010 §5.2, §10), 2026-11-27: a writer never signs
+    # a record whose NIP-01 serialization is over 98,304 bytes, and readers
+    # drop longer ones. The sheet's pictures (at most 4 views of 16,384
+    # characters) and the sealed prize are base64; the rest is hex, digits and
+    # fixed words, except four free-text fields where grain's json.Marshal
+    # turns each <, > or & into six bytes: title (64 characters), alt (280
+    # bytes), prize text (280 characters) and prize name (64 characters), at
+    # most 3,440 B more. §10 asks a relay to cap the kind no lower than
+    # 106,496 B: 8,192 B over 98,304, and the largest record measures at most
+    # 101,744 B. The card (3343) is not whitelisted: it rides sealed inside
+    # bags and chests, under max_event_size.
+    - kind: 33343 # blueprint record
+      max_size: 106496 # 104KB - the DECK's 98,304 B limit plus room for json.Marshal escapes (DECK-0010 §10)
     # ONOSENDAI hidden list record (NIP-78), 2026-11-15: a shard's sealed text is
     # at most 40,000 base64 characters before NIP-44 (about 54,700 after), plus
     # the wrapped record key (some 200 B), a d and a client tag. Base64 has no
